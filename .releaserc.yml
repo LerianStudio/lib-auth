@@ -1,0 +1,23 @@
+plugins:
+  [
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "preset": "conventionalcommits",
+        "parserOpts":
+          { "noteKeywords": ["BREAKING CHANGE", "BREAKING CHANGES"] },
+        "releaseRules":
+          [
+            { "type": "feat", "release": "minor" },
+            { "type": "fix", "release": "patch" },
+            { "type": "refactor", "release": "patch" },
+            { "type": "docs", "release": "patch" },
+            { "breaking": true, "release": "major" },
+          ],
+      },
+    ],
+    "@semantic-release/release-notes-generator",
+    "@semantic-release/github",
+  ]
+branches:
+  - "main"
