@@ -19,7 +19,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
-          app-name: 'ectare-aws-lib'
+          app-name: 'auth-sdk'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-node@v3

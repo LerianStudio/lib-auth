@@ -44,7 +44,7 @@ func (auth *AuthClient) Authorize(resource string, action string) fiber.Handler 
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Println("Failed to make request: %v", err)
+			log.Printf("Failed to make request: %v", err)
 
 			return err
 		}
@@ -53,7 +53,7 @@ func (auth *AuthClient) Authorize(resource string, action string) fiber.Handler 
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			fmt.Println("Failed to read response body: %v", err)
+			log.Printf("Failed to read response body: %v", err)
 			return err
 		}
 
@@ -61,7 +61,7 @@ func (auth *AuthClient) Authorize(resource string, action string) fiber.Handler 
 
 		err = json.Unmarshal(body, &response)
 		if err != nil {
-			log.Println("Failed to unmarshal response: %v", err)
+			log.Printf("Failed to unmarshal response: %v", err)
 			return err
 		}
 
