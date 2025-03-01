@@ -31,7 +31,7 @@ func (auth *AuthClient) Authorize(sub string, resource string, action string) fi
 				"sub": "%s",
 				"resource": "%s",
 				"action": "%s"
-			}`, sub, resource, action))
+			}`, fmt.Sprintf("%s-role", sub), resource, action))
 
 		req, err := http.NewRequest(http.MethodPost, auth.AuthAddress+"/v1/authorize", reqBody)
 		if err != nil {
