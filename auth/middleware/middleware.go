@@ -21,16 +21,17 @@ type AuthResponse struct {
 	Timestamp  time.Time `json:"timestamp"`
 }
 
-func (auth *AuthClient) Authorize(resource string, action string) fiber.Handler {
+func (auth *AuthClient) Authorize(sub string, resource string, action string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		client := http.Client{}
 
 		accessToken := c.Get("Authorization")
 
 		reqBody := strings.NewReader(fmt.Sprintf(`{
+				"sub": "%s",
 				"resource": "%s",
 				"action": "%s"
-			}`, resource, action))
+			}`, sub, resource, action))
 
 		req, err := http.NewRequest(http.MethodPost, auth.AuthAddress+"/v1/authorize", reqBody)
 		if err != nil {
@@ -39,7 +40,6 @@ func (auth *AuthClient) Authorize(resource string, action string) fiber.Handler 
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		// req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 		req.Header.Set("Authorization", accessToken)
 
 		resp, err := client.Do(req)
