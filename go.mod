@@ -18,7 +18,3 @@ require (
 	github.com/valyala/tcplisten v1.0.0 // indirect
 	golang.org/x/sys v0.13.0 // indirect
 )
-
-//replace github.com/E-ctare/ectare-database-lib => ../leriand/ectare-database-lib
-
-// Uncomment the line above if you want to use a local version of the common-go module
