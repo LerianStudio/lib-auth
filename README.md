@@ -1,4 +1,4 @@
-# Authorization Middleware for Lerian Apps
+# Authorization Middleware for Lerian Services
 
 Este repositório contém um middleware de autorização para o framework Fiber em Go, que permite verificar se um usuário está autorizado a realizar uma ação específica em um recurso. O middleware envia uma solicitação POST para um serviço de autorização, passando os detalhes do usuário, recurso e ação desejada.
 
