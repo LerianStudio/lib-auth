@@ -21,6 +21,17 @@ type AuthResponse struct {
 	Timestamp  time.Time `json:"timestamp"`
 }
 
+// Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
+// It sends a POST request to the authorization service with the subject, resource, and action details.
+// If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
+//
+// Parameters:
+//   - sub: The subject (user) identifier.
+//   - resource: The resource the user wants to access.
+//   - action: The action the user wants to perform on the resource.
+//
+// Returns:
+//   - fiber.Handler: A Fiber handler function that performs the authorization check.
 func (auth *AuthClient) Authorize(sub string, resource string, action string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		client := http.Client{}
