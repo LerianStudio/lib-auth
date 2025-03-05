@@ -1,3 +1,10 @@
+## [1.3.0](https://github.com/LerianStudio/auth-lib/compare/v1.2.0...v1.3.0) (2025-03-05)
+
+
+### Bug Fixes
+
+* removing ': ([f593906](https://github.com/LerianStudio/auth-lib/commit/f59390685bfde1d12cad3d141f82954fea4e8823))
+
 ## [1.2.0](https://github.com/LerianStudio/auth-sdk/compare/v1.1.0...v1.2.0) (2025-03-05)
 
 
