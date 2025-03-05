@@ -25,7 +25,7 @@ authClient := &middleware.AuthClient{
 ```go
 f := fiber.New()
 
-f.Get("/v1/users", auth.Authorize("midaz", "onboarding", "get"), userHandler.GetUsers)
+f.Get("/v1/onboarding", auth.Authorize("midaz", "onboarding", "get"), userHandler.GetUsers)
 })
 
 app.Listen(":8080")
