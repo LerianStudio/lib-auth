@@ -5,7 +5,7 @@ Este repositório contém um middleware de autorização para o framework Fiber 
 ## 📦 Instalação
 
 ```bash
-go get -u github.com/gofiber/fiber/v2
+go get -u github.com/LerianStudio/auth-sdk
 ```
 
 ## 🚀 Como Usar
@@ -23,12 +23,9 @@ authClient := &middleware.AuthClient{
 ### 2. Use o middleware na sua aplicação Fiber:
 
 ```go
-app := fiber.New()
+f := fiber.New()
 
-app.Use(authClient.Authorize("user123", "resource_name", "read"))
-
-app.Get("/resource", func(c *fiber.Ctx) error {
-    return c.SendString("Você tem permissão para acessar este recurso!")
+f.Get("/v1/users", auth.Authorize("midaz", "users", "get"), userHandler.GetUsers)
 })
 
 app.Listen(":8080")
