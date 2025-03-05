@@ -1,51 +1,63 @@
-# Authorization Middleware for Lerian Services
+# Authorization Middleware
 
-Este repositório contém um middleware de autorização para o framework Fiber em Go, que permite verificar se um usuário está autorizado a realizar uma ação específica em um recurso. O middleware envia uma solicitação POST para um serviço de autorização, passando os detalhes do usuário, recurso e ação desejada.
+This repository contains an authorization middleware for the Fiber framework in Go, allowing you to check if a user is authorized to perform a specific action on a resource. The middleware sends a POST request to an authorization service, passing the user's details, resource, and desired action.
 
-## 📦 Instalação
+Repository: [auth-sdk](https://github.com/LerianStudio/auth-sdk)
+
+## 📦 Installation
 
 ```bash
 go get -u github.com/LerianStudio/auth-sdk
 ```
 
-## 🚀 Como Usar
+## 🚀 How to Use
 
-### 1. Crie uma instância do `AuthClient`:
+### 1. Create an `AuthClient` instance:
+
+In your `config.go` file, configure the environment variables for the Auth Service:
 
 ```go
-import "github.com/LerianStudio/auth-sdk/auth/middleware"
-
-authClient := &middleware.AuthClient{
-    AuthAddress: "http://localhost:3000",
+type Config struct {
+    AuthAddress             string `env:"AUTH_ADDRESS"`
+    AuthEnabled             bool   `env:"AUTH_ENABLED"`
 }
 ```
 
-### 2. Use o middleware na sua aplicação Fiber:
-
 ```go
-f := fiber.New()
+import "github.com/LerianStudio/auth-sdk/middleware"
 
-f.Get("/v1/onboarding", auth.Authorize("midaz", "onboarding", "get"), userHandler.GetUsers)
-})
-
-app.Listen(":8080")
+authClient := &middleware.AuthClient{
+    AuthAddress: "http://localhost:4000",
+    AuthEnabled: true,
+}
 ```
 
-## 🛠️ Funcionamento
+### 2. Use the middleware in your Fiber application:
 
-A função `Authorize`:
+```go
+f := fiber.New(fiber.Config{
+    DisableStartupMessage: true,
+})
 
-- Recebe o `sub` (usuário), `resource` (recurso) e `action` (ação desejada).
-- Envia uma solicitação POST ao serviço de autorização.
-- Verifica se a resposta indica que o usuário está autorizado.
-- Permite o fluxo normal da aplicação ou retorna um erro 403 (Forbidden).
+// Applications routes
+f.Get("/v1/applications", auth.Authorize("identity", "applications", "get"), applicationHandler.GetApplications)
+```
 
-## 📥 Exemplo de Requisição
+## 🛠️ How It Works
+
+The `Authorize` function:
+
+* Receives the `sub` (user), `resource` (resource), and `action` (desired action).
+* Sends a POST request to the authorization service.
+* Checks if the response indicates that the user is authorized.
+* Allows the normal application flow or returns a 403 (Forbidden) error.
+
+## 📥 Example Request to Auth
 
 ```http
 POST /v1/authorize
 Content-Type: application/json
-Authorization: Bearer seu_token_aqui
+Authorization: Bearer your_token_here
 
 {
     "sub": "lerian/user123_role",
@@ -54,9 +66,9 @@ Authorization: Bearer seu_token_aqui
 }
 ```
 
-## 📡 Serviço de Autorização Esperado
+## 📡 Expected Authorization Service Response
 
-O serviço de autorização deve retornar uma resposta JSON no seguinte formato:
+The authorization service should return a JSON response in the following format:
 
 ```json
 {
@@ -65,24 +77,15 @@ O serviço de autorização deve retornar uma resposta JSON no seguinte formato:
 }
 ```
 
-## 🚧 Tratamento de Erros
+## 🚧 Error Handling
 
-O middleware captura e exibe logs para os seguintes tipos de erro:
+The middleware captures and logs the following error types:
 
-- Falha ao criar a requisição
-- Falha ao enviar a requisição
-- Falha ao ler o corpo da resposta
-- Falha ao desserializar o JSON de resposta
+* Failure to create the request
+* Failure to send the request
+* Failure to read the response body
+* Failure to deserialize the response JSON
 
-## 📄 Licença
+## 📧 Contact
 
-Este projeto está licenciado sob a licença MIT. Sinta-se à vontade para usá-lo e modificá-lo conforme necessário.
-
-## 🧑‍💻 Contribuindo
-
-Contribuições são bem-vindas! Abra uma issue ou um pull request para sugestões e melhorias.
-
-## 📧 Contato
-
-Para dúvidas ou suporte, entre em contato pelo e-mail: contato\@lerian.studio.
-
+For questions or support, contact us at: [contato@lerian.studio](mailto:contato@lerian.studio).
