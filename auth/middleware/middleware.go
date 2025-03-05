@@ -36,7 +36,7 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 		accessToken := c.Get("Authorization")
 
 		if authorized, err := auth.checkAuthorization(sub, resource, action, accessToken); err != nil {
-			log.Printf("Authorization request failed: %v", err)
+			log.Printf("Authorization request failed %v", err)
 			return c.Status(http.StatusInternalServerError).SendString("Internal Server Error")
 		} else if authorized {
 			return c.Next()
