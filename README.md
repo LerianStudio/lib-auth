@@ -7,7 +7,7 @@ Repository: [auth-sdk](https://github.com/LerianStudio/auth-sdk)
 ## 📦 Installation
 
 ```bash
-go get -u github.com/gofiber/fiber/v2
+go get -u github.com/LerianStudio/auth-sdk
 ```
 
 ## 🚀 How to Use
