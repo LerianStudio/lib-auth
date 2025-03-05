@@ -1,3 +1,10 @@
+## [1.4.0](https://github.com/LerianStudio/auth-lib/compare/v1.3.0...v1.4.0) (2025-03-05)
+
+
+### Bug Fixes
+
+* rename module ([d68a627](https://github.com/LerianStudio/auth-lib/commit/d68a627590ebda62496dd604658c66edc074ed29))
+
 ## [1.3.0](https://github.com/LerianStudio/auth-lib/compare/v1.2.0...v1.3.0) (2025-03-05)
 
 
