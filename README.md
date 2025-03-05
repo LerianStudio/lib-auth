@@ -13,7 +13,7 @@ go get -u github.com/LerianStudio/auth-sdk
 ### 1. Crie uma instância do `AuthClient`:
 
 ```go
-import "github.com/suapasta/middleware"
+import "github.com/LerianStudio/auth-sdk/auth/middleware"
 
 authClient := &middleware.AuthClient{
     AuthAddress: "http://localhost:3000",
