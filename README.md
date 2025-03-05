@@ -1,4 +1,4 @@
-# Authorization Middleware for Fiber
+# Authorization Middleware
 
 This repository contains an authorization middleware for the Fiber framework in Go, allowing you to check if a user is authorized to perform a specific action on a resource. The middleware sends a POST request to an authorization service, passing the user's details, resource, and desired action.
 
