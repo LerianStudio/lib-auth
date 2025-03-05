@@ -1,3 +1,10 @@
+## [1.2.0](https://github.com/LerianStudio/auth-sdk/compare/v1.1.0...v1.2.0) (2025-03-05)
+
+
+### Features
+
+* adding gihub actions to create release ([ec21956](https://github.com/LerianStudio/auth-sdk/commit/ec21956ae8679916140810b9c25f566d8359969f))
+
 ## [1.1.0](https://github.com/LerianStudio/auth-sdk/compare/v1.0.10...v1.1.0) (2025-03-05)
 
 
