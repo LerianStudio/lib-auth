@@ -51,7 +51,7 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 	client := &http.Client{}
 
 	requestBody, err := json.Marshal(map[string]string{
-		"sub":      fmt.Sprintf("lerian/%s_role", sub),
+		"sub":      fmt.Sprintf("lerian/%s-editor-role", sub),
 		"resource": resource,
 		"action":   action,
 	})
