@@ -1,3 +1,10 @@
+## [1.5.0](https://github.com/LerianStudio/auth-lib/compare/v1.4.0...v1.5.0) (2025-03-06)
+
+
+### Bug Fixes
+
+* fixing the conditional ([715941b](https://github.com/LerianStudio/auth-lib/commit/715941b347324d06ed5933cbd0108d85fd59db56))
+
 ## [1.4.0](https://github.com/LerianStudio/auth-lib/compare/v1.3.0...v1.4.0) (2025-03-05)
 
 
