@@ -26,13 +26,13 @@ type AuthResponse struct {
 // It sends a POST request to the authorization service with the subject, resource, and action details.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
-	if !auth.AuthEnabled && auth.AuthAddress == "" {
-		return func(c *fiber.Ctx) error {
-			return c.Next()
-		}
-	}
 
 	return func(c *fiber.Ctx) error {
+
+		if !auth.AuthEnabled || auth.AuthAddress == "" {
+			return c.Next()
+		}
+
 		accessToken := c.Get("Authorization")
 
 		if authorized, err := auth.checkAuthorization(sub, resource, action, accessToken); err != nil {
