@@ -22,6 +22,11 @@ type AuthResponse struct {
 	Timestamp  time.Time `json:"timestamp"`
 }
 
+const (
+	// AuthAddress is the address of the authorization service.
+	typeOfSub string = "normal-user"
+)
+
 // Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
 // It sends a POST request to the authorization service with the subject, resource, and action details.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.

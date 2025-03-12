@@ -1,13 +1,13 @@
-# Authorization Middleware
+# Lib Auth Middleware
 
 This repository contains an authorization middleware for the Fiber framework in Go, allowing you to check if a user is authorized to perform a specific action on a resource. The middleware sends a POST request to an authorization service, passing the user's details, resource, and desired action.
 
-Repository: [auth-sdk](https://github.com/LerianStudio/auth-sdk)
+Repository: [lib-auth](https://github.com/LerianStudio/lib-auth)
 
 ## 📦 Installation
 
 ```bash
-go get -u github.com/LerianStudio/auth-sdk
+go get -u github.com/LerianStudio/lib-auth
 ```
 
 ## 🚀 How to Use
@@ -24,7 +24,7 @@ type Config struct {
 ```
 
 ```go
-import "github.com/LerianStudio/auth-sdk/middleware"
+import "github.com/LerianStudio/lib-auth/middleware"
 
 authClient := &middleware.AuthClient{
     AuthAddress: "http://localhost:4000",

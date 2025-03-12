@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment:
       name: create_release
-    name: Create Release to SDK
+    name: Create Release to Lib
     steps:
       - uses: actions/create-github-app-token@v1
         id: app-token
