@@ -1,4 +1,4 @@
-module github.com/LerianStudio/auth-lib
+module github.com/LerianStudio/lib-auth
 
 go 1.21
 
