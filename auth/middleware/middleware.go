@@ -34,6 +34,7 @@ func NewAuthClient(address string, enabled bool) *AuthClient {
 	resp, err := client.Get(healthURL)
 	if err != nil {
 		log.Printf("Failed to connect to %s: %v\n", pluginName, err)
+
 		return &AuthClient{Address: address, Enabled: enabled}
 	}
 
@@ -42,6 +43,7 @@ func NewAuthClient(address string, enabled bool) *AuthClient {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Failed to read response body: %v\n", err)
+
 		return &AuthClient{Address: address, Enabled: enabled}
 	}
 
