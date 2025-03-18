@@ -13,8 +13,8 @@ import (
 )
 
 type AuthClient struct {
-	AuthAddress string
-	AuthEnabled bool
+	Address string
+	Enabled bool
 }
 
 type AuthResponse struct {
@@ -23,18 +23,48 @@ type AuthResponse struct {
 }
 
 const (
-	// AuthAddress is the address of the authorization service.
-	typeOfSub string = "normal-user"
+	typeOfSub  string = "normal-user"
+	pluginName string = "plugin-auth"
 )
+
+func NewAuthClient(address string, enabled bool) *AuthClient {
+	client := &http.Client{}
+	healthURL := fmt.Sprintf("%s/health", address)
+
+	resp, err := client.Get(healthURL)
+	if err != nil {
+		log.Printf("Failed to connect to %s: %v\n", pluginName, err)
+
+		return &AuthClient{Address: address, Enabled: enabled}
+	}
+
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Failed to read response body: %v\n", err)
+
+		return &AuthClient{Address: address, Enabled: enabled}
+	}
+
+	if string(body) == "healthy" {
+		log.Printf("Connected to %s ✅ \n", pluginName)
+	} else {
+		log.Printf("Failed to connect to %s: %s\n", pluginName, string(body))
+	}
+
+	return &AuthClient{
+		Address: address,
+		Enabled: enabled,
+	}
+}
 
 // Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
 // It sends a POST request to the authorization service with the subject, resource, and action details.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
-
 	return func(c *fiber.Ctx) error {
-
-		if !auth.AuthEnabled || auth.AuthAddress == "" {
+		if !auth.Enabled || auth.Address == "" {
 			return c.Next()
 		}
 
@@ -65,7 +95,7 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 		return false, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.AuthAddress), bytes.NewBuffer(requestBody))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.Address), bytes.NewBuffer(requestBody))
 	if err != nil {
 		return false, fmt.Errorf("failed to create request: %w", err)
 	}
