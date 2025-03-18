@@ -1,3 +1,17 @@
+## [1.7.0](https://github.com/LerianStudio/lib-auth/compare/v1.6.0...v1.7.0) (2025-03-18)
+
+
+### Features
+
+* add health check call when instantiating a new auth client ([16eee94](https://github.com/LerianStudio/lib-auth/commit/16eee940ef49b891759849b0d1d81bf9adf09c4f))
+
+
+### Bug Fixes
+
+* fix only one cuddle assignment allowed ([753d652](https://github.com/LerianStudio/lib-auth/commit/753d652b64dbb21c003cb322822f13333f02e1d1))
+* fix only one cuddle assignment allowed ([0307fb9](https://github.com/LerianStudio/lib-auth/commit/0307fb95279e3071cabd9b874dd7dfd0f669815f))
+* remove extra empty line, lint issue ([6975ed5](https://github.com/LerianStudio/lib-auth/commit/6975ed57380c1a6e20b7f296bdd9aa231961899c))
+
 ## [1.7.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.6.0...v1.7.0-beta.1) (2025-03-18)
 
 
