@@ -60,7 +60,6 @@ func NewAuthClient(address string, enabled bool) *AuthClient {
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-
 		if !auth.Enabled || auth.Address == "" {
 			return c.Next()
 		}
