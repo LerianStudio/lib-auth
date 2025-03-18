@@ -30,11 +30,13 @@ const (
 func NewAuthClient(address string, enabled bool) *AuthClient {
 	client := &http.Client{}
 	healthURL := fmt.Sprintf("%s/health", address)
+
 	resp, err := client.Get(healthURL)
 	if err != nil {
 		log.Printf("Failed to connect to %s: %v\n", pluginName, err)
 		return &AuthClient{Address: address, Enabled: enabled}
 	}
+
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
