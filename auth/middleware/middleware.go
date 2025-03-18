@@ -13,8 +13,8 @@ import (
 )
 
 type AuthClient struct {
-	AuthAddress string
-	AuthEnabled bool
+	Address string
+	Enabled bool
 }
 
 type AuthResponse struct {
@@ -34,7 +34,7 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 
 	return func(c *fiber.Ctx) error {
 
-		if !auth.AuthEnabled || auth.AuthAddress == "" {
+		if !auth.Enabled || auth.Address == "" {
 			return c.Next()
 		}
 
@@ -65,7 +65,7 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 		return false, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.AuthAddress), bytes.NewBuffer(requestBody))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.Address), bytes.NewBuffer(requestBody))
 	if err != nil {
 		return false, fmt.Errorf("failed to create request: %w", err)
 	}

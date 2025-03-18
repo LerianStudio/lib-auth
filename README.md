@@ -12,14 +12,23 @@ go get -u github.com/LerianStudio/lib-auth
 
 ## 🚀 How to Use
 
-### 1. Create an `AuthClient` instance:
+### 1. Set the needed environment variables:
+
+In your environment configuration or `.env` file, set the following environment variables:
+
+```dotenv
+PLUGIN_AUTH_ADDRESS=http://localhost:4000
+PLUGIN_AUTH_ENABLED=true
+```
+
+### 2. Create an `AuthClient` instance:
 
 In your `config.go` file, configure the environment variables for the Auth Service:
 
 ```go
 type Config struct {
-    AuthAddress             string `env:"AUTH_ADDRESS"`
-    AuthEnabled             bool   `env:"AUTH_ENABLED"`
+    Address             string `env:"PLUGIN_AUTH_ADDRESS"`
+    Enabled             bool   `env:"PLUGIN_AUTH_ENABLED"`
 }
 ```
 
@@ -27,8 +36,8 @@ type Config struct {
 import "github.com/LerianStudio/lib-auth/middleware"
 
 authClient := &middleware.AuthClient{
-    AuthAddress: "http://localhost:4000",
-    AuthEnabled: true,
+    Address: "http://localhost:4000",
+	Enabled: true,
 }
 ```
 
