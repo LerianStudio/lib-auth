@@ -21,7 +21,7 @@ PLUGIN_AUTH_ADDRESS=http://localhost:4000
 PLUGIN_AUTH_ENABLED=true
 ```
 
-### 2. Create an `AuthClient` instance:
+### 2. Create a new instance of the middleware:
 
 In your `config.go` file, configure the environment variables for the Auth Service:
 
@@ -35,9 +35,9 @@ type Config struct {
 ```go
 import "github.com/LerianStudio/lib-auth/middleware"
 
-authClient := &middleware.AuthClient{
+authClient := &middleware.NewAuthClient{
     Address: "http://localhost:4000",
-	Enabled: true,
+    Enabled: true,
 }
 ```
 
