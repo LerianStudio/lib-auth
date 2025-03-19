@@ -30,15 +30,14 @@ type Config struct {
     Address             string `env:"PLUGIN_AUTH_ADDRESS"`
     Enabled             bool   `env:"PLUGIN_AUTH_ENABLED"`
 }
+
+cfg := &Config{}
 ```
 
 ```go
 import "github.com/LerianStudio/lib-auth/middleware"
 
-authClient := &middleware.NewAuthClient{
-    Address: "http://localhost:4000",
-    Enabled: true,
-}
+authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled)
 ```
 
 ### 2. Use the middleware in your Fiber application:
