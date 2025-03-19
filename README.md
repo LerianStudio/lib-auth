@@ -37,7 +37,7 @@ cfg := &Config{}
 ```go
 import "github.com/LerianStudio/lib-auth/middleware"
 
-authClient := &middleware.NewAuthClient(cfg.Address, cfg.Enabled)
+authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled)
 ```
 
 ### 2. Use the middleware in your Fiber application:
