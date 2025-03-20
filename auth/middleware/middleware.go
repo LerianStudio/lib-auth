@@ -28,6 +28,13 @@ const (
 )
 
 func NewAuthClient(address string, enabled bool) *AuthClient {
+	if !enabled || address == "" {
+		return &AuthClient{
+			Address: address,
+			Enabled: enabled,
+		}
+	}
+
 	client := &http.Client{}
 	healthURL := fmt.Sprintf("%s/health", address)
 
