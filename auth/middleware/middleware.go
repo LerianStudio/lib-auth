@@ -22,6 +22,15 @@ type AuthResponse struct {
 	Timestamp  time.Time `json:"timestamp"`
 }
 
+type oauth2Token struct {
+	AccessToken  string  `json:"access_token"`
+	IDToken      *string `json:"id_token,omitempty"`
+	TokenType    string  `json:"token_type"`
+	ExpiresIn    int     `json:"expires_in"`
+	RefreshToken string  `json:"refresh_token"`
+	Scope        *string `json:"scope,omitempty"`
+}
+
 const (
 	typeOfSub  string = "normal-user"
 	pluginName string = "plugin-auth"
@@ -127,4 +136,46 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 	}
 
 	return response.Authorized, nil
+}
+
+// GetPluginToken sends a POST request to the authorization service to get a token for the plugin.
+// It takes the client ID and client secret as parameters and returns the access token if the request is successful.
+// If the request fails at any step, an error is returned with a descriptive message.
+func (auth *AuthClient) GetPluginToken(clientID, clientSecret string) (string, error) {
+	client := &http.Client{}
+
+	requestBody, err := json.Marshal(map[string]string{
+		"grant_type":    "client_credentials",
+		"client_id":     clientID,
+		"client_secret": clientSecret,
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request body: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/login/oauth/access_token", auth.Address), bytes.NewBuffer(requestBody))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var response oauth2Token
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	return response.AccessToken, nil
 }
