@@ -138,10 +138,10 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 	return response.Authorized, nil
 }
 
-// GetPluginToken sends a POST request to the authorization service to get a token for the plugin.
+// GetApplicationToken sends a POST request to the authorization service to get a token for the application.
 // It takes the client ID and client secret as parameters and returns the access token if the request is successful.
 // If the request fails at any step, an error is returned with a descriptive message.
-func (auth *AuthClient) GetPluginToken(clientID, clientSecret string) (string, error) {
+func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (string, error) {
 	client := &http.Client{}
 
 	requestBody, err := json.Marshal(map[string]string{
