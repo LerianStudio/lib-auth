@@ -1,3 +1,15 @@
+## [1.8.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.7.0...v1.8.0-beta.1) (2025-03-21)
+
+
+### Features
+
+* add get plugin token func ([6ab9cb3](https://github.com/LerianStudio/lib-auth/commit/6ab9cb3bf0646f2b5a16abad101935ba6931feb1))
+
+
+### Bug Fixes
+
+* add enabled validation before health check ([38bd0f5](https://github.com/LerianStudio/lib-auth/commit/38bd0f5faef0ec181593c2b102ccb0500bbcb38c))
+
 ## [1.7.0](https://github.com/LerianStudio/lib-auth/compare/v1.6.0...v1.7.0) (2025-03-18)
 
 
