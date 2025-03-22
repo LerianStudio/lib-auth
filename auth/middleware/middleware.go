@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -102,29 +103,35 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken string) (bool, error) {
 
 	client := &http.Client{}
-	requestBody := []byte{}
 
 	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
 
-	if token.Claims.(jwt.MapClaims)["type"] == normalUser {
-		sub = token.Claims.(jwt.MapClaims)["sub"].(string)
-		requestBody, err = json.Marshal(map[string]string{
-			"sub":      fmt.Sprintf("lerian/%s", sub),
-			"resource": resource,
-			"action":   action,
-		})
+	if err != nil {
+		return false, err
 	}
 
-	if token.Claims.(jwt.MapClaims)["type"] != normalUser {
-		requestBody, err = json.Marshal(map[string]string{
-			"sub":      fmt.Sprintf("lerian/%s-editor-role", sub),
-			"resource": resource,
-			"action":   action})
-
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return false, errors.New("failed to parse claims")
 	}
+
+	userType, _ := claims["type"].(string)
+
+	if userType != normalUser {
+		sub = fmt.Sprintf("lerian/%s-editor-role", sub)
+	} else {
+		sub, _ = claims["sub"].(string)
+		sub = fmt.Sprintf("lerian/%s", sub)
+	}
+
+	requestBody, err := json.Marshal(map[string]string{
+		"sub":      sub,
+		"resource": resource,
+		"action":   action,
+	})
 
 	if err != nil {
-		return false, fmt.Errorf("failed to marshal request body: %w", err)
+		return false, err
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.Address), bytes.NewBuffer(requestBody))
