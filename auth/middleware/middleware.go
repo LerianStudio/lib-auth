@@ -101,7 +101,6 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 
 // checkAuthorization sends an authorization request to the external service and returns whether the action is authorized.
 func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken string) (bool, error) {
-
 	client := &http.Client{}
 
 	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
