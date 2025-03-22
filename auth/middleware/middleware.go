@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt"
 )
 
 type AuthClient struct {
@@ -32,7 +33,7 @@ type oauth2Token struct {
 }
 
 const (
-	typeOfSub  string = "normal-user"
+	normalUser string = "normal-user"
 	pluginName string = "plugin-auth"
 )
 
@@ -99,13 +100,28 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 
 // checkAuthorization sends an authorization request to the external service and returns whether the action is authorized.
 func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken string) (bool, error) {
-	client := &http.Client{}
 
-	requestBody, err := json.Marshal(map[string]string{
-		"sub":      fmt.Sprintf("lerian/%s-editor-role", sub),
-		"resource": resource,
-		"action":   action,
-	})
+	client := &http.Client{}
+	requestBody := []byte{}
+
+	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
+
+	if token.Claims.(jwt.MapClaims)["type"] == normalUser {
+		sub = token.Claims.(jwt.MapClaims)["sub"].(string)
+		requestBody, err = json.Marshal(map[string]string{
+			"sub":      fmt.Sprintf("lerian/%s", sub),
+			"resource": resource,
+			"action":   action,
+		})
+	}
+
+	if token.Claims.(jwt.MapClaims)["type"] != normalUser {
+		requestBody, err = json.Marshal(map[string]string{
+			"sub":      fmt.Sprintf("lerian/%s-editor-role", sub),
+			"resource": resource,
+			"action":   action})
+
+	}
 
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal request body: %w", err)
