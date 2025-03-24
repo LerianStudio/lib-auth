@@ -156,9 +156,9 @@ func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (stri
 	client := &http.Client{}
 
 	requestBody, err := json.Marshal(map[string]string{
-		"grant_type":    "client_credentials",
-		"client_id":     clientID,
-		"client_secret": clientSecret,
+		"grantType":    "client_credentials",
+		"clientId":     clientID,
+		"clientSecret": clientSecret,
 	})
 
 	if err != nil {
