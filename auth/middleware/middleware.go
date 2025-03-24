@@ -25,11 +25,11 @@ type AuthResponse struct {
 }
 
 type oauth2Token struct {
-	AccessToken  string  `json:"access_token"`
-	IDToken      *string `json:"id_token,omitempty"`
-	TokenType    string  `json:"token_type"`
-	ExpiresIn    int     `json:"expires_in"`
-	RefreshToken string  `json:"refresh_token"`
+	AccessToken  string  `json:"accessToken"`
+	IDToken      *string `json:"idToken,omitempty"`
+	TokenType    string  `json:"tokenType"`
+	ExpiresIn    int     `json:"expiresIn"`
+	RefreshToken string  `json:"refreshToken"`
 	Scope        *string `json:"scope,omitempty"`
 }
 
@@ -49,14 +49,21 @@ func NewAuthClient(address string, enabled bool) *AuthClient {
 	client := &http.Client{}
 	healthURL := fmt.Sprintf("%s/health", address)
 
+	failedToConnectMsg := fmt.Sprintf("Failed to connect to %s: %%v\n", pluginName)
+
 	resp, err := client.Get(healthURL)
 	if err != nil {
-		log.Printf("Failed to connect to %s: %v\n", pluginName, err)
+		log.Printf(failedToConnectMsg, err)
 
 		return &AuthClient{Address: address, Enabled: enabled}
 	}
-
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf(failedToConnectMsg, resp.Status)
+
+		return &AuthClient{Address: address, Enabled: enabled}
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -68,7 +75,7 @@ func NewAuthClient(address string, enabled bool) *AuthClient {
 	if string(body) == "healthy" {
 		log.Printf("Connected to %s ✅ \n", pluginName)
 	} else {
-		log.Printf("Failed to connect to %s: %s\n", pluginName, string(body))
+		log.Printf(failedToConnectMsg, string(body))
 	}
 
 	return &AuthClient{
@@ -147,6 +154,10 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("authorization request failed with status: %s", resp.Status)
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return false, fmt.Errorf("failed to read response body: %w", err)
@@ -167,9 +178,9 @@ func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (stri
 	client := &http.Client{}
 
 	requestBody, err := json.Marshal(map[string]string{
-		"grant_type":    "client_credentials",
-		"client_id":     clientID,
-		"client_secret": clientSecret,
+		"grantType":    "client_credentials",
+		"clientId":     clientID,
+		"clientSecret": clientSecret,
 	})
 
 	if err != nil {
