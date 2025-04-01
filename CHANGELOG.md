@@ -1,3 +1,10 @@
+## [1.10.0](https://github.com/LerianStudio/lib-auth/compare/v1.9.0...v1.10.0) (2025-04-01)
+
+
+### Bug Fixes
+
+* add plugin-auth enabled validation for the get application token func ([0c8bf8d](https://github.com/LerianStudio/lib-auth/commit/0c8bf8d8312f4829993921b47dce1e3637ec7db4))
+
 ## [1.10.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.9.0...v1.10.0-beta.1) (2025-04-01)
 
 
