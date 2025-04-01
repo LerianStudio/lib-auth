@@ -175,6 +175,10 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 // It takes the client ID and client secret as parameters and returns the access token if the request is successful.
 // If the request fails at any step, an error is returned with a descriptive message.
 func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (string, error) {
+	if !auth.Enabled || auth.Address == "" {
+		return "", nil
+	}
+
 	client := &http.Client{}
 
 	requestBody, err := json.Marshal(map[string]string{
