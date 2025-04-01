@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/LerianStudio/lib-commons/commons"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt"
 )
@@ -154,13 +155,14 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("authorization request failed with status: %s", resp.Status)
-	}
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return false, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var respError commons.Response
+	if err := json.Unmarshal(body, &respError); (err == nil && respError.Code != "") || resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to authorize: %s", respError.Message)
 	}
 
 	var response AuthResponse
@@ -207,6 +209,11 @@ func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (stri
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var respError commons.Response
+	if err := json.Unmarshal(body, &respError); (err == nil && respError.Code != "") || resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to get application token: %s", respError.Message)
 	}
 
 	var response oauth2Token
