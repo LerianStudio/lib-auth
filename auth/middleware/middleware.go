@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt"
 )
 
 type AuthClient struct {
@@ -23,16 +25,16 @@ type AuthResponse struct {
 }
 
 type oauth2Token struct {
-	AccessToken  string  `json:"access_token"`
-	IDToken      *string `json:"id_token,omitempty"`
-	TokenType    string  `json:"token_type"`
-	ExpiresIn    int     `json:"expires_in"`
-	RefreshToken string  `json:"refresh_token"`
+	AccessToken  string  `json:"accessToken"`
+	IDToken      *string `json:"idToken,omitempty"`
+	TokenType    string  `json:"tokenType"`
+	ExpiresIn    int     `json:"expiresIn"`
+	RefreshToken string  `json:"refreshToken"`
 	Scope        *string `json:"scope,omitempty"`
 }
 
 const (
-	typeOfSub  string = "normal-user"
+	normalUser string = "normal-user"
 	pluginName string = "plugin-auth"
 )
 
@@ -47,14 +49,21 @@ func NewAuthClient(address string, enabled bool) *AuthClient {
 	client := &http.Client{}
 	healthURL := fmt.Sprintf("%s/health", address)
 
+	failedToConnectMsg := fmt.Sprintf("Failed to connect to %s: %%v\n", pluginName)
+
 	resp, err := client.Get(healthURL)
 	if err != nil {
-		log.Printf("Failed to connect to %s: %v\n", pluginName, err)
+		log.Printf(failedToConnectMsg, err)
 
 		return &AuthClient{Address: address, Enabled: enabled}
 	}
-
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf(failedToConnectMsg, resp.Status)
+
+		return &AuthClient{Address: address, Enabled: enabled}
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -66,7 +75,7 @@ func NewAuthClient(address string, enabled bool) *AuthClient {
 	if string(body) == "healthy" {
 		log.Printf("Connected to %s ✅ \n", pluginName)
 	} else {
-		log.Printf("Failed to connect to %s: %s\n", pluginName, string(body))
+		log.Printf(failedToConnectMsg, string(body))
 	}
 
 	return &AuthClient{
@@ -101,14 +110,34 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken string) (bool, error) {
 	client := &http.Client{}
 
+	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
+
+	if err != nil {
+		return false, err
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return false, errors.New("failed to parse claims")
+	}
+
+	userType, _ := claims["type"].(string)
+
+	if userType != normalUser {
+		sub = fmt.Sprintf("lerian/%s-editor-role", sub)
+	} else {
+		sub, _ = claims["sub"].(string)
+		sub = fmt.Sprintf("lerian/%s", sub)
+	}
+
 	requestBody, err := json.Marshal(map[string]string{
-		"sub":      fmt.Sprintf("lerian/%s-editor-role", sub),
+		"sub":      sub,
 		"resource": resource,
 		"action":   action,
 	})
 
 	if err != nil {
-		return false, fmt.Errorf("failed to marshal request body: %w", err)
+		return false, err
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.Address), bytes.NewBuffer(requestBody))
@@ -124,6 +153,10 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 		return false, fmt.Errorf("failed to make request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("authorization request failed with status: %s", resp.Status)
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -145,9 +178,9 @@ func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (stri
 	client := &http.Client{}
 
 	requestBody, err := json.Marshal(map[string]string{
-		"grant_type":    "client_credentials",
-		"client_id":     clientID,
-		"client_secret": clientSecret,
+		"grantType":    "client_credentials",
+		"clientId":     clientID,
+		"clientSecret": clientSecret,
 	})
 
 	if err != nil {
