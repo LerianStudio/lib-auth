@@ -39,6 +39,9 @@ const (
 	pluginName string = "plugin-auth"
 )
 
+// NewAuthClient creates a new instance of AuthClient.
+// It checks the health of the authorization service if the client is enabled and the address is provided.
+// If the service is healthy, it logs a successful connection message; otherwise, it logs the failure reason.
 func NewAuthClient(address string, enabled bool) *AuthClient {
 	if !enabled || address == "" {
 		return &AuthClient{
@@ -95,6 +98,10 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 		}
 
 		accessToken := c.Get("Authorization")
+
+		if commons.IsNilOrEmpty(&accessToken) {
+			return c.Status(http.StatusBadRequest).SendString("Missing Token")
+		}
 
 		if authorized, err := auth.checkAuthorization(sub, resource, action, accessToken); err != nil {
 			log.Printf("Authorization request failed %v", err)
