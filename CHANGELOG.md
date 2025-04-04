@@ -1,3 +1,10 @@
+## [1.11.0](https://github.com/LerianStudio/lib-auth/compare/v1.10.0...v1.11.0) (2025-04-04)
+
+
+### Bug Fixes
+
+* add missing token error in authorization middleware ([b71fba3](https://github.com/LerianStudio/lib-auth/commit/b71fba38dd514ad60acda0109e9e909a957a913e))
+
 ## [1.11.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.10.0...v1.11.0-beta.1) (2025-04-04)
 
 
