@@ -182,12 +182,12 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 }
 
 func getTokenHeader(c *fiber.Ctx) string {
-	splitToken := strings.Split(c.Get(fiber.HeaderAuthorization), "Bearer")
-	if len(splitToken) == 2 {
-		return strings.TrimSpace(splitToken[1])
+	authHeader := c.Get(fiber.HeaderAuthorization)
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimPrefix(authHeader, "Bearer ")
 	}
 
-	return splitToken[0]
+	return authHeader
 }
 
 // GetApplicationToken sends a POST request to the authorization service to get a token for the application.
