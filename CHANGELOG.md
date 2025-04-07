@@ -1,3 +1,11 @@
+## [1.12.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.11.0...v1.12.0-beta.1) (2025-04-07)
+
+
+### Bug Fixes
+
+* improve get token from header utility func ([3f4e3e6](https://github.com/LerianStudio/lib-auth/commit/3f4e3e68d872f8e4e16435360ef494c3e87e58e2))
+* split bearer from token before parsing token ([5963fc5](https://github.com/LerianStudio/lib-auth/commit/5963fc5408b93c5d03a6419c75521e31526a0558))
+
 ## [1.11.0](https://github.com/LerianStudio/lib-auth/compare/v1.10.0...v1.11.0) (2025-04-04)
 
 
