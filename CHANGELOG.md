@@ -1,3 +1,19 @@
+## [1.13.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.12.0...v1.13.0-beta.1) (2025-04-10)
+
+
+### Features
+
+* add gitignore ([6cf7882](https://github.com/LerianStudio/lib-auth/commit/6cf78824cce67015a69472c53bf157407bb16fb5))
+* improve authorization error responses and add commons logger ([5caa005](https://github.com/LerianStudio/lib-auth/commit/5caa00590281cac4af026c66aca2442410bd7ed9))
+
+
+### Bug Fixes
+
+* add getTokenHeader function again ([33d6f7f](https://github.com/LerianStudio/lib-auth/commit/33d6f7f277a1be82cbd7175f95fb5f9d61984746))
+* add gitignore file ([5c8beb7](https://github.com/LerianStudio/lib-auth/commit/5c8beb71f001bc4afad0a83b5da0348255414d95))
+* remove .idea folder ([484171b](https://github.com/LerianStudio/lib-auth/commit/484171b300782c023995b0ad47d6fc848260a70c))
+* remove gitignore to remove .idea folder ([b10d2f2](https://github.com/LerianStudio/lib-auth/commit/b10d2f2734f103d7b71761f5723da080bf6d8abc))
+
 ## [1.12.0](https://github.com/LerianStudio/lib-auth/compare/v1.11.0...v1.12.0) (2025-04-07)
 
 
