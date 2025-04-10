@@ -1,0 +1,24 @@
+# GoLand IDE-specific files
+.idea/
+.env
+.vscode/
+*.iml
+
+# Go build artifacts
+/bin/
+/out/
+
+# Dependency directories (vendor/)
+vendor/
+
+# Go test binaries
+*.test
+
+# Logs and temporary files
+*.log
+*.tmp
+*.out
+
+# OS-specific files
+.DS_Store
+Thumbs.db
