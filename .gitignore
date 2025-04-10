@@ -1,4 +1,5 @@
 # GoLand IDE-specific files
+.idea/
 .env
 .vscode/
 *.iml
