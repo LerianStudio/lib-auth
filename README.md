@@ -32,23 +32,29 @@ type Config struct {
 }
 
 cfg := &Config{}
+
+logger := zap.InitializeLogger()
 ```
 
 ```go
 import "github.com/LerianStudio/lib-auth/middleware"
 
-authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled)
+authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, logger)
 ```
 
 ### 2. Use the middleware in your Fiber application:
 
 ```go
-f := fiber.New(fiber.Config{
-    DisableStartupMessage: true,
-})
-
-// Applications routes
-f.Get("/v1/applications", auth.Authorize("identity", "applications", "get"), applicationHandler.GetApplications)
+func NewRoutes(auth *authMiddleware.AuthClient, [...]) *fiber.App {
+    f := fiber.New(fiber.Config{
+        DisableStartupMessage: true,
+    })
+    
+    applicationName := os.Getenv("APPLICATION_NAME")
+    
+    // Applications routes
+    f.Get("/v1/applications", auth.Authorize(applicationName, "ledger", "get"), applicationHandler.GetApplications)
+}
 ```
 
 ## 🛠️ How It Works
@@ -68,9 +74,9 @@ Content-Type: application/json
 Authorization: Bearer your_token_here
 
 {
-    "sub": "lerian/user123_role",
-    "resource": "resource_name",
-    "action": "read"
+    "sub":      "lerian/userId",
+    "resource": "resourceName",
+    "action":   "read"
 }
 ```
 
@@ -93,6 +99,7 @@ The middleware captures and logs the following error types:
 * Failure to send the request
 * Failure to read the response body
 * Failure to deserialize the response JSON
+* Errors from the authorization service (e.g., 401 Unauthorized, 403 Forbidden)
 
 ## 📧 Contact
 
