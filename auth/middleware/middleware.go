@@ -143,9 +143,9 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		auth.Logger.Errorf("Failed to parse claims: %v", err)
+		auth.Logger.Errorf("Failed to parse claims: token.Claims is not of type jwt.MapClaims")
 
-		return false, http.StatusInternalServerError, errors.New("failed to parse claims")
+		return false, http.StatusInternalServerError, errors.New("token claims are not in the expected format")
 	}
 
 	userType, _ := claims["type"].(string)
