@@ -39,7 +39,7 @@ logger := zap.InitializeLogger()
 ```go
 import "github.com/LerianStudio/lib-auth/middleware"
 
-authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, logger)
+authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, &logger)
 ```
 
 ### 2. Use the middleware in your Fiber application:
