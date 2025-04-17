@@ -1,3 +1,10 @@
+## [1.14.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.13.0...v1.14.0-beta.1) (2025-04-17)
+
+
+### Bug Fixes
+
+* update error status code response ([8316c23](https://github.com/LerianStudio/lib-auth/commit/8316c230fc8c971134a4c703a1a9d7c1c8a251ce))
+
 ## [1.13.0](https://github.com/LerianStudio/lib-auth/compare/v1.12.0...v1.13.0) (2025-04-10)
 
 
