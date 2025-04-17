@@ -113,7 +113,7 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 		accessToken := getTokenHeader(c)
 
 		if commons.IsNilOrEmpty(&accessToken) {
-			return c.Status(http.StatusBadRequest).SendString("Missing Token")
+			return c.Status(http.StatusUnauthorized).SendString("Missing Token")
 		}
 
 		if authorized, statusCode, err := auth.checkAuthorization(sub, resource, action, accessToken); err != nil {
