@@ -1,3 +1,5 @@
+## [1.14.1-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.14.0...v1.14.1-beta.1) (2025-05-16)
+
 ## [1.14.0](https://github.com/LerianStudio/lib-auth/compare/v1.13.0...v1.14.0) (2025-04-17)
 
 
