@@ -14,7 +14,7 @@ import (
 
 	"github.com/LerianStudio/lib-commons/commons"
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt"
+	jwt "github.com/golang-jwt/jwt/v5"
 )
 
 type AuthClient struct {

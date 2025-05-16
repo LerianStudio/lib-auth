@@ -7,7 +7,7 @@ toolchain go1.23.3
 require (
 	github.com/LerianStudio/lib-commons v1.0.0
 	github.com/gofiber/fiber/v2 v2.52.6
-	github.com/golang-jwt/jwt v3.2.2+incompatible
+	github.com/golang-jwt/jwt/v5 v5.2.2
 )
 
 require github.com/google/uuid v1.6.0 // indirect
