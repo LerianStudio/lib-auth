@@ -2,17 +2,20 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/LerianStudio/lib-commons/commons/log"
-	"github.com/LerianStudio/lib-commons/commons/zap"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/LerianStudio/lib-commons/commons/log"
+	"github.com/LerianStudio/lib-commons/commons/opentelemetry"
+	"github.com/LerianStudio/lib-commons/commons/zap"
+
 	"github.com/LerianStudio/lib-commons/commons"
+	libHTTP "github.com/LerianStudio/lib-commons/commons/net/http"
 	"github.com/gofiber/fiber/v2"
 	jwt "github.com/golang-jwt/jwt/v5"
 )
@@ -106,17 +109,24 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		ctx := opentelemetry.ExtractHTTPContext(c)
+
+		tracer := commons.NewTracerFromContext(ctx)
+
+		ctx, span := tracer.Start(ctx, "lib_auth.authorize")
+		defer span.End()
+
 		if !auth.Enabled || auth.Address == "" {
 			return c.Next()
 		}
 
-		accessToken := getTokenHeader(c)
+		accessToken := libHTTP.ExtractTokenFromHeader(c)
 
 		if commons.IsNilOrEmpty(&accessToken) {
 			return c.Status(http.StatusUnauthorized).SendString("Missing Token")
 		}
 
-		if authorized, statusCode, err := auth.checkAuthorization(sub, resource, action, accessToken); err != nil {
+		if authorized, statusCode, err := auth.checkAuthorization(ctx, sub, resource, action, accessToken); err != nil {
 			var commonsErr commons.Response
 			if errors.As(err, &commonsErr) {
 				return c.Status(statusCode).JSON(commonsErr)
@@ -132,12 +142,19 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 }
 
 // checkAuthorization sends an authorization request to the external service and returns whether the action is authorized.
-func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken string) (bool, int, error) {
+func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, action, accessToken string) (bool, int, error) {
+	tracer := commons.NewTracerFromContext(ctx)
+
+	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
+	defer span.End()
+
 	client := &http.Client{}
 
 	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
 	if err != nil {
 		auth.Logger.Errorf("Failed to parse token: %v", err)
+
+		opentelemetry.HandleSpanError(&span, "Failed to parse token", err)
 
 		return false, http.StatusInternalServerError, err
 	}
@@ -145,6 +162,8 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
 		auth.Logger.Errorf("Failed to parse claims: token.Claims is not of type jwt.MapClaims")
+
+		opentelemetry.HandleSpanError(&span, "Failed to parse claims", err)
 
 		return false, http.StatusInternalServerError, errors.New("token claims are not in the expected format")
 	}
@@ -158,23 +177,38 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 		sub = fmt.Sprintf("lerian/%s", sub)
 	}
 
-	requestBody, err := json.Marshal(map[string]string{
+	requestBody := map[string]string{
 		"sub":      sub,
 		"resource": resource,
 		"action":   action,
-	})
+	}
+
+	err = opentelemetry.SetSpanAttributesFromStruct(&span, "auth_request_body", requestBody)
 	if err != nil {
-		auth.Logger.Errorf("Failed to marshal request body: %v", err)
+		opentelemetry.HandleSpanError(&span, "Failed to convert request body to JSON string", err)
 
 		return false, http.StatusInternalServerError, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.Address), bytes.NewBuffer(requestBody))
+	requestBodyJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		auth.Logger.Errorf("Failed to marshal request body: %v", err)
+
+		opentelemetry.HandleSpanError(&span, "Failed to marshal request body", err)
+
+		return false, http.StatusInternalServerError, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.Address), bytes.NewBuffer(requestBodyJSON))
 	if err != nil {
 		auth.Logger.Errorf("Failed to create request: %v", err)
 
+		opentelemetry.HandleSpanError(&span, "Failed to create request", err)
+
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to create request: %w", err)
 	}
+
+	opentelemetry.InjectHTTPContext(&req.Header, ctx)
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", accessToken)
@@ -182,6 +216,8 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 	resp, err := client.Do(req)
 	if err != nil {
 		auth.Logger.Errorf("Failed to make request: %v", err)
+
+		opentelemetry.HandleSpanError(&span, "Failed to make request", err)
 
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to make request: %w", err)
 	}
@@ -191,6 +227,8 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 	if err != nil {
 		auth.Logger.Errorf("Failed to read response body: %v", err)
 
+		opentelemetry.HandleSpanError(&span, "Failed to read response body", err)
+
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to read response body: %w", err)
 	}
 
@@ -198,11 +236,16 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 	if err := json.Unmarshal(body, &respError); err != nil {
 		auth.Logger.Errorf("Failed to unmarshal auth error response: %v", err)
 
+		opentelemetry.HandleSpanError(&span, "Failed to unmarshal auth error response", err)
+
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to unmarshal auth error response: %w", err)
 	}
 
 	if respError.Code != "" && resp.StatusCode != http.StatusInternalServerError {
 		auth.Logger.Errorf("Authorization request failed: %s", respError.Message)
+
+		errMsg := "authorization request failed"
+		opentelemetry.HandleSpanError(&span, errMsg, errors.New(errMsg))
 
 		return false, resp.StatusCode, respError
 	}
@@ -211,32 +254,28 @@ func (auth *AuthClient) checkAuthorization(sub, resource, action, accessToken st
 	if err := json.Unmarshal(body, &response); err != nil {
 		auth.Logger.Errorf("Failed to unmarshal response: %v", err)
 
+		opentelemetry.HandleSpanError(&span, "Failed to unmarshal response", err)
+
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
 	return response.Authorized, resp.StatusCode, nil
 }
 
-func getTokenHeader(c *fiber.Ctx) string {
-	authHeader := c.Get(fiber.HeaderAuthorization)
-	if authHeader == "" {
-		return ""
-	}
-
-	splitToken := strings.Split(authHeader, " ")
-	if len(splitToken) == 2 {
-		return strings.TrimSpace(splitToken[1])
-	}
-
-	return strings.TrimSpace(splitToken[0])
-}
-
 // GetApplicationToken sends a POST request to the authorization service to get a token for the application.
 // It takes the client ID and client secret as parameters and returns the access token if the request is successful.
 // If the request fails at any step, an error is returned with a descriptive message.
-func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (string, error) {
+func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clientSecret string) (string, error) {
+	tracer := commons.NewTracerFromContext(ctx)
+
+	ctx, span := tracer.Start(ctx, "lib_auth.get_application_token")
+	defer span.End()
+
 	if !auth.Enabled || auth.Address == "" {
-		return "", nil
+		errMsg := "authorization service is not enabled or address is not provided"
+		opentelemetry.HandleSpanError(&span, errMsg, errors.New(errMsg))
+
+		return "", errors.New(errMsg)
 	}
 
 	client := &http.Client{}
@@ -250,6 +289,8 @@ func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (stri
 	if err != nil {
 		auth.Logger.Errorf("Failed to marshal request body: %v", err)
 
+		opentelemetry.HandleSpanError(&span, "Failed to marshal request body", err)
+
 		return "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
@@ -257,14 +298,20 @@ func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (stri
 	if err != nil {
 		auth.Logger.Errorf("Failed to create request: %v", err)
 
+		opentelemetry.HandleSpanError(&span, "Failed to create request", err)
+
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
+
+	opentelemetry.InjectHTTPContext(&req.Header, ctx)
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
 		auth.Logger.Errorf("Failed to make request: %v", err)
+
+		opentelemetry.HandleSpanError(&span, "Failed to make request", err)
 
 		return "", fmt.Errorf("failed to make request: %w", err)
 	}
@@ -274,6 +321,8 @@ func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (stri
 	if err != nil {
 		auth.Logger.Errorf("Failed to read response body: %v", err)
 
+		opentelemetry.HandleSpanError(&span, "Failed to read response body", err)
+
 		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
 
@@ -281,11 +330,15 @@ func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (stri
 	if err := json.Unmarshal(body, &respError); err != nil {
 		auth.Logger.Errorf("Failed to unmarshal auth error response: %v", err)
 
+		opentelemetry.HandleSpanError(&span, "Failed to unmarshal auth error response", err)
+
 		return "", fmt.Errorf("failed to unmarshal auth error response: %w", err)
 	}
 
 	if respError.Code != "" && resp.StatusCode != http.StatusInternalServerError {
 		auth.Logger.Errorf("Failed to get application token: %s", respError.Message)
+
+		opentelemetry.HandleSpanError(&span, "Failed to get application token", nil)
 
 		return "", respError
 	}
@@ -293,6 +346,8 @@ func (auth *AuthClient) GetApplicationToken(clientID, clientSecret string) (stri
 	var response oauth2Token
 	if err := json.Unmarshal(body, &response); err != nil {
 		auth.Logger.Errorf("Failed to unmarshal response: %v", err)
+
+		opentelemetry.HandleSpanError(&span, "Failed to unmarshal response", err)
 
 		return "", fmt.Errorf("failed to unmarshal response: %w", err)
 	}
