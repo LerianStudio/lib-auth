@@ -1,3 +1,10 @@
+## [1.16.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.15.0...v1.16.0-beta.1) (2025-07-28)
+
+
+### Bug Fixes
+
+* Adjusting the function GetApplicationToken to accept when enabled flag is false or auth address is empty. ([01e9608](https://github.com/LerianStudio/lib-auth/commit/01e96080ace8f928b8564b724436b4b46e65e6de))
+
 ## [1.15.0](https://github.com/LerianStudio/lib-auth/compare/v1.14.1...v1.15.0) (2025-07-18)
 
 
