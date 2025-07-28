@@ -272,8 +272,6 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 	defer span.End()
 
 	if !auth.Enabled || auth.Address == "" {
-		auth.Logger.Info("authorization service is not enabled or address is not provided.")
-
 		return "", nil
 	}
 
