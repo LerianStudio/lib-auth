@@ -1,3 +1,10 @@
+## [1.16.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v1.16.0-beta.1...v1.16.0-beta.2) (2025-07-28)
+
+
+### Bug Fixes
+
+* Removing log info where the logger is not initiate. ([21f1367](https://github.com/LerianStudio/lib-auth/commit/21f1367cc64841e1fbf482222f3943cb9217066c))
+
 ## [1.16.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.15.0...v1.16.0-beta.1) (2025-07-28)
 
 
