@@ -113,13 +113,13 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 		ctx := opentelemetry.ExtractHTTPContext(c)
 
 		tracer := commons.NewTracerFromContext(ctx)
-		reqId := commons.NewHeaderIDFromContext(ctx)
+		reqID := commons.NewHeaderIDFromContext(ctx)
 
 		ctx, span := tracer.Start(ctx, "lib_auth.authorize")
 		defer span.End()
 
 		span.SetAttributes(
-			attribute.String("app.request.request_id", reqId),
+			attribute.String("app.request.request_id", reqID),
 		)
 
 		if !auth.Enabled || auth.Address == "" {
@@ -150,13 +150,13 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 // checkAuthorization sends an authorization request to the external service and returns whether the action is authorized.
 func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, action, accessToken string) (bool, int, error) {
 	tracer := commons.NewTracerFromContext(ctx)
-	reqId := commons.NewHeaderIDFromContext(ctx)
+	reqID := commons.NewHeaderIDFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
 	defer span.End()
 
 	span.SetAttributes(
-		attribute.String("request_id", reqId),
+		attribute.String("app.request.request_id", reqID),
 	)
 
 	client := &http.Client{}
@@ -278,13 +278,13 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 // If the request fails at any step, an error is returned with a descriptive message.
 func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clientSecret string) (string, error) {
 	tracer := commons.NewTracerFromContext(ctx)
-	reqId := commons.NewHeaderIDFromContext(ctx)
+	reqID := commons.NewHeaderIDFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.get_application_token")
 	defer span.End()
 
 	span.SetAttributes(
-		attribute.String("app.request.request_id", reqId),
+		attribute.String("app.request.request_id", reqID),
 	)
 
 	if !auth.Enabled || auth.Address == "" {
