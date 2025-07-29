@@ -13,6 +13,7 @@ import (
 	"github.com/LerianStudio/lib-commons/commons/log"
 	"github.com/LerianStudio/lib-commons/commons/opentelemetry"
 	"github.com/LerianStudio/lib-commons/commons/zap"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/LerianStudio/lib-commons/commons"
 	libHTTP "github.com/LerianStudio/lib-commons/commons/net/http"
@@ -112,9 +113,14 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 		ctx := opentelemetry.ExtractHTTPContext(c)
 
 		tracer := commons.NewTracerFromContext(ctx)
+		reqID := commons.NewHeaderIDFromContext(ctx)
 
 		ctx, span := tracer.Start(ctx, "lib_auth.authorize")
 		defer span.End()
+
+		span.SetAttributes(
+			attribute.String("app.request.request_id", reqID),
+		)
 
 		if !auth.Enabled || auth.Address == "" {
 			return c.Next()
@@ -144,9 +150,14 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 // checkAuthorization sends an authorization request to the external service and returns whether the action is authorized.
 func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, action, accessToken string) (bool, int, error) {
 	tracer := commons.NewTracerFromContext(ctx)
+	reqID := commons.NewHeaderIDFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
 	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("app.request.request_id", reqID),
+	)
 
 	client := &http.Client{}
 
@@ -183,7 +194,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 		"action":   action,
 	}
 
-	err = opentelemetry.SetSpanAttributesFromStruct(&span, "auth_request_body", requestBody)
+	err = opentelemetry.SetSpanAttributesFromStructWithObfuscation(&span, "app.request.auth_input", requestBody)
 	if err != nil {
 		opentelemetry.HandleSpanError(&span, "Failed to convert request body to JSON string", err)
 
@@ -267,9 +278,14 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 // If the request fails at any step, an error is returned with a descriptive message.
 func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clientSecret string) (string, error) {
 	tracer := commons.NewTracerFromContext(ctx)
+	reqID := commons.NewHeaderIDFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.get_application_token")
 	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("app.request.request_id", reqID),
+	)
 
 	if !auth.Enabled || auth.Address == "" {
 		return "", nil
@@ -282,13 +298,19 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		"clientId":     clientID,
 		"clientSecret": clientSecret,
 	})
-
 	if err != nil {
 		auth.Logger.Errorf("Failed to marshal request body: %v", err)
 
 		opentelemetry.HandleSpanError(&span, "Failed to marshal request body", err)
 
 		return "", fmt.Errorf("failed to marshal request body: %w", err)
+	}
+
+	err = opentelemetry.SetSpanAttributesFromStructWithObfuscation(&span, "app.request.auth_input", requestBody)
+	if err != nil {
+		opentelemetry.HandleSpanError(&span, "Failed to convert request body to JSON string", err)
+
+		return "", fmt.Errorf("failed to convert request body to JSON string: %w", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/login/oauth/access_token", auth.Address), bytes.NewBuffer(requestBody))
