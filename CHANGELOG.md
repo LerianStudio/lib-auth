@@ -1,3 +1,10 @@
+## [1.16.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v1.16.0-beta.2...v1.16.0-beta.3) (2025-07-29)
+
+
+### Features
+
+* **middleware:** enhance tracing with request ID and auth input attributes ([5aa7a2d](https://github.com/LerianStudio/lib-auth/commit/5aa7a2d5bc8fba588743a6241af7f4a5a71bb788))
+
 ## [1.16.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v1.16.0-beta.1...v1.16.0-beta.2) (2025-07-28)
 
 
