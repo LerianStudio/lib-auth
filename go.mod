@@ -5,7 +5,7 @@ go 1.23.2
 toolchain go1.23.3
 
 require (
-	github.com/LerianStudio/lib-commons v1.19.0-beta.8
+	github.com/LerianStudio/lib-commons/v2 v2.0.0
 	github.com/gofiber/fiber/v2 v2.52.9
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	go.opentelemetry.io/otel v1.37.0
