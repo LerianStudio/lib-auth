@@ -1,3 +1,14 @@
+## [2.0.0](https://github.com/LerianStudio/lib-auth/compare/v1.16.0...v2.0.0) (2025-07-31)
+
+
+### ⚠ BREAKING CHANGES
+
+* import paths will need to change to v2
+
+### Code Refactoring
+
+* update module to v2 ([d3e9278](https://github.com/LerianStudio/lib-auth/commit/d3e927898b486cf9f7ca8a766c854135de565897))
+
 ## [2.0.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.16.0...v2.0.0-beta.1) (2025-07-31)
 
 
