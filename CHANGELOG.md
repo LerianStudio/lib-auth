@@ -1,3 +1,28 @@
+## [1.16.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v1.16.0-beta.4...v1.16.0-beta.5) (2025-07-30)
+
+## [1.16.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v1.16.0-beta.3...v1.16.0-beta.4) (2025-07-30)
+
+## [1.16.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v1.16.0-beta.2...v1.16.0-beta.3) (2025-07-29)
+
+
+### Features
+
+* **middleware:** enhance tracing with request ID and auth input attributes ([5aa7a2d](https://github.com/LerianStudio/lib-auth/commit/5aa7a2d5bc8fba588743a6241af7f4a5a71bb788))
+
+## [1.16.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v1.16.0-beta.1...v1.16.0-beta.2) (2025-07-28)
+
+
+### Bug Fixes
+
+* Removing log info where the logger is not initiate. ([21f1367](https://github.com/LerianStudio/lib-auth/commit/21f1367cc64841e1fbf482222f3943cb9217066c))
+
+## [1.16.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v1.15.0...v1.16.0-beta.1) (2025-07-28)
+
+
+### Bug Fixes
+
+* Adjusting the function GetApplicationToken to accept when enabled flag is false or auth address is empty. ([01e9608](https://github.com/LerianStudio/lib-auth/commit/01e96080ace8f928b8564b724436b4b46e65e6de))
+
 ## [1.15.0](https://github.com/LerianStudio/lib-auth/compare/v1.14.1...v1.15.0) (2025-07-18)
 
 
