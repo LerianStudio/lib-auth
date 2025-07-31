@@ -37,7 +37,7 @@ logger := zap.InitializeLogger()
 ```
 
 ```go
-import "github.com/LerianStudio/lib-auth/middleware"
+import "github.com/LerianStudio/lib-auth/v2/middleware"
 
 authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, &logger)
 ```
