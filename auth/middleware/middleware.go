@@ -174,9 +174,11 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 	if !ok {
 		auth.Logger.Errorf("Failed to parse claims: token.Claims is not of type jwt.MapClaims")
 
+		err := errors.New("token claims are not in the expected format")
+
 		opentelemetry.HandleSpanError(&span, "Failed to parse claims", err)
 
-		return false, http.StatusInternalServerError, errors.New("token claims are not in the expected format")
+		return false, http.StatusInternalServerError, err
 	}
 
 	userType, _ := claims["type"].(string)
@@ -255,8 +257,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 	if respError.Code != "" && resp.StatusCode != http.StatusInternalServerError {
 		auth.Logger.Errorf("Authorization request failed: %s", respError.Message)
 
-		errMsg := "authorization request failed"
-		opentelemetry.HandleSpanError(&span, errMsg, errors.New(errMsg))
+		opentelemetry.HandleSpanError(&span, "Authorization request failed", respError)
 
 		return false, resp.StatusCode, respError
 	}
@@ -293,11 +294,20 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 
 	client := &http.Client{}
 
-	requestBody, err := json.Marshal(map[string]string{
+	requestBody := map[string]string{
 		"grantType":    "client_credentials",
 		"clientId":     clientID,
 		"clientSecret": clientSecret,
-	})
+	}
+
+	err := opentelemetry.SetSpanAttributesFromStructWithObfuscation(&span, "app.request.auth_input", requestBody)
+	if err != nil {
+		opentelemetry.HandleSpanError(&span, "Failed to convert request body to JSON string", err)
+
+		return "", fmt.Errorf("failed to convert request body to JSON string: %w", err)
+	}
+
+	requestBodyJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		auth.Logger.Errorf("Failed to marshal request body: %v", err)
 
@@ -306,14 +316,7 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		return "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	err = opentelemetry.SetSpanAttributesFromStructWithObfuscation(&span, "app.request.auth_input", requestBody)
-	if err != nil {
-		opentelemetry.HandleSpanError(&span, "Failed to convert request body to JSON string", err)
-
-		return "", fmt.Errorf("failed to convert request body to JSON string: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/login/oauth/access_token", auth.Address), bytes.NewBuffer(requestBody))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/login/oauth/access_token", auth.Address), bytes.NewBuffer(requestBodyJSON))
 	if err != nil {
 		auth.Logger.Errorf("Failed to create request: %v", err)
 
@@ -357,7 +360,7 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 	if respError.Code != "" && resp.StatusCode != http.StatusInternalServerError {
 		auth.Logger.Errorf("Failed to get application token: %s", respError.Message)
 
-		opentelemetry.HandleSpanError(&span, "Failed to get application token", nil)
+		opentelemetry.HandleSpanError(&span, "Failed to get application token", respError)
 
 		return "", respError
 	}
