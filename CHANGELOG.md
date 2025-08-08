@@ -1,3 +1,13 @@
+## [2.2.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v2.2.0-beta.1...v2.2.0-beta.2) (2025-08-08)
+
+## [2.2.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.1.0...v2.2.0-beta.1) (2025-08-08)
+
+
+### Bug Fixes
+
+* **middleware:** move early return before span creation to prevent memory leak ([36f9a18](https://github.com/LerianStudio/lib-auth/commit/36f9a18f59641324e14422f7bea04e9eff10e92e))
+* move span.End() before returns and update span attribute names for consistency ([1189118](https://github.com/LerianStudio/lib-auth/commit/1189118b43dc47a3e0a645494a59cc20001eacac))
+
 ## [2.1.0](https://github.com/LerianStudio/lib-auth/compare/v2.0.0...v2.1.0) (2025-08-01)
 
 ## [2.1.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v2.1.0-beta.1...v2.1.0-beta.2) (2025-08-01)
