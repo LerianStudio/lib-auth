@@ -115,17 +115,15 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 		tracer := commons.NewTracerFromContext(ctx)
 		reqID := commons.NewHeaderIDFromContext(ctx)
 
+		if !auth.Enabled || auth.Address == "" {
+			return c.Next()
+		}
+
 		ctx, span := tracer.Start(ctx, "lib_auth.authorize")
 
 		span.SetAttributes(
 			attribute.String("app.request.request_id", reqID),
 		)
-
-		if !auth.Enabled || auth.Address == "" {
-			span.End()
-
-			return c.Next()
-		}
 
 		accessToken := libHTTP.ExtractTokenFromHeader(c)
 
