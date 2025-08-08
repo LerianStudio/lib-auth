@@ -116,32 +116,43 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 		reqID := commons.NewHeaderIDFromContext(ctx)
 
 		ctx, span := tracer.Start(ctx, "lib_auth.authorize")
-		defer span.End()
 
 		span.SetAttributes(
 			attribute.String("app.request.request_id", reqID),
 		)
 
 		if !auth.Enabled || auth.Address == "" {
+			span.End()
+
 			return c.Next()
 		}
 
 		accessToken := libHTTP.ExtractTokenFromHeader(c)
 
 		if commons.IsNilOrEmpty(&accessToken) {
+			span.End()
+
 			return c.Status(http.StatusUnauthorized).SendString("Missing Token")
 		}
 
 		if authorized, statusCode, err := auth.checkAuthorization(ctx, sub, resource, action, accessToken); err != nil {
 			var commonsErr commons.Response
 			if errors.As(err, &commonsErr) {
+				span.End()
+
 				return c.Status(statusCode).JSON(commonsErr)
 			}
 
+			span.End()
+
 			return c.Status(http.StatusInternalServerError).SendString("Internal Server Error")
 		} else if authorized {
+			span.End()
+
 			return c.Next()
 		}
+
+		span.End()
 
 		return c.Status(http.StatusForbidden).SendString("Forbidden")
 	}
@@ -196,7 +207,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 		"action":   action,
 	}
 
-	err = opentelemetry.SetSpanAttributesFromStructWithObfuscation(&span, "app.request.auth_input", requestBody)
+	err = opentelemetry.SetSpanAttributesFromStruct(&span, "app.request.payload", requestBody)
 	if err != nil {
 		opentelemetry.HandleSpanError(&span, "Failed to convert request body to JSON string", err)
 
@@ -300,7 +311,7 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		"clientSecret": clientSecret,
 	}
 
-	err := opentelemetry.SetSpanAttributesFromStructWithObfuscation(&span, "app.request.auth_input", requestBody)
+	err := opentelemetry.SetSpanAttributesFromStruct(&span, "app.request.payload", requestBody)
 	if err != nil {
 		opentelemetry.HandleSpanError(&span, "Failed to convert request body to JSON string", err)
 
