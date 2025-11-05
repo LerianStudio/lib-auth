@@ -7,7 +7,7 @@ Repository: [lib-auth](https://github.com/LerianStudio/lib-auth)
 ## 📦 Installation
 
 ```bash
-go get -u github.com/LerianStudio/lib-auth
+go get -u github.com/LerianStudio/lib-auth/v2
 ```
 
 ## 🚀 How to Use
@@ -37,7 +37,7 @@ logger := zap.InitializeLogger()
 ```
 
 ```go
-import "github.com/LerianStudio/lib-auth/v2/middleware"
+import "github.com/LerianStudio/lib-auth/v2/auth/middleware"
 
 authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, &logger)
 ```
@@ -76,7 +76,7 @@ Authorization: Bearer your_token_here
 {
     "sub":      "lerian/userId",
     "resource": "resourceName",
-    "action":   "read"
+    "action":   "get"
 }
 ```
 
@@ -90,6 +90,39 @@ The authorization service should return a JSON response in the following format:
     "timestamp": "2025-03-03T12:00:00Z"
 }
 ```
+
+## 🔒 gRPC usage
+
+Secure a gRPC server with the unary interceptor using per-method policies. It reuses the same auth service and tracing used by the HTTP middleware.
+
+```go
+import (
+    "context"
+    "google.golang.org/grpc"
+    "github.com/LerianStudio/lib-auth/v2/auth/middleware"
+)
+
+// Create the auth client once (same as HTTP)
+authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, &logger)
+
+// Map full gRPC method names to authorization policies
+policies := middleware.PolicyConfig{
+    MethodPolicies: map[string]middleware.Policy{
+        "/balance.BalanceProto/CreateBalance": {Resource: "balances", Action: "post"},
+    },
+    // Constant subject base, matching HTTP usage (e.g., "midaz")
+    SubResolver: func(ctx context.Context, _ string, _ any) (string, error) { return "midaz", nil },
+}
+
+srv := grpc.NewServer(
+    grpc.UnaryInterceptor(middleware.NewGRPCAuthUnaryPolicy(authClient, policies)),
+)
+```
+
+Notes:
+- Keys in `MethodPolicies` must be full method names in the form `/package.Service/Method`.
+- When `SubResolver` returns an empty string, the subject is derived from token claims.
+ - If you already use multiple interceptors, prefer `grpc.ChainUnaryInterceptor(...)` and include the auth interceptor alongside telemetry/logging.
 
 ## 🚧 Error Handling
 
