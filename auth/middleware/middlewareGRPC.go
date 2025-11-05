@@ -67,8 +67,10 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 		}
 
 		var sub string
+
 		if cfg.SubResolver != nil {
 			var err error
+
 			sub, err = cfg.SubResolver(ctx, info.FullMethod, req)
 			if err != nil {
 				opentelemetry.HandleSpanError(&span, "failed to resolve subject", err)
@@ -162,6 +164,7 @@ func grpcErrorFromHTTP(httpStatus int) error {
 // incoming metadata by key (key is normalized to lower-case). Returns "" when missing.
 func SubFromMetadata(key string) func(ctx context.Context, fullMethod string, req any) (string, error) {
 	key = strings.ToLower(strings.TrimSpace(key))
+
 	return func(ctx context.Context, _ string, _ any) (string, error) {
 		md, ok := metadata.FromIncomingContext(ctx)
 		if !ok {
