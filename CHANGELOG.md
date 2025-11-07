@@ -1,3 +1,10 @@
+## [2.3.0](https://github.com/LerianStudio/lib-auth/compare/v2.2.0...v2.3.0) (2025-11-07)
+
+
+### Features
+
+* add gRPC authorization middleware ([3de624f](https://github.com/LerianStudio/lib-auth/commit/3de624f64b52b286ce40a47589708c80f6edca7e))
+
 ## [2.3.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.2.0...v2.3.0-beta.1) (2025-11-05)
 
 
