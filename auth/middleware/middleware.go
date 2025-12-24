@@ -193,10 +193,21 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 	userType, _ := claims["type"].(string)
 
 	if userType != normalUser {
-		sub = fmt.Sprintf("lerian/%s-editor-role", sub)
+		sub = fmt.Sprintf("admin/%s-editor-role", sub)
 	} else {
+		owner, _ := claims["owner"].(string)
+		if owner == "" {
+			auth.Logger.Errorf("Missing owner claim in token")
+
+			err := errors.New("missing owner claim in token")
+
+			opentelemetry.HandleSpanError(&span, "Missing owner claim in token", err)
+
+			return false, http.StatusUnauthorized, err
+		}
+
 		sub, _ = claims["sub"].(string)
-		sub = fmt.Sprintf("lerian/%s", sub)
+		sub = fmt.Sprintf("%s/%s", owner, sub)
 	}
 
 	requestBody := map[string]string{
