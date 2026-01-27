@@ -75,21 +75,21 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	if err != nil {
 		l.Errorf(failedToConnectMsg, err)
 
-		return &AuthClient{Address: address, Enabled: enabled}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		l.Errorf(failedToConnectMsg, resp.Status)
 
-		return &AuthClient{Address: address, Enabled: enabled}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		l.Errorf("Failed to read response body: %v\n", err)
 
-		return &AuthClient{Address: address, Enabled: enabled}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
 	}
 
 	if string(body) == "healthy" {
