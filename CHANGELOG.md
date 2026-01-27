@@ -1,3 +1,11 @@
+## [2.4.0](https://github.com/LerianStudio/lib-auth/compare/v2.3.0...v2.4.0) (2026-01-27)
+
+
+### Bug Fixes
+
+* prevent logger nil in the healthcheck func ([2688975](https://github.com/LerianStudio/lib-auth/commit/26889750911b6d2a6c40f00ebdefdcc8bd0510fd))
+* prevent panic from nil logger in NewAuthClient ([45b8993](https://github.com/LerianStudio/lib-auth/commit/45b899341fbed68ffc8a72a58ddb190002949b02))
+
 ## [2.4.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.3.0...v2.4.0-beta.1) (2025-12-24)
 
 ## [2.3.0](https://github.com/LerianStudio/lib-auth/compare/v2.2.0...v2.3.0) (2025-11-07)
