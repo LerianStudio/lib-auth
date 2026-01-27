@@ -50,19 +50,6 @@ const (
 // It checks the health of the authorization service if the client is enabled and the address is provided.
 // If the service is healthy, it logs a successful connection message; otherwise, it logs the failure reason.
 func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient {
-	if !enabled || address == "" {
-		return &AuthClient{
-			Address: address,
-			Enabled: enabled,
-			Logger:  nil,
-		}
-	}
-
-	client := &http.Client{}
-	healthURL := fmt.Sprintf("%s/health", address)
-
-	failedToConnectMsg := fmt.Sprintf("Failed to connect to %s: %%v\n", pluginName)
-
 	var l log.Logger
 
 	if logger != nil {
@@ -71,25 +58,38 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		l = zap.InitializeLogger()
 	}
 
+	if !enabled || address == "" {
+		return &AuthClient{
+			Address: address,
+			Enabled: enabled,
+			Logger:  l,
+		}
+	}
+
+	client := &http.Client{}
+	healthURL := fmt.Sprintf("%s/health", address)
+
+	failedToConnectMsg := fmt.Sprintf("Failed to connect to %s: %%v\n", pluginName)
+
 	resp, err := client.Get(healthURL)
 	if err != nil {
 		l.Errorf(failedToConnectMsg, err)
 
-		return &AuthClient{Address: address, Enabled: enabled}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		l.Errorf(failedToConnectMsg, resp.Status)
 
-		return &AuthClient{Address: address, Enabled: enabled}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		l.Errorf("Failed to read response body: %v\n", err)
 
-		return &AuthClient{Address: address, Enabled: enabled}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
 	}
 
 	if string(body) == "healthy" {
@@ -193,10 +193,21 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 	userType, _ := claims["type"].(string)
 
 	if userType != normalUser {
-		sub = fmt.Sprintf("lerian/%s-editor-role", sub)
+		sub = fmt.Sprintf("admin/%s-editor-role", sub)
 	} else {
+		owner, _ := claims["owner"].(string)
+		if owner == "" {
+			auth.Logger.Errorf("Missing owner claim in token")
+
+			err := errors.New("missing owner claim in token")
+
+			opentelemetry.HandleSpanError(&span, "Missing owner claim in token", err)
+
+			return false, http.StatusUnauthorized, err
+		}
+
 		sub, _ = claims["sub"].(string)
-		sub = fmt.Sprintf("lerian/%s", sub)
+		sub = fmt.Sprintf("%s/%s", owner, sub)
 	}
 
 	requestBody := map[string]string{
