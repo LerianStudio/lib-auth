@@ -50,19 +50,6 @@ const (
 // It checks the health of the authorization service if the client is enabled and the address is provided.
 // If the service is healthy, it logs a successful connection message; otherwise, it logs the failure reason.
 func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient {
-	if !enabled || address == "" {
-		return &AuthClient{
-			Address: address,
-			Enabled: enabled,
-			Logger:  nil,
-		}
-	}
-
-	client := &http.Client{}
-	healthURL := fmt.Sprintf("%s/health", address)
-
-	failedToConnectMsg := fmt.Sprintf("Failed to connect to %s: %%v\n", pluginName)
-
 	var l log.Logger
 
 	if logger != nil {
@@ -70,6 +57,19 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	} else {
 		l = zap.InitializeLogger()
 	}
+
+	if !enabled || address == "" {
+		return &AuthClient{
+			Address: address,
+			Enabled: enabled,
+			Logger:  l,
+		}
+	}
+
+	client := &http.Client{}
+	healthURL := fmt.Sprintf("%s/health", address)
+
+	failedToConnectMsg := fmt.Sprintf("Failed to connect to %s: %%v\n", pluginName)
 
 	resp, err := client.Get(healthURL)
 	if err != nil {
