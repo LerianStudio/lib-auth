@@ -1,8 +1,8 @@
 module github.com/LerianStudio/lib-auth/v2
 
-go 1.23.2
+go 1.24.2
 
-toolchain go1.23.3
+toolchain go1.25.6
 
 require (
 	github.com/LerianStudio/lib-commons/v2 v2.2.0
