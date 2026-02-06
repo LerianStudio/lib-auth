@@ -1,137 +1,276 @@
-.PHONY: help build test cover coverage coverage-unit lint format tidy sec setup-git-hooks check-hooks
+# Define the root directory of the project
+LIB_AUTH := $(shell pwd)
 
-# Define common utility functions
+#-------------------------------------------------------
+# Color definitions (ANSI codes)
+#-------------------------------------------------------
+GREEN := \033[32m
+RED := \033[31m
+BOLD := \033[1m
+NC := \033[0m
+
+#-------------------------------------------------------
+# Utility functions
+#-------------------------------------------------------
+
+# Check if a command exists
+define check_command
+	@if ! command -v $(1) >/dev/null 2>&1; then \
+		echo "$(RED)$(BOLD)[error]$(NC) $(1) is not installed."; \
+		echo "Install it with: $(2)"; \
+		exit 1; \
+	fi
+endef
+
+# Print section title
 define print_title
 	@echo ""
 	@echo "------------------------------------------"
-	@echo "   $(1)  "
+	@echo "   📝 $(1)  "
 	@echo "------------------------------------------"
 endef
+
+# Include test targets
+MK_DIR := $(abspath mk)
+include $(MK_DIR)/tests.mk
 
 #-------------------------------------------------------
 # Help Command
 #-------------------------------------------------------
 
+.PHONY: help
 help:
 	@echo ""
-	@echo "lib-auth Commands"
+	@echo ""
+	@echo "Lib-Auth Project Management Commands"
+	@echo ""
 	@echo ""
 	@echo "Core Commands:"
-	@echo "  make help              - Display this help message"
-	@echo "  make build             - Build and verify compilation"
-	@echo "  make test              - Run tests"
-	@echo "  make cover             - Run tests with coverage report"
-	@echo "  make coverage          - Alias for cover"
-	@echo "  make coverage-unit     - Alias for cover"
+	@echo "  make help                        - Display this help message"
+	@echo "  make test                        - Run all tests"
+	@echo "  make build                       - Build all packages"
+	@echo "  make clean                       - Clean all build artifacts"
+	@echo "  make cover                       - Run test coverage"
+	@echo ""
+	@echo ""
+	@echo "Test Suite Commands:"
+	@echo "  make test-unit                   - Run unit tests"
+	@echo "  make test-integration            - Run integration tests with testcontainers (RUN=<test>, LOW_RESOURCE=1)"
+	@echo "  make test-all                    - Run all tests (unit + integration)"
+	@echo ""
+	@echo ""
+	@echo "Coverage Commands:"
+	@echo "  make coverage-unit               - Run unit tests with coverage report (PKG=./path, uses .ignorecoverunit)"
+	@echo "  make coverage-integration        - Run integration tests with coverage report (PKG=./path)"
+	@echo "  make coverage                    - Run all coverage targets (unit + integration)"
+	@echo "  make cover-html                  - Generate HTML coverage reports"
+	@echo ""
+	@echo ""
+	@echo "Test Tooling:"
+	@echo "  make tools                       - Install test tools (gotestsum)"
+	@echo ""
 	@echo ""
 	@echo "Code Quality Commands:"
-	@echo "  make lint              - Run golangci-lint (auto-installs if missing)"
-	@echo "  make format            - Format code with gofmt and goimports"
-	@echo "  make tidy              - Clean dependencies (go mod tidy)"
-	@echo "  make sec               - Run security checks with gosec"
+	@echo "  make lint                        - Run linting on all packages"
+	@echo "  make format                      - Format code in all packages"
+	@echo "  make tidy                        - Clean dependencies"
+	@echo "  make check-tests                 - Verify test coverage for packages"
+	@echo "  make sec                         - Run security checks using gosec"
+	@echo "  make sec SARIF=1                 - Run security checks with SARIF output"
+	@echo ""
 	@echo ""
 	@echo "Git Hook Commands:"
-	@echo "  make setup-git-hooks   - Install and configure git hooks"
-	@echo "  make check-hooks       - Verify git hooks installation status"
+	@echo "  make setup-git-hooks             - Install and configure git hooks"
+	@echo "  make check-hooks                 - Verify git hooks installation status"
+	@echo "  make check-envs                  - Check if github hooks are installed and secret env files are not exposed"
+	@echo ""
+	@echo ""
+	@echo "Release Commands:"
+	@echo "  make goreleaser                  - Create release snapshot with goreleaser"
+	@echo ""
 	@echo ""
 
 #-------------------------------------------------------
 # Core Commands
 #-------------------------------------------------------
 
+
+.PHONY: build
 build:
-	$(call print_title,Building all components)
-	@go build ./...
-	@echo "[ok] Build completed successfully"
+	$(call print_title,Building all packages)
+	$(call check_command,go,"Install Go from https://golang.org/doc/install")
+	go build ./...
+	@echo "$(GREEN)$(BOLD)[ok]$(NC) All packages built successfully$(GREEN) ✔️$(NC)"
 
-test:
-	$(call print_title,Running tests)
-	@go test -v ./...
-	@echo "[ok] Tests completed successfully"
-
-cover:
-	$(call print_title,Generating test coverage report)
-	@go test -coverprofile=coverage.out ./...
-	@go tool cover -html=coverage.out -o coverage.html
-	@echo ""
-	@echo "Coverage Summary:"
-	@echo "----------------------------------------"
-	@go tool cover -func=coverage.out | grep total | awk '{print "Total coverage: " $$3}'
-	@echo "----------------------------------------"
-	@echo "Open coverage.html in your browser to view detailed coverage report"
-	@echo "[ok] Coverage report generated successfully"
-
-coverage: cover
-
-coverage-unit: cover
+.PHONY: clean
+clean:
+	$(call print_title,Cleaning build artifacts)
+	@rm -rf ./bin ./dist ./reports coverage.out coverage.html
+	@go clean -cache -testcache
+	@echo "$(GREEN)$(BOLD)[ok]$(NC) All build artifacts cleaned$(GREEN) ✔️$(NC)"
 
 #-------------------------------------------------------
 # Code Quality Commands
 #-------------------------------------------------------
 
+.PHONY: lint
 lint:
-	$(call print_title,Running linter)
-	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "Installing golangci-lint..."; \
-		go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest; \
+	$(call print_title,Running linters on all packages)
+	$(call check_command,golangci-lint,"go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest")
+	@out=$$(golangci-lint run --fix ./... 2>&1); \
+	out_err=$$?; \
+	echo "$$out"; \
+	if [ $$out_err -ne 0 ]; then \
+		echo -e "\n$(BOLD)$(RED)An error has occurred during the lint process: \n $$out\n"; \
+		exit 1; \
 	fi
-	@golangci-lint run ./...
-	@echo "[ok] Linting completed successfully"
+	@echo "$(GREEN)$(BOLD)[ok]$(NC) Lint checks passed successfully$(GREEN) ✔️$(NC)"
 
+.PHONY: format
 format:
-	$(call print_title,Formatting code)
-	@gofmt -s -w .
+	$(call print_title,Formatting code in all packages)
+	$(call check_command,gofmt,"Install Go from https://golang.org/doc/install")
+	@gofmt -w ./
 	@if command -v goimports >/dev/null 2>&1; then \
 		goimports -w .; \
 	else \
 		echo "goimports not found, skipping import organization"; \
 		echo "Install with: go install golang.org/x/tools/cmd/goimports@latest"; \
 	fi
-	@echo "[ok] Formatting completed successfully"
+	@echo "$(GREEN)$(BOLD)[ok]$(NC) All go files formatted$(GREEN) ✔️$(NC)"
 
-tidy:
-	$(call print_title,Cleaning dependencies)
-	@go mod tidy
-	@echo "[ok] Dependencies cleaned successfully"
-
-sec:
-	$(call print_title,Running security checks)
-	@if ! command -v gosec >/dev/null 2>&1; then \
-		echo "Installing gosec..."; \
-		go install github.com/securego/gosec/v2/cmd/gosec@latest; \
+.PHONY: check-tests
+check-tests:
+	$(call print_title,Verifying test coverage for packages)
+	@if [ -f "./scripts/check-tests.sh" ]; then \
+		sh ./scripts/check-tests.sh; \
+	else \
+		echo "Running basic test coverage check..."; \
+		go test -cover ./...; \
 	fi
-	@gosec ./...
-	@echo "[ok] Security checks completed successfully"
+	@echo "$(GREEN)$(BOLD)[ok]$(NC) Test coverage verification completed$(GREEN) ✔️$(NC)"
 
 #-------------------------------------------------------
 # Git Hook Commands
 #-------------------------------------------------------
 
+.PHONY: setup-git-hooks
 setup-git-hooks:
-	$(call print_title,Installing git hooks)
-	@for hook in .githooks/*; do \
-		hook_name=$$(basename $$hook); \
-		cp "$$hook" ".git/hooks/$$hook_name"; \
-		chmod +x ".git/hooks/$$hook_name"; \
-		echo "Installed $$hook_name"; \
-	done
-	@echo "[ok] Git hooks installed successfully"
-
-check-hooks:
-	$(call print_title,Verifying git hooks installation)
-	@err=0; \
-	for hook in .githooks/*; do \
-		hook_name=$$(basename $$hook); \
-		if [ ! -f ".git/hooks/$$hook_name" ]; then \
-			echo "Git hook $$hook_name is NOT installed"; \
-			err=1; \
-		else \
-			echo "Git hook $$hook_name is installed"; \
-		fi; \
-	done; \
-	if [ $$err -eq 0 ]; then \
-		echo "[ok] All git hooks are properly installed"; \
+	$(call print_title,Installing and configuring git hooks)
+	@if [ -d ".githooks" ]; then \
+		for hook in .githooks/*; do \
+			if [ -f "$$hook" ]; then \
+				hook_name=$$(basename $$hook); \
+				cp "$$hook" ".git/hooks/$$hook_name"; \
+				chmod +x ".git/hooks/$$hook_name"; \
+				echo "Installed $$hook_name"; \
+			fi; \
+		done; \
 	else \
-		echo "[error] Some git hooks are missing. Run 'make setup-git-hooks' to fix."; \
-		exit 1; \
+		echo "No .githooks directory found"; \
 	fi
+	@echo "$(GREEN)$(BOLD)[ok]$(NC) All hooks installed and updated$(GREEN) ✔️$(NC)"
+
+.PHONY: check-hooks
+check-hooks:
+	$(call print_title,Verifying git hooks installation status)
+	@err=0; \
+	if [ -d ".githooks" ]; then \
+		for hook in .githooks/*; do \
+			if [ -f "$$hook" ]; then \
+				hook_name=$$(basename $$hook); \
+				f=".githooks/$$hook_name"; \
+				FILE2=.git/hooks/$$hook_name; \
+				if [ -f "$$FILE2" ]; then \
+					if cmp -s "$$hook" "$$FILE2"; then \
+						echo "$(GREEN)$(BOLD)[ok]$(NC) Hook file $$f installed and updated$(GREEN) ✔️$(NC)"; \
+					else \
+						echo "$(RED)Hook file $$f installed but out-of-date [OUT-OF-DATE] ✗$(NC)"; \
+						err=1; \
+					fi; \
+				else \
+					echo "$(RED)Hook file $$f not installed [NOT INSTALLED] ✗$(NC)"; \
+					err=1; \
+				fi; \
+			fi; \
+		done; \
+	else \
+		echo "No .githooks directory found"; \
+	fi; \
+	if [ $$err -ne 0 ]; then \
+		echo ""; \
+		echo "Run $(BOLD)make setup-git-hooks$(NC) to setup your development environment, then try again."; \
+		echo ""; \
+		exit 1; \
+	else \
+		echo "$(GREEN)$(BOLD)[ok]$(NC) All hooks are properly installed$(GREEN) ✔️$(NC)"; \
+	fi
+
+.PHONY: check-envs
+check-envs:
+	$(call print_title,Checking git hooks and environment files for security issues)
+	$(MAKE) check-hooks
+	@echo "Checking for exposed secrets in environment files..."
+	@if grep -rq "SECRET.*=" --include=".env" .; then \
+		echo "$(RED)Warning: Secrets found in environment files. Make sure these are not committed to the repository.$(NC)"; \
+		exit 1; \
+	else \
+		echo "$(GREEN)No exposed secrets found in environment files$(GREEN) ✔️$(NC)"; \
+	fi
+	@echo "$(GREEN)$(BOLD)[ok]$(NC) Environment check completed$(GREEN) ✔️$(NC)"
+
+#-------------------------------------------------------
+# Development Commands
+#-------------------------------------------------------
+
+.PHONY: tidy
+tidy:
+	$(call print_title,Cleaning dependencies)
+	$(call check_command,go,"Install Go from https://golang.org/doc/install")
+	go mod tidy
+	@echo "$(GREEN)$(BOLD)[ok]$(NC) Dependencies cleaned successfully$(GREEN) ✔️$(NC)"
+
+# SARIF output for GitHub Security tab integration (optional)
+# Usage: make sec SARIF=1
+SARIF ?= 0
+
+.PHONY: sec
+sec:
+	$(call print_title,Running security checks using gosec)
+	@if ! command -v gosec >/dev/null 2>&1; then \
+		echo "Installing gosec..."; \
+		go install github.com/securego/gosec/v2/cmd/gosec@latest; \
+	fi
+	@if find . -name "*.go" -type f -not -path './vendor/*' | grep -q .; then \
+		echo "Running security checks on all packages..."; \
+		if [ "$(SARIF)" = "1" ]; then \
+			echo "Generating SARIF output: gosec-report.sarif"; \
+			if gosec -fmt sarif -out gosec-report.sarif ./...; then \
+				echo "$(GREEN)$(BOLD)[ok]$(NC) SARIF report generated: gosec-report.sarif$(GREEN) ✔️$(NC)"; \
+			else \
+				echo -e "\n$(BOLD)$(RED)Security issues found by gosec. Please address them before proceeding.$(NC)\n"; \
+				echo "SARIF report with details: gosec-report.sarif"; \
+				exit 1; \
+			fi; \
+		else \
+			if gosec ./...; then \
+				echo "$(GREEN)$(BOLD)[ok]$(NC) Security checks completed$(GREEN) ✔️$(NC)"; \
+			else \
+				echo -e "\n$(BOLD)$(RED)Security issues found by gosec. Please address them before proceeding.$(NC)\n"; \
+				exit 1; \
+			fi; \
+		fi; \
+	else \
+		echo "No Go files found, skipping security checks"; \
+	fi
+
+#-------------------------------------------------------
+# Release Commands
+#-------------------------------------------------------
+
+.PHONY: goreleaser
+goreleaser:
+	$(call print_title,Creating release snapshot with goreleaser)
+	$(call check_command,goreleaser,"go install github.com/goreleaser/goreleaser@latest")
+	goreleaser release --snapshot --skip-publish --clean
+	@echo "$(GREEN)$(BOLD)[ok]$(NC) Release snapshot created successfully$(GREEN) ✔️$(NC)"
