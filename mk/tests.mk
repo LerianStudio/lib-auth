@@ -138,7 +138,7 @@ test-integration:
 	  pkgs=$$(go list $(PKG) 2>/dev/null | tr '\n' ' '); \
 	else \
 	  echo "Finding packages with *_integration_test.go files..."; \
-	  dirs=$$(find . -name '*_integration_test.go' -not -path './vendor/*' 2>/dev/null | xargs -n1 dirname 2>/dev/null | sort -u | tr '\n' ' '); \
+	  dirs=$$(find . -name '*_integration_test.go' -not -path './vendor/*' -exec dirname {} \; 2>/dev/null | sort -u | tr '\n' ' '); \
 	  pkgs=$$(if [ -n "$$dirs" ]; then go list $$dirs 2>/dev/null | tr '\n' ' '; fi); \
 	fi; \
 	if [ -z "$$pkgs" ]; then \
@@ -262,7 +262,7 @@ coverage-integration:
 	  pkgs=$$(go list $(PKG) 2>/dev/null | tr '\n' ' '); \
 	else \
 	  echo "Finding packages with *_integration_test.go files..."; \
-	  dirs=$$(find . -name '*_integration_test.go' -not -path './vendor/*' 2>/dev/null | xargs -n1 dirname 2>/dev/null | sort -u | tr '\n' ' '); \
+	  dirs=$$(find . -name '*_integration_test.go' -not -path './vendor/*' -exec dirname {} \; 2>/dev/null | sort -u | tr '\n' ' '); \
 	  pkgs=$$(if [ -n "$$dirs" ]; then go list $$dirs 2>/dev/null | tr '\n' ' '; fi); \
 	fi; \
 	if [ -z "$$pkgs" ]; then \
