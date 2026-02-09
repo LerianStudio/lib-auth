@@ -7,6 +7,7 @@
 # Go build artifacts
 /bin/
 /out/
+/dist/
 
 # Dependency directories (vendor/)
 vendor/
@@ -17,7 +18,17 @@ vendor/
 # Logs and temporary files
 *.log
 *.tmp
-*.out
+
+# Test coverage files
+coverage.out
+coverage.html
+*.coverprofile
+
+# Test reports directory
+/reports/
+
+# Security scan reports
+gosec-report.sarif
 
 # OS-specific files
 .DS_Store
