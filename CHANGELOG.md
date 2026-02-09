@@ -1,3 +1,10 @@
+## [2.5.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.4.1-beta.1...v2.5.0-beta.1) (2026-02-09)
+
+
+### Bug Fixes
+
+* **tests:** use safe find -exec instead of xargs pipeline :bug: ([da45b1a](https://github.com/LerianStudio/lib-auth/commit/da45b1ad9464aaf7925d932cd5af6b50a58562ea))
+
 ## [2.4.1-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.4.0...v2.4.1-beta.1) (2026-02-03)
 
 ## [2.4.0](https://github.com/LerianStudio/lib-auth/compare/v2.3.0...v2.4.0) (2026-01-27)
