@@ -7,8 +7,9 @@ toolchain go1.25.6
 require (
 	github.com/LerianStudio/lib-commons/v2 v2.2.0
 	github.com/gofiber/fiber/v2 v2.52.9
-	github.com/golang-jwt/jwt/v5 v5.3.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	go.opentelemetry.io/otel v1.37.0
+	google.golang.org/grpc v1.74.2
 )
 
 require github.com/google/uuid v1.6.0 // indirect
@@ -57,6 +58,5 @@ require (
 	golang.org/x/text v0.27.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250804133106-a7a43d27e69b // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250804133106-a7a43d27e69b // indirect
-	google.golang.org/grpc v1.74.2 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 )
