@@ -1,3 +1,5 @@
+## [2.5.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.1...v2.5.0-beta.2) (2026-02-20)
+
 ## [2.5.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.4.1-beta.1...v2.5.0-beta.1) (2026-02-09)
 
 
