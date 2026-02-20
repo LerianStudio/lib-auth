@@ -6,7 +6,7 @@ toolchain go1.25.6
 
 require (
 	github.com/LerianStudio/lib-commons/v2 v2.2.0
-	github.com/gofiber/fiber/v2 v2.52.9
+	github.com/gofiber/fiber/v2 v2.52.11
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	go.opentelemetry.io/otel v1.37.0
 	google.golang.org/grpc v1.74.2
