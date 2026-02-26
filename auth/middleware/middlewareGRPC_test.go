@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -555,4 +556,372 @@ func TestNewGRPCAuthUnaryPolicy(t *testing.T) {
 
 	// Prevent compiler from optimizing away the handlerCalled variable
 	_ = handlerCalled
+}
+
+// ---------------------------------------------------------------------------
+// extractTenantClaims
+// ---------------------------------------------------------------------------
+
+func Test_extractTenantClaims(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		tokenString    string
+		wantTenantID   string
+		wantTenantSlug string
+		wantOwner      string
+		wantErr        bool
+	}{
+		{
+			name: "valid_jwt_with_all_tenant_claims",
+			tokenString: createTestJWT(jwt.MapClaims{
+				"tenantId":   "tid-123",
+				"tenantSlug": "acme-corp",
+				"owner":      "owner-456",
+			}),
+			wantTenantID:   "tid-123",
+			wantTenantSlug: "acme-corp",
+			wantOwner:      "owner-456",
+			wantErr:        false,
+		},
+		{
+			name: "jwt_with_only_owner",
+			tokenString: createTestJWT(jwt.MapClaims{
+				"owner": "owner-only",
+			}),
+			wantTenantID:   "",
+			wantTenantSlug: "",
+			wantOwner:      "owner-only",
+			wantErr:        false,
+		},
+		{
+			name: "jwt_with_only_tenantId",
+			tokenString: createTestJWT(jwt.MapClaims{
+				"tenantId": "tid-only",
+			}),
+			wantTenantID:   "tid-only",
+			wantTenantSlug: "",
+			wantOwner:      "",
+			wantErr:        false,
+		},
+		{
+			name:           "invalid_token",
+			tokenString:    "not.a.valid.jwt",
+			wantTenantID:   "",
+			wantTenantSlug: "",
+			wantOwner:      "",
+			wantErr:        true,
+		},
+		{
+			name:           "empty_token",
+			tokenString:    "",
+			wantTenantID:   "",
+			wantTenantSlug: "",
+			wantOwner:      "",
+			wantErr:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tenantID, tenantSlug, owner, err := extractTenantClaims(tt.tokenString)
+
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			assert.Equal(t, tt.wantTenantID, tenantID)
+			assert.Equal(t, tt.wantTenantSlug, tenantSlug)
+			assert.Equal(t, tt.wantOwner, owner)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewGRPCAuthUnaryPolicy - tenant propagation
+// ---------------------------------------------------------------------------
+
+func TestNewGRPCAuthUnaryPolicy_TenantPropagation(t *testing.T) {
+	// Cannot use t.Parallel() because subtests use t.Setenv which modifies process env.
+
+	t.Run("multi_tenant_enabled_propagates_tenant_metadata", func(t *testing.T) {
+		t.Setenv("MULTI_TENANT_ENABLED", "true")
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{
+			Address: server.URL,
+			Enabled: true,
+			Logger:  &testLogger{},
+		}
+
+		token := createTestJWT(jwt.MapClaims{
+			"type":       "normal-user",
+			"owner":      "org-owner",
+			"sub":        "user1",
+			"tenantId":   "tid-100",
+			"tenantSlug": "acme",
+		})
+
+		defaultPol := Policy{Resource: "res", Action: "read"}
+		cfg := PolicyConfig{DefaultPolicy: &defaultPol}
+		interceptor := NewGRPCAuthUnaryPolicy(auth, cfg)
+
+		ctx := metadata.NewIncomingContext(
+			context.Background(),
+			metadata.Pairs("authorization", "Bearer "+token),
+		)
+
+		var capturedCtx context.Context
+
+		handler := func(ctx context.Context, _ any) (any, error) {
+			capturedCtx = ctx
+			return "ok", nil
+		}
+
+		info := &grpc.UnaryServerInfo{FullMethod: "/pkg.Service/DoThing"}
+
+		resp, err := interceptor(ctx, "req", info, handler)
+		require.NoError(t, err)
+		assert.Equal(t, "ok", resp)
+
+		// Verify tenant metadata was propagated
+		md, ok := metadata.FromIncomingContext(capturedCtx)
+		require.True(t, ok)
+		assert.Equal(t, []string{"tid-100"}, md.Get("md-tenant-id"))
+		assert.Equal(t, []string{"acme"}, md.Get("md-tenant-slug"))
+		assert.Equal(t, []string{"org-owner"}, md.Get("md-tenant-owner"))
+	})
+
+	t.Run("multi_tenant_disabled_no_tenant_metadata", func(t *testing.T) {
+		t.Setenv("MULTI_TENANT_ENABLED", "false")
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{
+			Address: server.URL,
+			Enabled: true,
+			Logger:  &testLogger{},
+		}
+
+		token := createTestJWT(jwt.MapClaims{
+			"type":       "normal-user",
+			"owner":      "org-owner",
+			"sub":        "user1",
+			"tenantId":   "tid-100",
+			"tenantSlug": "acme",
+		})
+
+		defaultPol := Policy{Resource: "res", Action: "read"}
+		cfg := PolicyConfig{DefaultPolicy: &defaultPol}
+		interceptor := NewGRPCAuthUnaryPolicy(auth, cfg)
+
+		ctx := metadata.NewIncomingContext(
+			context.Background(),
+			metadata.Pairs("authorization", "Bearer "+token),
+		)
+
+		var capturedCtx context.Context
+
+		handler := func(ctx context.Context, _ any) (any, error) {
+			capturedCtx = ctx
+			return "ok", nil
+		}
+
+		info := &grpc.UnaryServerInfo{FullMethod: "/pkg.Service/DoThing"}
+
+		resp, err := interceptor(ctx, "req", info, handler)
+		require.NoError(t, err)
+		assert.Equal(t, "ok", resp)
+
+		// Verify no tenant metadata was added
+		md, ok := metadata.FromIncomingContext(capturedCtx)
+		require.True(t, ok)
+		assert.Empty(t, md.Get("md-tenant-id"))
+		assert.Empty(t, md.Get("md-tenant-slug"))
+		assert.Empty(t, md.Get("md-tenant-owner"))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// NewGRPCAuthStreamPolicy
+// ---------------------------------------------------------------------------
+
+// fakeServerStream is a minimal grpc.ServerStream for testing.
+type fakeServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (f *fakeServerStream) Context() context.Context {
+	return f.ctx
+}
+
+func TestNewGRPCAuthStreamPolicy(t *testing.T) {
+	// Cannot use t.Parallel() because a subtest uses t.Setenv which modifies process env.
+
+	dummyInfo := &grpc.StreamServerInfo{
+		FullMethod: "/pkg.Service/StreamThing",
+	}
+
+	t.Run("auth_disabled_passes_through", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+
+		handler := func(_ any, _ grpc.ServerStream) error {
+			called = true
+			return nil
+		}
+
+		auth := &AuthClient{Address: "http://localhost:9999", Enabled: false}
+		interceptor := NewGRPCAuthStreamPolicy(auth, PolicyConfig{})
+
+		ss := &fakeServerStream{ctx: context.Background()}
+
+		err := interceptor(nil, ss, dummyInfo, handler)
+		require.NoError(t, err)
+		assert.True(t, called)
+	})
+
+	t.Run("auth_nil_passes_through", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+
+		handler := func(_ any, _ grpc.ServerStream) error {
+			called = true
+			return nil
+		}
+
+		interceptor := NewGRPCAuthStreamPolicy(nil, PolicyConfig{})
+
+		ss := &fakeServerStream{ctx: context.Background()}
+
+		err := interceptor(nil, ss, dummyInfo, handler)
+		require.NoError(t, err)
+		assert.True(t, called)
+	})
+
+	t.Run("missing_token_returns_unauthenticated", func(t *testing.T) {
+		t.Parallel()
+
+		handler := func(_ any, _ grpc.ServerStream) error {
+			return nil
+		}
+
+		auth := &AuthClient{Address: "http://localhost:9999", Enabled: true}
+		interceptor := NewGRPCAuthStreamPolicy(auth, PolicyConfig{})
+
+		// Context without any metadata -> no token
+		ss := &fakeServerStream{ctx: context.Background()}
+
+		err := interceptor(nil, ss, dummyInfo, handler)
+		require.Error(t, err)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unauthenticated, st.Code())
+		assert.Contains(t, st.Message(), "missing token")
+	})
+
+	t.Run("no_policy_for_method_returns_internal", func(t *testing.T) {
+		t.Parallel()
+
+		handler := func(_ any, _ grpc.ServerStream) error {
+			return nil
+		}
+
+		auth := &AuthClient{Address: "http://localhost:9999", Enabled: true}
+		cfg := PolicyConfig{
+			MethodPolicies: map[string]Policy{
+				"/pkg.Service/OtherMethod": {Resource: "other", Action: "read"},
+			},
+			// No DefaultPolicy
+		}
+		interceptor := NewGRPCAuthStreamPolicy(auth, cfg)
+
+		ctx := metadata.NewIncomingContext(
+			context.Background(),
+			metadata.Pairs("authorization", "Bearer valid-token"),
+		)
+		ss := &fakeServerStream{ctx: ctx}
+
+		err := interceptor(nil, ss, dummyInfo, handler)
+		require.Error(t, err)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Internal, st.Code())
+		assert.Contains(t, st.Message(), "internal configuration error")
+	})
+
+	t.Run("multi_tenant_enabled_propagates_tenant_metadata_in_stream", func(t *testing.T) {
+		t.Setenv("MULTI_TENANT_ENABLED", "true")
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{
+			Address: server.URL,
+			Enabled: true,
+			Logger:  &testLogger{},
+		}
+
+		token := createTestJWT(jwt.MapClaims{
+			"type":       "normal-user",
+			"owner":      "stream-owner",
+			"sub":        "user1",
+			"tenantId":   "tid-stream",
+			"tenantSlug": "stream-org",
+		})
+
+		defaultPol := Policy{Resource: "res", Action: "read"}
+		cfg := PolicyConfig{DefaultPolicy: &defaultPol}
+		interceptor := NewGRPCAuthStreamPolicy(auth, cfg)
+
+		ctx := metadata.NewIncomingContext(
+			context.Background(),
+			metadata.Pairs("authorization", "Bearer "+token),
+		)
+		ss := &fakeServerStream{ctx: ctx}
+
+		var capturedStream grpc.ServerStream
+
+		handler := func(_ any, ss grpc.ServerStream) error {
+			capturedStream = ss
+			return nil
+		}
+
+		err := interceptor(nil, ss, dummyInfo, handler)
+		require.NoError(t, err)
+
+		// Verify tenant metadata was propagated via the wrapped stream context
+		md, ok := metadata.FromIncomingContext(capturedStream.Context())
+		require.True(t, ok)
+		assert.Equal(t, []string{"tid-stream"}, md.Get("md-tenant-id"))
+		assert.Equal(t, []string{"stream-org"}, md.Get("md-tenant-slug"))
+		assert.Equal(t, []string{"stream-owner"}, md.Get("md-tenant-owner"))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// wrappedServerStream
+// ---------------------------------------------------------------------------
+
+func TestWrappedServerStream_Context(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.WithValue(context.Background(), struct{}{}, "test-value") //nolint:staticcheck // test-only context key
+	inner := &fakeServerStream{ctx: context.Background()}
+	wrapped := &wrappedServerStream{ServerStream: inner, ctx: ctx}
+
+	assert.Equal(t, ctx, wrapped.Context())
+	assert.NotEqual(t, inner.Context(), wrapped.Context())
 }

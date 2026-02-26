@@ -2,12 +2,15 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/LerianStudio/lib-commons/v2/commons"
 	"github.com/LerianStudio/lib-commons/v2/commons/opentelemetry"
+	jwt "github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -97,6 +100,27 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 			return nil, status.Error(codes.PermissionDenied, "forbidden")
 		}
 
+		// Propagate tenant claims if multi-tenant mode is enabled
+		if os.Getenv("MULTI_TENANT_ENABLED") == "true" {
+			tenantID, tenantSlug, tOwner, _ := extractTenantClaims(token)
+			md, _ := metadata.FromIncomingContext(ctx)
+			md = md.Copy()
+
+			if tenantID != "" {
+				md.Set("md-tenant-id", tenantID)
+			}
+
+			if tenantSlug != "" {
+				md.Set("md-tenant-slug", tenantSlug)
+			}
+
+			if tOwner != "" {
+				md.Set("md-tenant-owner", tOwner)
+			}
+
+			ctx = metadata.NewIncomingContext(ctx, md)
+		}
+
 		return handler(ctx, req)
 	}
 }
@@ -178,4 +202,105 @@ func SubFromMetadata(key string) func(ctx context.Context, fullMethod string, re
 
 		return vals[0], nil
 	}
+}
+
+// extractTenantClaims extracts tenant-related claims from a JWT without signature verification.
+// Returns tenantID, tenantSlug, and owner from the token's custom claims.
+// Used by gRPC interceptors to propagate tenant context to downstream services.
+func extractTenantClaims(tokenString string) (tenantID, tenantSlug, owner string, err error) {
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		return "", "", "", err
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", "", "", errors.New("invalid token claims")
+	}
+
+	tenantID, _ = claims["tenantId"].(string)
+	tenantSlug, _ = claims["tenantSlug"].(string)
+	owner, _ = claims["owner"].(string)
+
+	return tenantID, tenantSlug, owner, nil
+}
+
+// NewGRPCAuthStreamPolicy authorizes streaming RPCs via per-method Policy.
+// Mirrors NewGRPCAuthUnaryPolicy behavior for streaming calls:
+// - Resolves Policy by info.FullMethod; falls back to DefaultPolicy.
+// - Rejects missing tokens with codes.Unauthenticated.
+// - Propagates tenant claims when MULTI_TENANT_ENABLED=true.
+func NewGRPCAuthStreamPolicy(auth *AuthClient, cfg PolicyConfig) grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		if auth == nil || !auth.Enabled || auth.Address == "" {
+			return handler(srv, ss)
+		}
+
+		ctx := ss.Context()
+		token, ok := extractTokenFromMD(ctx)
+
+		if !ok || commons.IsNilOrEmpty(&token) {
+			return status.Error(codes.Unauthenticated, "missing token")
+		}
+
+		pol, found := policyForMethod(cfg, info.FullMethod)
+		if !found {
+			return status.Error(codes.Internal, "internal configuration error")
+		}
+
+		var sub string
+
+		if cfg.SubResolver != nil {
+			var err error
+
+			sub, err = cfg.SubResolver(ctx, info.FullMethod, nil)
+			if err != nil {
+				return status.Error(codes.Internal, "internal configuration error")
+			}
+		}
+
+		authorized, httpStatus, err := auth.checkAuthorization(ctx, sub, pol.Resource, pol.Action, token)
+		if err != nil {
+			return grpcErrorFromHTTP(httpStatus)
+		}
+
+		if !authorized {
+			return status.Error(codes.PermissionDenied, "forbidden")
+		}
+
+		// Propagate tenant claims if multi-tenant mode is enabled
+		if os.Getenv("MULTI_TENANT_ENABLED") == "true" {
+			tenantID, tenantSlug, tOwner, _ := extractTenantClaims(token)
+			md, _ := metadata.FromIncomingContext(ctx)
+			md = md.Copy()
+
+			if tenantID != "" {
+				md.Set("md-tenant-id", tenantID)
+			}
+
+			if tenantSlug != "" {
+				md.Set("md-tenant-slug", tenantSlug)
+			}
+
+			if tOwner != "" {
+				md.Set("md-tenant-owner", tOwner)
+			}
+
+			ctx = metadata.NewIncomingContext(ctx, md)
+			ss = &wrappedServerStream{ServerStream: ss, ctx: ctx}
+		}
+
+		return handler(srv, ss)
+	}
+}
+
+// wrappedServerStream wraps grpc.ServerStream to override Context().
+type wrappedServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+// Context returns the wrapped context.
+func (w *wrappedServerStream) Context() context.Context {
+	return w.ctx
 }
