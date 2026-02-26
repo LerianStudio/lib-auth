@@ -50,8 +50,7 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 		}
 
 		token, ok := extractTokenFromMD(ctx)
-		tracer := commons.NewTracerFromContext(ctx)
-		reqID := commons.NewHeaderIDFromContext(ctx)
+		_, tracer, reqID, _ := commons.NewTrackingFromContext(ctx)
 
 		ctx, span := tracer.Start(ctx, "lib_auth.authorize_grpc_unary_policy")
 		defer span.End()
