@@ -51,11 +51,17 @@ const (
 // If the service is healthy, it logs a successful connection message; otherwise, it logs the failure reason.
 func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient {
 	var l log.Logger
+	var err error
 
 	if logger != nil {
 		l = *logger
 	} else {
-		l = zap.InitializeLogger()
+		l, err = zap.InitializeLoggerWithError()
+		if err != nil {
+			err = fmt.Errorf("failed to initialize logger: %w", err)
+
+			l = &log.NoneLogger{}
+		}
 	}
 
 	if !enabled || address == "" {
