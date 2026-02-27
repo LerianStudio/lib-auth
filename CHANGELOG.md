@@ -1,3 +1,15 @@
+## [2.5.0-beta.6](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.5...v2.5.0-beta.6) (2026-02-27)
+
+
+### Features
+
+* make gRPC interceptor tenant-aware with streaming support ([f4dae96](https://github.com/LerianStudio/lib-auth/commit/f4dae96c438554ca65c8fff5336c45410cb9d67d))
+
+
+### Bug Fixes
+
+* replace deprecated commons API calls ([805aadb](https://github.com/LerianStudio/lib-auth/commit/805aadb8ff2f1a6a8547733eeaf2618220511ee7))
+
 ## [2.5.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.4...v2.5.0-beta.5) (2026-02-20)
 
 ## [2.5.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.3...v2.5.0-beta.4) (2026-02-20)
