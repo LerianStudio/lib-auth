@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/LerianStudio/lib-commons/v2/commons"
-	"github.com/LerianStudio/lib-commons/v2/commons/opentelemetry"
+	"github.com/LerianStudio/lib-commons/v3/commons"
+	"github.com/LerianStudio/lib-commons/v3/commons/opentelemetry"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"

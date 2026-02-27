@@ -1,3 +1,30 @@
+## [2.5.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.4...v2.5.0-beta.5) (2026-02-20)
+
+## [2.5.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.3...v2.5.0-beta.4) (2026-02-20)
+
+## [2.5.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.2...v2.5.0-beta.3) (2026-02-20)
+
+## [2.5.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.1...v2.5.0-beta.2) (2026-02-20)
+
+## [2.5.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.4.1-beta.1...v2.5.0-beta.1) (2026-02-09)
+
+
+### Bug Fixes
+
+* **tests:** use safe find -exec instead of xargs pipeline :bug: ([da45b1a](https://github.com/LerianStudio/lib-auth/commit/da45b1ad9464aaf7925d932cd5af6b50a58562ea))
+
+## [2.4.1-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.4.0...v2.4.1-beta.1) (2026-02-03)
+
+## [2.4.0](https://github.com/LerianStudio/lib-auth/compare/v2.3.0...v2.4.0) (2026-01-27)
+
+
+### Bug Fixes
+
+* prevent logger nil in the healthcheck func ([2688975](https://github.com/LerianStudio/lib-auth/commit/26889750911b6d2a6c40f00ebdefdcc8bd0510fd))
+* prevent panic from nil logger in NewAuthClient ([45b8993](https://github.com/LerianStudio/lib-auth/commit/45b899341fbed68ffc8a72a58ddb190002949b02))
+
+## [2.4.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.3.0...v2.4.0-beta.1) (2025-12-24)
+
 ## [2.3.0](https://github.com/LerianStudio/lib-auth/compare/v2.2.0...v2.3.0) (2025-11-07)
 
 
