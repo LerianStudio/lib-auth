@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/LerianStudio/lib-commons/v3/commons/log"
+	"github.com/LerianStudio/lib-commons/v4/commons/log"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,24 +51,11 @@ func mockAuthServer(t *testing.T, authorized bool, statusCode int) *httptest.Ser
 // testLogger is a minimal log.Logger implementation for tests that discards all output.
 type testLogger struct{}
 
-func (l *testLogger) Info(_ ...any)                                  {}
-func (l *testLogger) Infof(_ string, _ ...any)                       {}
-func (l *testLogger) Infoln(_ ...any)                                {}
-func (l *testLogger) Error(_ ...any)                                 {}
-func (l *testLogger) Errorf(_ string, _ ...any)                      {}
-func (l *testLogger) Errorln(_ ...any)                               {}
-func (l *testLogger) Warn(_ ...any)                                  {}
-func (l *testLogger) Warnf(_ string, _ ...any)                       {}
-func (l *testLogger) Warnln(_ ...any)                                {}
-func (l *testLogger) Debug(_ ...any)                                 {}
-func (l *testLogger) Debugf(_ string, _ ...any)                      {}
-func (l *testLogger) Debugln(_ ...any)                               {}
-func (l *testLogger) Fatal(_ ...any)                                 {}
-func (l *testLogger) Fatalf(_ string, _ ...any)                      {}
-func (l *testLogger) Fatalln(_ ...any)                               {}
-func (l *testLogger) WithFields(_ ...any) log.Logger                 { return l }
-func (l *testLogger) WithDefaultMessageTemplate(_ string) log.Logger { return l }
-func (l *testLogger) Sync() error                                    { return nil }
+func (l *testLogger) Log(_ context.Context, _ log.Level, _ string, _ ...log.Field) {}
+func (l *testLogger) With(_ ...log.Field) log.Logger                               { return l }
+func (l *testLogger) WithGroup(_ string) log.Logger                                { return l }
+func (l *testLogger) Enabled(_ log.Level) bool                                     { return false }
+func (l *testLogger) Sync(_ context.Context) error                                 { return nil }
 
 // ---------------------------------------------------------------------------
 // checkAuthorization - subject construction

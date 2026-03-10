@@ -7,16 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	stdlog "log"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
-	"github.com/LerianStudio/lib-commons/v3/commons/log"
-	"github.com/LerianStudio/lib-commons/v3/commons/opentelemetry"
-	"github.com/LerianStudio/lib-commons/v3/commons/zap"
+	"github.com/LerianStudio/lib-commons/v4/commons/log"
+	"github.com/LerianStudio/lib-commons/v4/commons/opentelemetry"
+	"github.com/LerianStudio/lib-commons/v4/commons/zap"
 	"go.opentelemetry.io/otel/attribute"
 
-	"github.com/LerianStudio/lib-commons/v3/commons"
-	libHTTP "github.com/LerianStudio/lib-commons/v3/commons/net/http"
+	"github.com/LerianStudio/lib-commons/v4/commons"
+	libHTTP "github.com/LerianStudio/lib-commons/v4/commons/net/http"
 	"github.com/gofiber/fiber/v2"
 	jwt "github.com/golang-jwt/jwt/v5"
 )
@@ -46,6 +49,54 @@ const (
 	pluginName string = "plugin-auth"
 )
 
+func logErrorf(ctx context.Context, logger log.Logger, format string, args ...any) {
+	if logger == nil {
+		return
+	}
+
+	logger.Log(ctx, log.LevelError, fmt.Sprintf(format, args...))
+}
+
+func logInfof(ctx context.Context, logger log.Logger, format string, args ...any) {
+	if logger == nil {
+		return
+	}
+
+	logger.Log(ctx, log.LevelInfo, fmt.Sprintf(format, args...))
+}
+
+func initializeDefaultLogger() (log.Logger, error) {
+	envName := strings.ToLower(strings.TrimSpace(os.Getenv("ENV_NAME")))
+
+	environment := zap.EnvironmentLocal
+
+	switch envName {
+	case string(zap.EnvironmentProduction):
+		environment = zap.EnvironmentProduction
+	case string(zap.EnvironmentStaging):
+		environment = zap.EnvironmentStaging
+	case string(zap.EnvironmentUAT):
+		environment = zap.EnvironmentUAT
+	case string(zap.EnvironmentDevelopment), "dev":
+		environment = zap.EnvironmentDevelopment
+	}
+
+	otelLibraryName := strings.TrimSpace(os.Getenv("OTEL_LIBRARY_NAME"))
+	if otelLibraryName == "" {
+		otelLibraryName = "lib-auth"
+	}
+
+	logger, err := zap.New(zap.Config{
+		Environment:     environment,
+		OTelLibraryName: otelLibraryName,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return logger, nil
+}
+
 // NewAuthClient creates a new instance of AuthClient.
 // It checks the health of the authorization service if the client is enabled and the address is provided.
 // If the service is healthy, it logs a successful connection message; otherwise, it logs the failure reason.
@@ -57,11 +108,11 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	if logger != nil {
 		l = *logger
 	} else {
-		l, err = zap.InitializeLoggerWithError()
+		l, err = initializeDefaultLogger()
 		if err != nil {
-			l = &log.NoneLogger{}
+			stdlog.Printf("failed to initialize logger, using NopLogger: %v", err)
 
-			l.Errorf("failed to initialize logger, using NoneLogger: %v\n", err)
+			l = log.NewNop()
 		}
 	}
 
@@ -80,29 +131,29 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 
 	resp, err := client.Get(healthURL)
 	if err != nil {
-		l.Errorf(failedToConnectMsg, err)
+		logErrorf(context.Background(), l, failedToConnectMsg, err)
 
 		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		l.Errorf(failedToConnectMsg, resp.Status)
+		logErrorf(context.Background(), l, failedToConnectMsg, resp.Status)
 
 		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		l.Errorf("Failed to read response body: %v\n", err)
+		logErrorf(context.Background(), l, "Failed to read response body: %v", err)
 
 		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
 	}
 
 	if string(body) == "healthy" {
-		l.Infof("Connected to %s ✅ \n", pluginName)
+		logInfof(context.Background(), l, "Connected to %s", pluginName)
 	} else {
-		l.Errorf(failedToConnectMsg, string(body))
+		logErrorf(context.Background(), l, failedToConnectMsg, string(body))
 	}
 
 	return &AuthClient{
@@ -117,7 +168,7 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		ctx := opentelemetry.ExtractHTTPContext(c)
+		ctx := opentelemetry.ExtractHTTPContext(c.UserContext(), c)
 
 		_, tracer, reqID, _ := commons.NewTrackingFromContext(ctx)
 
@@ -177,20 +228,20 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 
 	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
 	if err != nil {
-		auth.Logger.Errorf("Failed to parse token: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to parse token: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to parse token", err)
+		opentelemetry.HandleSpanError(span, "Failed to parse token", err)
 
 		return false, http.StatusInternalServerError, err
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		auth.Logger.Errorf("Failed to parse claims: token.Claims is not of type jwt.MapClaims")
+		logErrorf(ctx, auth.Logger, "Failed to parse claims: token.Claims is not of type jwt.MapClaims")
 
 		err := errors.New("token claims are not in the expected format")
 
-		opentelemetry.HandleSpanError(&span, "Failed to parse claims", err)
+		opentelemetry.HandleSpanError(span, "Failed to parse claims", err)
 
 		return false, http.StatusInternalServerError, err
 	}
@@ -202,11 +253,11 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 	} else {
 		owner, _ := claims["owner"].(string)
 		if owner == "" {
-			auth.Logger.Errorf("Missing owner claim in token")
+			logErrorf(ctx, auth.Logger, "Missing owner claim in token")
 
 			err := errors.New("missing owner claim in token")
 
-			opentelemetry.HandleSpanError(&span, "Missing owner claim in token", err)
+			opentelemetry.HandleSpanError(span, "Missing owner claim in token", err)
 
 			return false, http.StatusUnauthorized, err
 		}
@@ -221,41 +272,41 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 		"action":   action,
 	}
 
-	err = opentelemetry.SetSpanAttributesFromStruct(&span, "app.request.payload", requestBody)
+	err = opentelemetry.SetSpanAttributesFromValue(span, "app.request.payload", requestBody, nil)
 	if err != nil {
-		opentelemetry.HandleSpanError(&span, "Failed to convert request body to JSON string", err)
+		opentelemetry.HandleSpanError(span, "Failed to convert request body to JSON string", err)
 
 		return false, http.StatusInternalServerError, err
 	}
 
 	requestBodyJSON, err := json.Marshal(requestBody)
 	if err != nil {
-		auth.Logger.Errorf("Failed to marshal request body: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to marshal request body: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to marshal request body", err)
+		opentelemetry.HandleSpanError(span, "Failed to marshal request body", err)
 
 		return false, http.StatusInternalServerError, err
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.Address), bytes.NewBuffer(requestBodyJSON))
 	if err != nil {
-		auth.Logger.Errorf("Failed to create request: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to create request: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to create request", err)
+		opentelemetry.HandleSpanError(span, "Failed to create request", err)
 
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	opentelemetry.InjectHTTPContext(&req.Header, ctx)
+	opentelemetry.InjectHTTPContext(ctx, req.Header)
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", accessToken)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		auth.Logger.Errorf("Failed to make request: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to make request: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to make request", err)
+		opentelemetry.HandleSpanError(span, "Failed to make request", err)
 
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to make request: %w", err)
 	}
@@ -263,35 +314,35 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		auth.Logger.Errorf("Failed to read response body: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to read response body: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to read response body", err)
+		opentelemetry.HandleSpanError(span, "Failed to read response body", err)
 
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	var respError commons.Response
 	if err := json.Unmarshal(body, &respError); err != nil {
-		auth.Logger.Errorf("Failed to unmarshal auth error response: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to unmarshal auth error response: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to unmarshal auth error response", err)
+		opentelemetry.HandleSpanError(span, "Failed to unmarshal auth error response", err)
 
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to unmarshal auth error response: %w", err)
 	}
 
 	if respError.Code != "" && resp.StatusCode != http.StatusInternalServerError {
-		auth.Logger.Errorf("Authorization request failed: %s", respError.Message)
+		logErrorf(ctx, auth.Logger, "Authorization request failed: %s", respError.Message)
 
-		opentelemetry.HandleSpanError(&span, "Authorization request failed", respError)
+		opentelemetry.HandleSpanError(span, "Authorization request failed", respError)
 
 		return false, resp.StatusCode, respError
 	}
 
 	var response AuthResponse
 	if err := json.Unmarshal(body, &response); err != nil {
-		auth.Logger.Errorf("Failed to unmarshal response: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to unmarshal response: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to unmarshal response", err)
+		opentelemetry.HandleSpanError(span, "Failed to unmarshal response", err)
 
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
@@ -324,40 +375,40 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		"clientSecret": clientSecret,
 	}
 
-	err := opentelemetry.SetSpanAttributesFromStruct(&span, "app.request.payload", requestBody)
+	err := opentelemetry.SetSpanAttributesFromValue(span, "app.request.payload", requestBody, nil)
 	if err != nil {
-		opentelemetry.HandleSpanError(&span, "Failed to convert request body to JSON string", err)
+		opentelemetry.HandleSpanError(span, "Failed to convert request body to JSON string", err)
 
 		return "", fmt.Errorf("failed to convert request body to JSON string: %w", err)
 	}
 
 	requestBodyJSON, err := json.Marshal(requestBody)
 	if err != nil {
-		auth.Logger.Errorf("Failed to marshal request body: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to marshal request body: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to marshal request body", err)
+		opentelemetry.HandleSpanError(span, "Failed to marshal request body", err)
 
 		return "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/login/oauth/access_token", auth.Address), bytes.NewBuffer(requestBodyJSON))
 	if err != nil {
-		auth.Logger.Errorf("Failed to create request: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to create request: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to create request", err)
+		opentelemetry.HandleSpanError(span, "Failed to create request", err)
 
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
-	opentelemetry.InjectHTTPContext(&req.Header, ctx)
+	opentelemetry.InjectHTTPContext(ctx, req.Header)
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		auth.Logger.Errorf("Failed to make request: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to make request: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to make request", err)
+		opentelemetry.HandleSpanError(span, "Failed to make request", err)
 
 		return "", fmt.Errorf("failed to make request: %w", err)
 	}
@@ -365,35 +416,35 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		auth.Logger.Errorf("Failed to read response body: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to read response body: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to read response body", err)
+		opentelemetry.HandleSpanError(span, "Failed to read response body", err)
 
 		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	var respError commons.Response
 	if err := json.Unmarshal(body, &respError); err != nil {
-		auth.Logger.Errorf("Failed to unmarshal auth error response: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to unmarshal auth error response: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to unmarshal auth error response", err)
+		opentelemetry.HandleSpanError(span, "Failed to unmarshal auth error response", err)
 
 		return "", fmt.Errorf("failed to unmarshal auth error response: %w", err)
 	}
 
 	if respError.Code != "" && resp.StatusCode != http.StatusInternalServerError {
-		auth.Logger.Errorf("Failed to get application token: %s", respError.Message)
+		logErrorf(ctx, auth.Logger, "Failed to get application token: %s", respError.Message)
 
-		opentelemetry.HandleSpanError(&span, "Failed to get application token", respError)
+		opentelemetry.HandleSpanError(span, "Failed to get application token", respError)
 
 		return "", respError
 	}
 
 	var response oauth2Token
 	if err := json.Unmarshal(body, &response); err != nil {
-		auth.Logger.Errorf("Failed to unmarshal response: %v", err)
+		logErrorf(ctx, auth.Logger, "Failed to unmarshal response: %v", err)
 
-		opentelemetry.HandleSpanError(&span, "Failed to unmarshal response", err)
+		opentelemetry.HandleSpanError(span, "Failed to unmarshal response", err)
 
 		return "", fmt.Errorf("failed to unmarshal response: %w", err)
 	}
