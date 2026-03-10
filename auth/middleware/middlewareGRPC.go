@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/LerianStudio/lib-commons/v3/commons"
-	"github.com/LerianStudio/lib-commons/v3/commons/opentelemetry"
+	"github.com/LerianStudio/lib-commons/v4/commons"
+	"github.com/LerianStudio/lib-commons/v4/commons/opentelemetry"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
@@ -63,7 +63,7 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 
 		pol, found := policyForMethod(cfg, info.FullMethod)
 		if !found {
-			opentelemetry.HandleSpanError(&span, "no policy configured for method", fmt.Errorf("%s", info.FullMethod))
+			opentelemetry.HandleSpanError(span, "no policy configured for method", fmt.Errorf("%s", info.FullMethod))
 
 			return nil, status.Error(codes.Internal, "internal configuration error")
 		}
@@ -75,7 +75,7 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 
 			sub, err = cfg.SubResolver(ctx, info.FullMethod, req)
 			if err != nil {
-				opentelemetry.HandleSpanError(&span, "failed to resolve subject", err)
+				opentelemetry.HandleSpanError(span, "failed to resolve subject", err)
 
 				return nil, status.Error(codes.Internal, "internal configuration error")
 			}
@@ -86,8 +86,8 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 			"resource": pol.Resource,
 			"action":   pol.Action,
 		}
-		if err := opentelemetry.SetSpanAttributesFromStruct(&span, "app.request.payload", payload); err != nil {
-			opentelemetry.HandleSpanError(&span, "failed to set span payload", err)
+		if err := opentelemetry.SetSpanAttributesFromValue(span, "app.request.payload", payload, nil); err != nil {
+			opentelemetry.HandleSpanError(span, "failed to set span payload", err)
 		}
 
 		authorized, httpStatus, err := auth.checkAuthorization(ctx, sub, pol.Resource, pol.Action, token)
