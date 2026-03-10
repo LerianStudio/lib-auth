@@ -1,3 +1,15 @@
+## [2.5.0-beta.7](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.6...v2.5.0-beta.7) (2026-03-10)
+
+
+### Features
+
+* **middleware:** migrate to lib-commons v4 API ([2e12d9b](https://github.com/LerianStudio/lib-auth/commit/2e12d9b1598eaafb27b1b427d8006a24eeea18ca))
+
+
+### Bug Fixes
+
+* **auth/middleware:** prevent panic on logger initialization failure ([6ba51e5](https://github.com/LerianStudio/lib-auth/commit/6ba51e5df9cbbdf62fc906c1837d6de41641946a))
+
 ## [2.5.0-beta.6](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.5...v2.5.0-beta.6) (2026-02-27)
 
 
