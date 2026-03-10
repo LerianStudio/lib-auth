@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	stdlog "log"
 	"net/http"
 	"os"
 	"strings"
@@ -109,9 +110,9 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	} else {
 		l, err = initializeDefaultLogger()
 		if err != nil {
-			l = log.NewNop()
+			stdlog.Printf("failed to initialize logger, using NopLogger: %v", err)
 
-			logErrorf(context.Background(), l, "failed to initialize logger, using NopLogger: %v", err)
+			l = log.NewNop()
 		}
 	}
 
