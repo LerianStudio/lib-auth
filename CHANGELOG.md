@@ -1,3 +1,10 @@
+## [2.5.0-beta.8](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.7...v2.5.0-beta.8) (2026-03-17)
+
+
+### Bug Fixes
+
+* **auth/middleware:** return 401 instead of 500 for malformed tokens ([4f51877](https://github.com/LerianStudio/lib-auth/commit/4f51877ef95b4db01304cb9df5ba3a38919e55ff))
+
 ## [2.5.0-beta.7](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.6...v2.5.0-beta.7) (2026-03-10)
 
 
