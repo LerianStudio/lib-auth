@@ -200,7 +200,7 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 
 			span.End()
 
-			return c.Status(http.StatusInternalServerError).SendString("Internal Server Error")
+			return c.Status(statusCode).SendString(http.StatusText(statusCode))
 		} else if authorized {
 			span.End()
 
@@ -232,7 +232,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 
 		opentelemetry.HandleSpanError(span, "Failed to parse token", err)
 
-		return false, http.StatusInternalServerError, err
+		return false, http.StatusUnauthorized, err
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
@@ -243,7 +243,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 
 		opentelemetry.HandleSpanError(span, "Failed to parse claims", err)
 
-		return false, http.StatusInternalServerError, err
+		return false, http.StatusUnauthorized, err
 	}
 
 	userType, _ := claims["type"].(string)
