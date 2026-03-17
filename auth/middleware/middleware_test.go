@@ -305,7 +305,7 @@ func TestCheckAuthorization_InvalidToken(t *testing.T) {
 
 	require.Error(t, err)
 	assert.False(t, authorized)
-	assert.Equal(t, http.StatusInternalServerError, statusCode)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
 }
 
 func TestCheckAuthorization_EmptyTypeClaim_TreatedAsNonNormalUser(t *testing.T) {
