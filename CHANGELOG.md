@@ -1,3 +1,10 @@
+## [2.5.0-beta.9](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.8...v2.5.0-beta.9) (2026-03-20)
+
+
+### Bug Fixes
+
+* **auth/middleware:** handle numeric code field in auth error response ([165db5f](https://github.com/LerianStudio/lib-auth/commit/165db5fdd324bb56304edd96b7e4d4579e351ade))
+
 ## [2.5.0-beta.8](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.7...v2.5.0-beta.8) (2026-03-17)
 
 
