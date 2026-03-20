@@ -49,6 +49,39 @@ const (
 	pluginName string = "plugin-auth"
 )
 
+// unmarshalErrorResponse unmarshals a JSON response body into commons.Response,
+// tolerating a numeric "code" field (the auth service may return code as a number).
+func unmarshalErrorResponse(body []byte) (commons.Response, error) {
+	var raw struct {
+		EntityType string          `json:"entityType,omitempty"`
+		Title      string          `json:"title,omitempty"`
+		Message    string          `json:"message,omitempty"`
+		Code       json.RawMessage `json:"code,omitempty"`
+	}
+
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return commons.Response{}, err
+	}
+
+	resp := commons.Response{
+		EntityType: raw.EntityType,
+		Title:      raw.Title,
+		Message:    raw.Message,
+	}
+
+	if len(raw.Code) > 0 {
+		var code string
+		if err := json.Unmarshal(raw.Code, &code); err == nil {
+			resp.Code = code
+		} else {
+			// Numeric code — use raw representation (e.g. "401")
+			resp.Code = string(raw.Code)
+		}
+	}
+
+	return resp, nil
+}
+
 func logErrorf(ctx context.Context, logger log.Logger, format string, args ...any) {
 	if logger == nil {
 		return
@@ -321,8 +354,8 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 		return false, http.StatusInternalServerError, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	var respError commons.Response
-	if err := json.Unmarshal(body, &respError); err != nil {
+	respError, err := unmarshalErrorResponse(body)
+	if err != nil {
 		logErrorf(ctx, auth.Logger, "Failed to unmarshal auth error response: %v", err)
 
 		opentelemetry.HandleSpanError(span, "Failed to unmarshal auth error response", err)
@@ -423,8 +456,8 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	var respError commons.Response
-	if err := json.Unmarshal(body, &respError); err != nil {
+	respError, err := unmarshalErrorResponse(body)
+	if err != nil {
 		logErrorf(ctx, auth.Logger, "Failed to unmarshal auth error response: %v", err)
 
 		opentelemetry.HandleSpanError(span, "Failed to unmarshal auth error response", err)
