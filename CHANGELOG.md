@@ -1,3 +1,20 @@
+## [2.5.0](https://github.com/LerianStudio/lib-auth/compare/v2.4.0...v2.5.0) (2026-03-21)
+
+
+### Features
+
+* make gRPC interceptor tenant-aware with streaming support ([f4dae96](https://github.com/LerianStudio/lib-auth/commit/f4dae96c438554ca65c8fff5336c45410cb9d67d))
+* **middleware:** migrate to lib-commons v4 API ([2e12d9b](https://github.com/LerianStudio/lib-auth/commit/2e12d9b1598eaafb27b1b427d8006a24eeea18ca))
+
+
+### Bug Fixes
+
+* **auth/middleware:** handle numeric code field in auth error response ([165db5f](https://github.com/LerianStudio/lib-auth/commit/165db5fdd324bb56304edd96b7e4d4579e351ade))
+* **auth/middleware:** prevent panic on logger initialization failure ([6ba51e5](https://github.com/LerianStudio/lib-auth/commit/6ba51e5df9cbbdf62fc906c1837d6de41641946a))
+* replace deprecated commons API calls ([805aadb](https://github.com/LerianStudio/lib-auth/commit/805aadb8ff2f1a6a8547733eeaf2618220511ee7))
+* **auth/middleware:** return 401 instead of 500 for malformed tokens ([4f51877](https://github.com/LerianStudio/lib-auth/commit/4f51877ef95b4db01304cb9df5ba3a38919e55ff))
+* **tests:** use safe find -exec instead of xargs pipeline :bug: ([da45b1a](https://github.com/LerianStudio/lib-auth/commit/da45b1ad9464aaf7925d932cd5af6b50a58562ea))
+
 ## [2.5.0-beta.10](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.9...v2.5.0-beta.10) (2026-03-21)
 
 ## [2.5.0-beta.9](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.8...v2.5.0-beta.9) (2026-03-20)
