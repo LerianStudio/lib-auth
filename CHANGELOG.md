@@ -1,3 +1,60 @@
+## [2.5.0-beta.10](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.9...v2.5.0-beta.10) (2026-03-21)
+
+## [2.5.0-beta.9](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.8...v2.5.0-beta.9) (2026-03-20)
+
+
+### Bug Fixes
+
+* **auth/middleware:** handle numeric code field in auth error response ([165db5f](https://github.com/LerianStudio/lib-auth/commit/165db5fdd324bb56304edd96b7e4d4579e351ade))
+
+## [2.5.0-beta.8](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.7...v2.5.0-beta.8) (2026-03-17)
+
+
+### Bug Fixes
+
+* **auth/middleware:** return 401 instead of 500 for malformed tokens ([4f51877](https://github.com/LerianStudio/lib-auth/commit/4f51877ef95b4db01304cb9df5ba3a38919e55ff))
+
+## [2.5.0-beta.7](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.6...v2.5.0-beta.7) (2026-03-10)
+
+
+### Features
+
+* **middleware:** migrate to lib-commons v4 API ([2e12d9b](https://github.com/LerianStudio/lib-auth/commit/2e12d9b1598eaafb27b1b427d8006a24eeea18ca))
+
+
+### Bug Fixes
+
+* **auth/middleware:** prevent panic on logger initialization failure ([6ba51e5](https://github.com/LerianStudio/lib-auth/commit/6ba51e5df9cbbdf62fc906c1837d6de41641946a))
+
+## [2.5.0-beta.6](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.5...v2.5.0-beta.6) (2026-02-27)
+
+
+### Features
+
+* make gRPC interceptor tenant-aware with streaming support ([f4dae96](https://github.com/LerianStudio/lib-auth/commit/f4dae96c438554ca65c8fff5336c45410cb9d67d))
+
+
+### Bug Fixes
+
+* replace deprecated commons API calls ([805aadb](https://github.com/LerianStudio/lib-auth/commit/805aadb8ff2f1a6a8547733eeaf2618220511ee7))
+
+## [2.5.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.4...v2.5.0-beta.5) (2026-02-20)
+
+## [2.5.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.3...v2.5.0-beta.4) (2026-02-20)
+
+## [2.5.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.2...v2.5.0-beta.3) (2026-02-20)
+
+## [2.5.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v2.5.0-beta.1...v2.5.0-beta.2) (2026-02-20)
+
+## [2.5.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.4.1-beta.1...v2.5.0-beta.1) (2026-02-09)
+
+
+### Bug Fixes
+
+* **tests:** use safe find -exec instead of xargs pipeline :bug: ([da45b1a](https://github.com/LerianStudio/lib-auth/commit/da45b1ad9464aaf7925d932cd5af6b50a58562ea))
+
+## [2.4.1-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.4.0...v2.4.1-beta.1) (2026-02-03)
+
 ## [2.4.0](https://github.com/LerianStudio/lib-auth/compare/v2.3.0...v2.4.0) (2026-01-27)
 
 
