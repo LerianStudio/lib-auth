@@ -1,3 +1,10 @@
+## [2.6.0](https://github.com/LerianStudio/lib-auth/compare/v2.5.0...v2.6.0) (2026-03-26)
+
+
+### Bug Fixes
+
+* prevent HTTP/2 hpack panic with shared HTTP client ([0716b6f](https://github.com/LerianStudio/lib-auth/commit/0716b6ffa204f1a38613b1041c6932ae637ce8e8))
+
 ## [2.6.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.5.0...v2.6.0-beta.1) (2026-03-26)
 
 
