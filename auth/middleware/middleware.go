@@ -49,6 +49,19 @@ const (
 	pluginName string = "plugin-auth"
 )
 
+// sharedHTTPClient is a package-level HTTP client with a custom transport
+// that prevents HTTP/2 hpack panics under concurrent access. HTTP clients
+// are safe for concurrent use and should be reused across requests.
+var sharedHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		ForceAttemptHTTP2:   false,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 // unmarshalErrorResponse unmarshals a JSON response body into commons.Response,
 // tolerating a numeric "code" field (the auth service may return code as a number).
 func unmarshalErrorResponse(body []byte) (commons.Response, error) {
@@ -157,7 +170,7 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		}
 	}
 
-	client := &http.Client{}
+	client := sharedHTTPClient
 	healthURL := fmt.Sprintf("%s/health", address)
 
 	failedToConnectMsg := fmt.Sprintf("Failed to connect to %s: %%v\n", pluginName)
@@ -257,7 +270,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 		attribute.String("app.request.request_id", reqID),
 	)
 
-	client := &http.Client{}
+	client := sharedHTTPClient
 
 	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
 	if err != nil {
@@ -400,7 +413,7 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		return "", nil
 	}
 
-	client := &http.Client{}
+	client := sharedHTTPClient
 
 	requestBody := map[string]string{
 		"grantType":    "client_credentials",
