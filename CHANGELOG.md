@@ -1,3 +1,10 @@
+## [2.7.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.6.1-beta.2...v2.7.0-beta.1) (2026-04-27)
+
+
+### Bug Fixes
+
+* **deps:** bump otel/sdk and exporters to v1.43.0 (GHSA-hfvc-g4fc-pqhx) ([daaa533](https://github.com/LerianStudio/lib-auth/commit/daaa533f15cde62d2a5c6a1cabf9f3be92b21a16))
+
 ## [2.6.1-beta.2](https://github.com/LerianStudio/lib-auth/compare/v2.6.1-beta.1...v2.6.1-beta.2) (2026-04-27)
 
 ## [2.6.1-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.6.0...v2.6.1-beta.1) (2026-04-27)
