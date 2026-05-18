@@ -422,7 +422,14 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		"clientSecret": clientSecret,
 	}
 
-	err := tracing.SetSpanAttributesFromValue(span, "app.request.payload", requestBody, nil)
+	// tracePayload mirrors requestBody but omits clientSecret so the OAuth secret
+	// never flows into telemetry. Do not collapse these two maps.
+	tracePayload := map[string]string{
+		"grantType": "client_credentials",
+		"clientId":  clientID,
+	}
+
+	err := tracing.SetSpanAttributesFromValue(span, "app.request.payload", tracePayload, nil)
 	if err != nil {
 		tracing.HandleSpanError(span, "Failed to convert request body to JSON string", err)
 
