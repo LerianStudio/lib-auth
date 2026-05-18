@@ -47,13 +47,13 @@ jobs:
         uses: reviewdog/action-golangci-lint@v2
         with:
           github_token: ${{ steps.app-token.outputs.token }}
-          go_version: '1.23'
+          go_version: '1.26'
           tool_name: golint
           level: error
           fail_level: any
           reporter: github-pr-review
           filter_mode: diff_context
-          golangci_lint_version: v2.4.0
+          golangci_lint_version: latest
         env:
           REVIEWDOG_GITHUB_API_TOKEN: ${{ steps.app-token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -70,10 +70,11 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.26'
           cache: false
 
-      - name: Gosec Scanner
-        uses: securego/gosec@master
-        with:
-          args: ./...
+      - name: Install Gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+      - name: Run Gosec
+        run: gosec ./...
