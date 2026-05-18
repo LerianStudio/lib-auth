@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	observability "github.com/LerianStudio/lib-observability"
 	"github.com/LerianStudio/lib-observability/log"
 	"github.com/LerianStudio/lib-observability/tracing"
 	"github.com/LerianStudio/lib-observability/zap"
@@ -216,7 +217,7 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		ctx := tracing.ExtractHTTPContext(c.UserContext(), c)
 
-		_, tracer, reqID, _ := commons.NewTrackingFromContext(ctx)
+		_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 		if !auth.Enabled || auth.Address == "" {
 			return c.Next()
@@ -261,7 +262,7 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 
 // checkAuthorization sends an authorization request to the external service and returns whether the action is authorized.
 func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, action, accessToken string) (bool, int, error) {
-	_, tracer, reqID, _ := commons.NewTrackingFromContext(ctx)
+	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
 	defer span.End()
@@ -400,7 +401,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 // It takes the client ID and client secret as parameters and returns the access token if the request is successful.
 // If the request fails at any step, an error is returned with a descriptive message.
 func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clientSecret string) (string, error) {
-	_, tracer, reqID, _ := commons.NewTrackingFromContext(ctx)
+	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.get_application_token")
 	defer span.End()

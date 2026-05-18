@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/LerianStudio/lib-commons/v5/commons"
+	observability "github.com/LerianStudio/lib-observability"
 	"github.com/LerianStudio/lib-observability/tracing"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel/attribute"
@@ -50,7 +51,7 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 		}
 
 		token, ok := extractTokenFromMD(ctx)
-		_, tracer, reqID, _ := commons.NewTrackingFromContext(ctx)
+		_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 		ctx, span := tracer.Start(ctx, "lib_auth.authorize_grpc_unary_policy")
 		defer span.End()
