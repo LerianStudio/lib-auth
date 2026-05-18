@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	observability "github.com/LerianStudio/lib-observability"
 	"github.com/LerianStudio/lib-observability/log"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // ---------------------------------------------------------------------------
@@ -414,6 +418,75 @@ func TestCheckAuthorization_ServerReturnsInvalidJSON(t *testing.T) {
 	assert.False(t, authorized)
 	assert.Equal(t, http.StatusInternalServerError, statusCode)
 	assert.Contains(t, err.Error(), "failed to unmarshal")
+}
+
+// ---------------------------------------------------------------------------
+// GetApplicationToken
+// ---------------------------------------------------------------------------
+
+func TestGetApplicationToken_DoesNotTraceClientSecret(t *testing.T) {
+	t.Parallel()
+
+	const (
+		clientID     = "test-client-id"
+		clientSecret = "super-secret-client-secret"
+		accessToken  = "application-access-token"
+	)
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/login/oauth/access_token", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		require.NoError(t, json.NewEncoder(w).Encode(oauth2Token{AccessToken: accessToken}))
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+	}
+
+	ctx := observability.ContextWithTracer(context.Background(), tp.Tracer("test"))
+
+	token, err := auth.GetApplicationToken(ctx, clientID, clientSecret)
+	require.NoError(t, err)
+	assert.Equal(t, accessToken, token)
+
+	assert.Equal(t, map[string]string{
+		"grantType":    "client_credentials",
+		"clientId":     clientID,
+		"clientSecret": clientSecret,
+	}, capturedBody)
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, "lib_auth.get_application_token", spans[0].Name)
+
+	payloadAttributes := map[string]string{}
+	for _, attr := range spans[0].Attributes {
+		key := string(attr.Key)
+		if !strings.HasPrefix(key, "app.request.payload") {
+			continue
+		}
+
+		payloadAttributes[key] = attr.Value.AsString()
+		assert.NotContains(t, key, "clientSecret")
+		assert.NotContains(t, attr.Value.AsString(), clientSecret)
+	}
+
+	assert.Equal(t, "client_credentials", payloadAttributes["app.request.payload.grantType"])
+	assert.Equal(t, clientID, payloadAttributes["app.request.payload.clientId"])
+	assert.NotContains(t, payloadAttributes, "app.request.payload.clientSecret")
 }
 
 // ---------------------------------------------------------------------------
