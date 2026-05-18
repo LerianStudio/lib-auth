@@ -9,7 +9,8 @@ import (
 	"strings"
 
 	"github.com/LerianStudio/lib-commons/v5/commons"
-	"github.com/LerianStudio/lib-commons/v5/commons/opentelemetry"
+	observability "github.com/LerianStudio/lib-observability"
+	"github.com/LerianStudio/lib-observability/tracing"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
@@ -50,7 +51,7 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 		}
 
 		token, ok := extractTokenFromMD(ctx)
-		_, tracer, reqID, _ := commons.NewTrackingFromContext(ctx)
+		_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 		ctx, span := tracer.Start(ctx, "lib_auth.authorize_grpc_unary_policy")
 		defer span.End()
@@ -63,7 +64,7 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 
 		pol, found := policyForMethod(cfg, info.FullMethod)
 		if !found {
-			opentelemetry.HandleSpanError(span, "no policy configured for method", fmt.Errorf("%s", info.FullMethod))
+			tracing.HandleSpanError(span, "no policy configured for method", fmt.Errorf("%s", info.FullMethod))
 
 			return nil, status.Error(codes.Internal, "internal configuration error")
 		}
@@ -75,7 +76,7 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 
 			sub, err = cfg.SubResolver(ctx, info.FullMethod, req)
 			if err != nil {
-				opentelemetry.HandleSpanError(span, "failed to resolve subject", err)
+				tracing.HandleSpanError(span, "failed to resolve subject", err)
 
 				return nil, status.Error(codes.Internal, "internal configuration error")
 			}
@@ -86,8 +87,8 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 			"resource": pol.Resource,
 			"action":   pol.Action,
 		}
-		if err := opentelemetry.SetSpanAttributesFromValue(span, "app.request.payload", payload, nil); err != nil {
-			opentelemetry.HandleSpanError(span, "failed to set span payload", err)
+		if err := tracing.SetSpanAttributesFromValue(span, "app.request.payload", payload, nil); err != nil {
+			tracing.HandleSpanError(span, "failed to set span payload", err)
 		}
 
 		authorized, httpStatus, err := auth.checkAuthorization(ctx, sub, pol.Resource, pol.Action, token)
