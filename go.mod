@@ -9,7 +9,8 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.43.0
-	google.golang.org/grpc v1.81.0
+	go.opentelemetry.io/otel/sdk v1.43.0
+	google.golang.org/grpc v1.81.1
 )
 
 require github.com/google/uuid v1.6.0 // indirect
@@ -59,7 +60,6 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.43.0 // indirect
 	go.opentelemetry.io/otel/log v0.19.0 // indirect
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
 	go.opentelemetry.io/otel/sdk/log v0.19.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.43.0 // indirect
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
