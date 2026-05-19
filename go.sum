@@ -1,7 +1,7 @@
 github.com/DATA-DOG/go-sqlmock v1.5.2 h1:OcvFkGmslmlZibjAjaHm3L//6LiuBgolP7OputlJIzU=
 github.com/DATA-DOG/go-sqlmock v1.5.2/go.mod h1:88MAG/4G7SMwSE3CeA0ZKzrT5CiOU3OJ+JlNzwDqpNU=
-github.com/LerianStudio/lib-commons/v5 v5.2.0-beta.12 h1:+wQQ/V4BwI8WhGvtuyT+sp0RvGK294DBkOa/+RBQ73k=
-github.com/LerianStudio/lib-commons/v5 v5.2.0-beta.12/go.mod h1:WyyOgyFshvAHMTZc1dnRGRQ9qA9J2dWZluzJbSWlTtk=
+github.com/LerianStudio/lib-commons/v5 v5.2.0 h1:AeXXZLuqTthCHuCnbeyBit1J+cUgbmKbungydz6maIg=
+github.com/LerianStudio/lib-commons/v5 v5.2.0/go.mod h1:HhXrk0J+wlm8PhiS27+oPT65nYb1XUue9OKCbYpG5nE=
 github.com/LerianStudio/lib-observability v1.0.0 h1:Ty9rlU8OJZoAmQ9lXYaXcDIBSiZOn6Aq1ofNzhwHq88=
 github.com/LerianStudio/lib-observability v1.0.0/go.mod h1:kGZvqUqgFVTv5TkqqVqAtJ9GHEr0WMK2MfnjoQAyrp4=
 github.com/andybalholm/brotli v1.2.0 h1:ukwgCxwYrmACq68yiUqwIWnGY0cTPox/M94sVwToPjQ=
