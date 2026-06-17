@@ -1,3 +1,12 @@
+## [2.8.1](https://github.com/LerianStudio/lib-auth/compare/v2.8.0...v2.8.1) (2026-06-16)
+
+## [2.8.0](https://github.com/LerianStudio/lib-auth/compare/v2.7.0...v2.8.0) (2026-05-18)
+
+
+### Bug Fixes
+
+* **security:** redact clientSecret from tracing span payload ([fb15a94](https://github.com/LerianStudio/lib-auth/commit/fb15a9486a5d937ff45a7f9a2c7cc18fd6018569))
+
 ## [2.8.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v2.8.0-beta.4...v2.8.0-beta.5) (2026-05-18)
 
 ## [2.8.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v2.8.0-beta.3...v2.8.0-beta.4) (2026-05-18)
