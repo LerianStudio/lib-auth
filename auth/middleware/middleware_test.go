@@ -102,21 +102,23 @@ func TestCheckAuthorization_NormalUser_SubjectConstruction(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "initial-sub", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token,
 	)
 
 	require.NoError(t, err)
 	assert.True(t, authorized)
 	assert.Equal(t, http.StatusOK, statusCode)
 
-	// For normal-user, sub should be "owner/sub-from-jwt" (overrides the initial sub parameter).
+	// For normal-user, sub is the JWT identity "owner/userId", not the product.
 	assert.Equal(t, "acme-org/user123", capturedBody["sub"])
+	// The product is forwarded so the auth service can isolate by product.
+	assert.Equal(t, "midaz", capturedBody["product"])
 }
 
 func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 	t.Parallel()
 
-	// Documents the current behavior: non-normal-user types get "admin/<initial-sub>-editor-role".
+	// Documents the current behavior: non-normal-user types get "admin/<product>-editor-role".
 	var capturedBody map[string]string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -157,9 +159,11 @@ func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 	assert.True(t, authorized)
 	assert.Equal(t, http.StatusOK, statusCode)
 
-	// BUG: hardcodes "admin/" prefix. The sub parameter is used as-is with the
-	// "admin/<sub>-editor-role" pattern, regardless of the actual user type.
+	// For M2M, the subject is built from the product: "admin/<product>-editor-role".
 	assert.Equal(t, "admin/my-app-editor-role", capturedBody["sub"])
+	// Product is NOT forwarded for non-normal-user tokens.
+	_, hasProduct := capturedBody["product"]
+	assert.False(t, hasProduct)
 }
 
 func TestCheckAuthorization_MissingOwnerClaim(t *testing.T) {
