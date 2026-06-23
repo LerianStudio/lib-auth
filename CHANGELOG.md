@@ -1,3 +1,10 @@
+## [2.9.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.8.2-beta.1...v2.9.0-beta.1) (2026-06-23)
+
+
+### Features
+
+* **middleware:** forward product on user-flow authorization ([e597ae2](https://github.com/LerianStudio/lib-auth/commit/e597ae23b7ba881681f24689d3a8580c2f98b6e7))
+
 ## [2.8.2-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.8.1...v2.8.2-beta.1) (2026-06-17)
 
 ## [2.8.1](https://github.com/LerianStudio/lib-auth/compare/v2.8.0...v2.8.1) (2026-06-16)
