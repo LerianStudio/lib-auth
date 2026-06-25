@@ -317,6 +317,16 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		}
 
 		userID, _ := claims["sub"].(string)
+		if userID == "" {
+			logErrorf(ctx, auth.Logger, "Missing sub claim in token")
+
+			err := errors.New("missing sub claim in token")
+
+			tracing.HandleSpanError(span, "Missing sub claim in token", err)
+
+			return false, http.StatusUnauthorized, err
+		}
+
 		sub = fmt.Sprintf("%s/%s", owner, userID)
 	}
 
