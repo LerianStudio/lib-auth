@@ -26,10 +26,13 @@ type Policy struct {
 	Action   string
 }
 
-// PolicyConfig binds gRPC methods to Policies and optional subject resolution.
+// PolicyConfig binds gRPC methods to Policies and optional product resolution.
 // - MethodPolicies keyed by info.FullMethod ("/pkg.Service/Method").
 // - DefaultPolicy used when a method mapping is absent.
-// - SubResolver derives the subject base (e.g., editor scope). Return "" when not applicable.
+// - SubResolver derives the product identifier (e.g., "midaz") that is forwarded
+//   to checkAuthorization as its product argument. For M2M tokens it becomes the
+//   subject "admin/<product>-editor-role"; for normal-user tokens it is forwarded
+//   for product isolation. Return "" when not applicable.
 type PolicyConfig struct {
 	MethodPolicies map[string]Policy
 	DefaultPolicy  *Policy
@@ -39,11 +42,11 @@ type PolicyConfig struct {
 // NewGRPCAuthUnaryPolicy authorizes unary RPCs via per-method Policy.
 // Behavior:
 // - Resolves the Policy by info.FullMethod; falls back to DefaultPolicy when provided.
-// - Optionally derives the subject using cfg.SubResolver (e.g., editor roles). Empty subject is valid.
+// - Optionally derives the product using cfg.SubResolver (e.g., "midaz"). Empty product is valid.
 // - Rejects missing tokens with codes.Unauthenticated; misconfiguration returns codes.Internal.
 // Telemetry:
 // - Sets app.request.request_id.
-// - Sets app.request.payload with {sub, resource, action} per standard.
+// - Sets app.request.payload with {product, resource, action} per standard.
 func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if auth == nil || !auth.Enabled || auth.Address == "" {
@@ -69,21 +72,23 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 			return nil, status.Error(codes.Internal, "internal configuration error")
 		}
 
-		var sub string
+		// product is the resolved product identifier passed as checkAuthorization's
+		// product argument (M2M subject base and normal-user isolation key).
+		var product string
 
 		if cfg.SubResolver != nil {
 			var err error
 
-			sub, err = cfg.SubResolver(ctx, info.FullMethod, req)
+			product, err = cfg.SubResolver(ctx, info.FullMethod, req)
 			if err != nil {
-				tracing.HandleSpanError(span, "failed to resolve subject", err)
+				tracing.HandleSpanError(span, "failed to resolve product", err)
 
 				return nil, status.Error(codes.Internal, "internal configuration error")
 			}
 		}
 
 		payload := map[string]string{
-			"sub":      sub,
+			"product":  product,
 			"resource": pol.Resource,
 			"action":   pol.Action,
 		}
@@ -91,7 +96,7 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 			tracing.HandleSpanError(span, "failed to set span payload", err)
 		}
 
-		authorized, httpStatus, err := auth.checkAuthorization(ctx, sub, pol.Resource, pol.Action, token)
+		authorized, httpStatus, err := auth.checkAuthorization(ctx, product, pol.Resource, pol.Action, token)
 		if err != nil {
 			return nil, grpcErrorFromHTTP(httpStatus)
 		}
@@ -248,18 +253,20 @@ func NewGRPCAuthStreamPolicy(auth *AuthClient, cfg PolicyConfig) grpc.StreamServ
 			return status.Error(codes.Internal, "internal configuration error")
 		}
 
-		var sub string
+		// product is the resolved product identifier passed as checkAuthorization's
+		// product argument (M2M subject base and normal-user isolation key).
+		var product string
 
 		if cfg.SubResolver != nil {
 			var err error
 
-			sub, err = cfg.SubResolver(ctx, info.FullMethod, nil)
+			product, err = cfg.SubResolver(ctx, info.FullMethod, nil)
 			if err != nil {
 				return status.Error(codes.Internal, "internal configuration error")
 			}
 		}
 
-		authorized, httpStatus, err := auth.checkAuthorization(ctx, sub, pol.Resource, pol.Action, token)
+		authorized, httpStatus, err := auth.checkAuthorization(ctx, product, pol.Resource, pol.Action, token)
 		if err != nil {
 			return grpcErrorFromHTTP(httpStatus)
 		}
