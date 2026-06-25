@@ -1,3 +1,10 @@
+## [2.9.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v2.9.0-beta.1...v2.9.0-beta.2) (2026-06-25)
+
+
+### Bug Fixes
+
+* **middleware:** fail closed when normal-user JWT has no sub claim ([bce4655](https://github.com/LerianStudio/lib-auth/commit/bce4655cbb30c61d3bec0447b80a2506f7d04ed5))
+
 ## [2.9.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.8.2-beta.1...v2.9.0-beta.1) (2026-06-23)
 
 
