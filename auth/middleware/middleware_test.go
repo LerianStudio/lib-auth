@@ -198,7 +198,11 @@ func TestCheckAuthorization_MissingOwnerClaim(t *testing.T) {
 func TestCheckAuthorization_MissingSubClaim(t *testing.T) {
 	t.Parallel()
 
-	server := mockAuthServer(t, true, http.StatusOK)
+	// The auth backend must never be reached: a missing-sub token has to fail
+	// closed in checkAuthorization before any request is made.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("auth backend must not be called when the sub claim is missing")
+	}))
 	defer server.Close()
 
 	auth := &AuthClient{
