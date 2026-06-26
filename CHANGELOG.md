@@ -1,3 +1,21 @@
+## [2.9.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v2.9.0-beta.2...v2.9.0-beta.3) (2026-06-25)
+
+## [2.9.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v2.9.0-beta.1...v2.9.0-beta.2) (2026-06-25)
+
+
+### Bug Fixes
+
+* **middleware:** fail closed when normal-user JWT has no sub claim ([bce4655](https://github.com/LerianStudio/lib-auth/commit/bce4655cbb30c61d3bec0447b80a2506f7d04ed5))
+
+## [2.9.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.8.2-beta.1...v2.9.0-beta.1) (2026-06-23)
+
+
+### Features
+
+* **middleware:** forward product on user-flow authorization ([e597ae2](https://github.com/LerianStudio/lib-auth/commit/e597ae23b7ba881681f24689d3a8580c2f98b6e7))
+
+## [2.8.2-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.8.1...v2.8.2-beta.1) (2026-06-17)
+
 ## [2.8.1](https://github.com/LerianStudio/lib-auth/compare/v2.8.0...v2.8.1) (2026-06-16)
 
 ## [2.8.0](https://github.com/LerianStudio/lib-auth/compare/v2.7.0...v2.8.0) (2026-05-18)
@@ -6,6 +24,8 @@
 ### Bug Fixes
 
 * **security:** redact clientSecret from tracing span payload ([fb15a94](https://github.com/LerianStudio/lib-auth/commit/fb15a9486a5d937ff45a7f9a2c7cc18fd6018569))
+
+## [2.8.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v2.8.0-beta.4...v2.8.0-beta.5) (2026-05-18)
 
 ## [2.8.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v2.8.0-beta.3...v2.8.0-beta.4) (2026-05-18)
 

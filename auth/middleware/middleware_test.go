@@ -102,21 +102,23 @@ func TestCheckAuthorization_NormalUser_SubjectConstruction(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "initial-sub", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token,
 	)
 
 	require.NoError(t, err)
 	assert.True(t, authorized)
 	assert.Equal(t, http.StatusOK, statusCode)
 
-	// For normal-user, sub should be "owner/sub-from-jwt" (overrides the initial sub parameter).
+	// For normal-user, sub is the JWT identity "owner/userId", not the product.
 	assert.Equal(t, "acme-org/user123", capturedBody["sub"])
+	// The product is forwarded so the auth service can isolate by product.
+	assert.Equal(t, "midaz", capturedBody["product"])
 }
 
 func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 	t.Parallel()
 
-	// Documents the current behavior: non-normal-user types get "admin/<initial-sub>-editor-role".
+	// Documents the current behavior: non-normal-user types get "admin/<product>-editor-role".
 	var capturedBody map[string]string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -157,9 +159,11 @@ func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 	assert.True(t, authorized)
 	assert.Equal(t, http.StatusOK, statusCode)
 
-	// BUG: hardcodes "admin/" prefix. The sub parameter is used as-is with the
-	// "admin/<sub>-editor-role" pattern, regardless of the actual user type.
+	// For M2M, the subject is built from the product: "admin/<product>-editor-role".
 	assert.Equal(t, "admin/my-app-editor-role", capturedBody["sub"])
+	// Product is NOT forwarded for non-normal-user tokens.
+	_, hasProduct := capturedBody["product"]
+	assert.False(t, hasProduct)
 }
 
 func TestCheckAuthorization_MissingOwnerClaim(t *testing.T) {
@@ -189,6 +193,91 @@ func TestCheckAuthorization_MissingOwnerClaim(t *testing.T) {
 	assert.False(t, authorized)
 	assert.Equal(t, http.StatusUnauthorized, statusCode)
 	assert.Contains(t, err.Error(), "missing owner claim")
+}
+
+func TestCheckAuthorization_MissingSubClaim(t *testing.T) {
+	t.Parallel()
+
+	// The auth backend must never be reached: a missing-sub token has to fail
+	// closed in checkAuthorization before any request is made.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("auth backend must not be called when the sub claim is missing")
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+	}
+
+	// normal-user without "sub" claim must fail closed instead of emitting "<owner>/".
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		// "sub" is intentionally missing
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token,
+	)
+
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.Contains(t, err.Error(), "missing sub claim")
+}
+
+func TestCheckAuthorization_NormalUser_EmptyProduct_NotForwarded(t *testing.T) {
+	t.Parallel()
+
+	// With an empty product the previous behavior must be preserved: the subject
+	// is still the JWT identity and no "product" field is forwarded (gate-by-presence).
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&capturedBody)
+		if err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		resp := AuthResponse{Authorized: true}
+
+		encErr := json.NewEncoder(w).Encode(resp)
+		if encErr != nil {
+			t.Errorf("mock server: failed to encode response: %v", encErr)
+		}
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "", "resource", "action", token,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, authorized)
+	assert.Equal(t, http.StatusOK, statusCode)
+
+	// Subject is still the JWT identity, unchanged by the empty product.
+	assert.Equal(t, "acme-org/user123", capturedBody["sub"])
+	// No product forwarded when product is empty.
+	_, hasProduct := capturedBody["product"]
+	assert.False(t, hasProduct)
 }
 
 func TestCheckAuthorization_MockServerReturnsAuthorizedTrue(t *testing.T) {

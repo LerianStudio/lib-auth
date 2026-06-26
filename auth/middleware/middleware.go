@@ -18,6 +18,7 @@ import (
 	"github.com/LerianStudio/lib-observability/tracing"
 	"github.com/LerianStudio/lib-observability/zap"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/LerianStudio/lib-commons/v5/commons"
 	libHTTP "github.com/LerianStudio/lib-commons/v5/commons/net/http"
@@ -211,9 +212,9 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 }
 
 // Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
-// It sends a POST request to the authorization service with the subject, resource, and action details.
+// product identifies the product/application owning the route (e.g. "midaz"); it builds the M2M role and is forwarded for user-flow isolation.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
-func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
+func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		ctx := tracing.ExtractHTTPContext(c.UserContext(), c)
 
@@ -237,7 +238,7 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 			return c.Status(http.StatusUnauthorized).SendString("Missing Token")
 		}
 
-		if authorized, statusCode, err := auth.checkAuthorization(ctx, sub, resource, action, accessToken); err != nil {
+		if authorized, statusCode, err := auth.checkAuthorization(ctx, product, resource, action, accessToken); err != nil {
 			var commonsErr commons.Response
 			if errors.As(err, &commonsErr) {
 				span.End()
@@ -261,7 +262,44 @@ func (auth *AuthClient) Authorize(sub, resource, action string) fiber.Handler {
 }
 
 // checkAuthorization sends an authorization request to the external service and returns whether the action is authorized.
-func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, action, accessToken string) (bool, int, error) {
+// product identifies the product/plugin owning the route. The subject is derived from it: M2M tokens map to the product's
+// editor role, while normal users are identified by their JWT (owner/userId) and the product is forwarded so the auth
+// service can isolate permissions by product. Empty product keeps the previous behavior.
+// deriveSubject builds the authorization subject from the token claims.
+// For M2M tokens it is the product's editor role ("admin/<product>-editor-role");
+// for normal-user tokens it is the JWT identity ("<owner>/<userID>"), failing
+// closed with 401 when the owner or sub claim is missing.
+func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, claims jwt.MapClaims, userType, product string) (string, int, error) {
+	if userType != normalUser {
+		return fmt.Sprintf("admin/%s-editor-role", product), http.StatusOK, nil
+	}
+
+	owner, _ := claims["owner"].(string)
+	if owner == "" {
+		logErrorf(ctx, auth.Logger, "Missing owner claim in token")
+
+		err := errors.New("missing owner claim in token")
+
+		tracing.HandleSpanError(span, "Missing owner claim in token", err)
+
+		return "", http.StatusUnauthorized, err
+	}
+
+	userID, _ := claims["sub"].(string)
+	if userID == "" {
+		logErrorf(ctx, auth.Logger, "Missing sub claim in token")
+
+		err := errors.New("missing sub claim in token")
+
+		tracing.HandleSpanError(span, "Missing sub claim in token", err)
+
+		return "", http.StatusUnauthorized, err
+	}
+
+	return fmt.Sprintf("%s/%s", owner, userID), http.StatusOK, nil
+}
+
+func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken string) (bool, int, error) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -295,28 +333,19 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, sub, resource, a
 
 	userType, _ := claims["type"].(string)
 
-	if userType != normalUser {
-		sub = fmt.Sprintf("admin/%s-editor-role", sub)
-	} else {
-		owner, _ := claims["owner"].(string)
-		if owner == "" {
-			logErrorf(ctx, auth.Logger, "Missing owner claim in token")
-
-			err := errors.New("missing owner claim in token")
-
-			tracing.HandleSpanError(span, "Missing owner claim in token", err)
-
-			return false, http.StatusUnauthorized, err
-		}
-
-		sub, _ = claims["sub"].(string)
-		sub = fmt.Sprintf("%s/%s", owner, sub)
+	sub, statusCode, err := auth.deriveSubject(ctx, span, claims, userType, product)
+	if err != nil {
+		return false, statusCode, err
 	}
 
 	requestBody := map[string]string{
 		"sub":      sub,
 		"resource": resource,
 		"action":   action,
+	}
+
+	if userType == normalUser && product != "" {
+		requestBody["product"] = product
 	}
 
 	err = tracing.SetSpanAttributesFromValue(span, "app.request.payload", requestBody, nil)
