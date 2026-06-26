@@ -1,3 +1,15 @@
+## [2.9.0](https://github.com/LerianStudio/lib-auth/compare/v2.8.1...v2.9.0) (2026-06-26)
+
+
+### Features
+
+* **middleware:** forward product on user-flow authorization ([e597ae2](https://github.com/LerianStudio/lib-auth/commit/e597ae23b7ba881681f24689d3a8580c2f98b6e7))
+
+
+### Bug Fixes
+
+* **middleware:** fail closed when normal-user JWT has no sub claim ([bce4655](https://github.com/LerianStudio/lib-auth/commit/bce4655cbb30c61d3bec0447b80a2506f7d04ed5))
+
 ## [2.9.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v2.9.0-beta.2...v2.9.0-beta.3) (2026-06-25)
 
 ## [2.9.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v2.9.0-beta.1...v2.9.0-beta.2) (2026-06-25)
