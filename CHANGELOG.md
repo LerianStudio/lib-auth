@@ -1,3 +1,17 @@
+## [3.0.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.9.0...v3.0.0-beta.1) (2026-07-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **middleware:** module path is now github.com/LerianStudio/lib-auth/v3 and the
+Authorize middleware requires Fiber v3.
+
+X-Lerian-Ref: 0x1
+
+### Features
+
+* **middleware:** migrate to Fiber v3, cut /v3 major ([024a909](https://github.com/LerianStudio/lib-auth/commit/024a90903ac84277ade60603a38c726b89af5b00))
+
 ## [2.9.0](https://github.com/LerianStudio/lib-auth/compare/v2.8.1...v2.9.0) (2026-06-26)
 
 
