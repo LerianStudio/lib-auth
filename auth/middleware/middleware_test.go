@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	observability "github.com/LerianStudio/lib-observability"
-	"github.com/LerianStudio/lib-observability/log"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	"github.com/LerianStudio/lib-observability/v2/log"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
