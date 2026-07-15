@@ -1,0 +1,5 @@
+# GO-2026-5932: golang.org/x/crypto/openpgp is unmaintained (no upstream fix).
+# Introduced transitively by gofiber/fiber/v3 -> golang.org/x/crypto/acme/autocert.
+# The openpgp package is not imported by this module. Accepted risk.
+# Revisit 2026-07-30.
+GO-2026-5932 exp:2026-07-30

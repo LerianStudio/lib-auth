@@ -13,16 +13,16 @@ import (
 	"strings"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability"
-	"github.com/LerianStudio/lib-observability/log"
-	"github.com/LerianStudio/lib-observability/tracing"
-	"github.com/LerianStudio/lib-observability/zap"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-observability/v2/tracing"
+	"github.com/LerianStudio/lib-observability/v2/zap"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/LerianStudio/lib-commons/v5/commons"
-	libHTTP "github.com/LerianStudio/lib-commons/v5/commons/net/http"
-	"github.com/gofiber/fiber/v2"
+	"github.com/LerianStudio/lib-commons/v6/commons"
+	libHTTP "github.com/LerianStudio/lib-commons/v6/commons/net/http"
+	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 )
 
@@ -215,8 +215,8 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 // product identifies the product/application owning the route (e.g. "midaz"); it builds the M2M role and is forwarded for user-flow isolation.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		ctx := tracing.ExtractHTTPContext(c.UserContext(), c)
+	return func(c fiber.Ctx) error {
+		ctx := tracing.ExtractHTTPContext(c.Context(), c)
 
 		_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 

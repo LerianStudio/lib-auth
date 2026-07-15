@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/LerianStudio/lib-commons/v5/commons"
-	observability "github.com/LerianStudio/lib-observability"
-	"github.com/LerianStudio/lib-observability/tracing"
+	"github.com/LerianStudio/lib-commons/v6/commons"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	"github.com/LerianStudio/lib-observability/v2/tracing"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
