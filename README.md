@@ -7,7 +7,7 @@ Repository: [lib-auth](https://github.com/LerianStudio/lib-auth)
 ## 📦 Installation
 
 ```bash
-go get -u github.com/LerianStudio/lib-auth/v3
+go get github.com/LerianStudio/lib-auth/v3@latest
 ```
 
 ## 🚀 How to Use
