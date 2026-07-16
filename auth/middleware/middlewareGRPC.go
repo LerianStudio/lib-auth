@@ -27,12 +27,13 @@ type Policy struct {
 }
 
 // PolicyConfig binds gRPC methods to Policies and optional product resolution.
-// - MethodPolicies keyed by info.FullMethod ("/pkg.Service/Method").
-// - DefaultPolicy used when a method mapping is absent.
-// - SubResolver derives the product identifier (e.g., "midaz") that is forwarded
-//   to checkAuthorization as its product argument. For M2M tokens it becomes the
-//   subject "admin/<product>-editor-role"; for normal-user tokens it is forwarded
-//   for product isolation. Return "" when not applicable.
+//   - MethodPolicies keyed by info.FullMethod ("/pkg.Service/Method").
+//   - DefaultPolicy used when a method mapping is absent.
+//   - SubResolver derives the product identifier (e.g., "midaz") passed to
+//     checkAuthorization as its product argument. It is forwarded only for
+//     normal-user tokens (product isolation); M2M (application) tokens carry no
+//     product isolation and are identified by their own subject claim. Return ""
+//     when not applicable.
 type PolicyConfig struct {
 	MethodPolicies map[string]Policy
 	DefaultPolicy  *Policy
@@ -45,8 +46,10 @@ type PolicyConfig struct {
 // - Optionally derives the product using cfg.SubResolver (e.g., "midaz"). Empty product is valid.
 // - Rejects missing tokens with codes.Unauthenticated; misconfiguration returns codes.Internal.
 // Telemetry:
-// - Sets app.request.request_id.
-// - Sets app.request.payload with {product, resource, action} per standard.
+//   - Sets app.request.request_id.
+//   - Sets app.request.payload with {resource, action}, including product only when
+//     it is actually forwarded to the auth service (normal-user flows with a
+//     non-empty product), mirroring the request body.
 func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if auth == nil || !auth.Enabled || auth.Address == "" {
@@ -73,7 +76,8 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 		}
 
 		// product is the resolved product identifier passed as checkAuthorization's
-		// product argument (M2M subject base and normal-user isolation key).
+		// product argument. It is forwarded only for normal-user flows; M2M
+		// (application) tokens carry no product isolation.
 		var product string
 
 		if cfg.SubResolver != nil {
@@ -87,11 +91,7 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 			}
 		}
 
-		payload := map[string]string{
-			"product":  product,
-			"resource": pol.Resource,
-			"action":   pol.Action,
-		}
+		payload := authPayload(token, product, pol.Resource, pol.Action)
 		if err := tracing.SetSpanAttributesFromValue(span, "app.request.payload", payload, nil); err != nil {
 			tracing.HandleSpanError(span, "failed to set span payload", err)
 		}
@@ -209,6 +209,42 @@ func SubFromMetadata(key string) func(ctx context.Context, fullMethod string, re
 	}
 }
 
+// authPayload builds the telemetry payload mirroring the request body sent to the
+// auth service by checkAuthorization: product is included only when it is actually
+// forwarded (normal-user flows with a non-empty product).
+func authPayload(token, product, resource, action string) map[string]string {
+	payload := map[string]string{
+		"resource": resource,
+		"action":   action,
+	}
+
+	if tokenTypeClaim(token) == normalUser && product != "" {
+		payload["product"] = product
+	}
+
+	return payload
+}
+
+// tokenTypeClaim returns the "type" claim from an unverified JWT, or "" when the
+// token cannot be parsed. Best-effort and telemetry-only: the authorization
+// decision (and its fail-closed handling) still goes through checkAuthorization,
+// which re-parses and validates the token.
+func tokenTypeClaim(tokenString string) string {
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		return ""
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return ""
+	}
+
+	t, _ := claims["type"].(string)
+
+	return t
+}
+
 // extractTenantClaims extracts tenant-related claims from a JWT without signature verification.
 // Returns tenantID, tenantSlug, and owner from the token's custom claims.
 // Used by gRPC interceptors to propagate tenant context to downstream services.
@@ -254,7 +290,8 @@ func NewGRPCAuthStreamPolicy(auth *AuthClient, cfg PolicyConfig) grpc.StreamServ
 		}
 
 		// product is the resolved product identifier passed as checkAuthorization's
-		// product argument (M2M subject base and normal-user isolation key).
+		// product argument. It is forwarded only for normal-user flows; M2M
+		// (application) tokens carry no product isolation.
 		var product string
 
 		if cfg.SubResolver != nil {

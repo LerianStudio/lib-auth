@@ -47,8 +47,9 @@ type oauth2Token struct {
 }
 
 const (
-	normalUser string = "normal-user"
-	pluginName string = "plugin-auth"
+	normalUser  string = "normal-user"
+	application string = "application"
+	pluginName  string = "plugin-auth"
 )
 
 // sharedHTTPClient is a package-level HTTP client with a custom transport
@@ -212,7 +213,8 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 }
 
 // Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
-// product identifies the product/application owning the route (e.g. "midaz"); it builds the M2M role and is forwarded for user-flow isolation.
+// product identifies the product/application owning the route (e.g. "midaz"); it is forwarded only for normal-user flows so the auth service can
+// isolate permissions by product. M2M (application) tokens carry no product isolation and are identified by their own subject claim.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
@@ -261,42 +263,63 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 	}
 }
 
-// checkAuthorization sends an authorization request to the external service and returns whether the action is authorized.
-// product identifies the product/plugin owning the route. The subject is derived from it: M2M tokens map to the product's
-// editor role, while normal users are identified by their JWT (owner/userId) and the product is forwarded so the auth
-// service can isolate permissions by product. Empty product keeps the previous behavior.
-// deriveSubject builds the authorization subject from the token claims.
-// For M2M tokens it is the product's editor role ("admin/<product>-editor-role");
-// for normal-user tokens it is the JWT identity ("<owner>/<userID>"), failing
-// closed with 401 when the owner or sub claim is missing.
-func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, claims jwt.MapClaims, userType, product string) (string, int, error) {
-	if userType != normalUser {
-		return fmt.Sprintf("admin/%s-editor-role", product), http.StatusOK, nil
-	}
+// deriveSubject builds the authorization subject from the token claims based on
+// the whitelisted token type. It fails closed (401) for any type outside
+// {normal-user, application}:
+//   - normal-user: the JWT identity ("<owner>/<userID>"), failing closed with 401
+//     when the owner or sub claim is missing.
+//   - application (M2M): the token's own sub claim (already in "<owner>/<name>"
+//     form), failing closed with 401 when sub is missing. No product-scoped role
+//     is fabricated, since M2M has no product isolation.
+//   - any other type (including empty/absent): rejected with 401.
+func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, claims jwt.MapClaims, userType string) (string, int, error) {
+	switch userType {
+	case normalUser:
+		owner, _ := claims["owner"].(string)
+		if owner == "" {
+			logErrorf(ctx, auth.Logger, "Missing owner claim in token")
 
-	owner, _ := claims["owner"].(string)
-	if owner == "" {
-		logErrorf(ctx, auth.Logger, "Missing owner claim in token")
+			err := errors.New("missing owner claim in token")
 
-		err := errors.New("missing owner claim in token")
+			tracing.HandleSpanError(span, "Missing owner claim in token", err)
 
-		tracing.HandleSpanError(span, "Missing owner claim in token", err)
+			return "", http.StatusUnauthorized, err
+		}
+
+		userID, _ := claims["sub"].(string)
+		if userID == "" {
+			logErrorf(ctx, auth.Logger, "Missing sub claim in token")
+
+			err := errors.New("missing sub claim in token")
+
+			tracing.HandleSpanError(span, "Missing sub claim in token", err)
+
+			return "", http.StatusUnauthorized, err
+		}
+
+		return fmt.Sprintf("%s/%s", owner, userID), http.StatusOK, nil
+	case application:
+		sub, _ := claims["sub"].(string)
+		if sub == "" {
+			logErrorf(ctx, auth.Logger, "Missing sub claim in application token")
+
+			err := errors.New("missing sub claim in token")
+
+			tracing.HandleSpanError(span, "Missing sub claim in application token", err)
+
+			return "", http.StatusUnauthorized, err
+		}
+
+		return sub, http.StatusOK, nil
+	default:
+		logErrorf(ctx, auth.Logger, "Unsupported token type: %q", userType)
+
+		err := errors.New("unsupported token type")
+
+		tracing.HandleSpanError(span, "Unsupported token type", err)
 
 		return "", http.StatusUnauthorized, err
 	}
-
-	userID, _ := claims["sub"].(string)
-	if userID == "" {
-		logErrorf(ctx, auth.Logger, "Missing sub claim in token")
-
-		err := errors.New("missing sub claim in token")
-
-		tracing.HandleSpanError(span, "Missing sub claim in token", err)
-
-		return "", http.StatusUnauthorized, err
-	}
-
-	return fmt.Sprintf("%s/%s", owner, userID), http.StatusOK, nil
 }
 
 func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken string) (bool, int, error) {
@@ -333,7 +356,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 
 	userType, _ := claims["type"].(string)
 
-	sub, statusCode, err := auth.deriveSubject(ctx, span, claims, userType, product)
+	sub, statusCode, err := auth.deriveSubject(ctx, span, claims, userType)
 	if err != nil {
 		return false, statusCode, err
 	}
