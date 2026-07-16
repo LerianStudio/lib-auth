@@ -118,7 +118,8 @@ func TestCheckAuthorization_NormalUser_SubjectConstruction(t *testing.T) {
 func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 	t.Parallel()
 
-	// Documents the current behavior: non-normal-user types get "admin/<product>-editor-role".
+	// Application (M2M) tokens are identified by their real sub claim (already in
+	// "owner/name" form); no product-editor-role is fabricated and product is not forwarded.
 	var capturedBody map[string]string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,8 +160,8 @@ func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 	assert.True(t, authorized)
 	assert.Equal(t, http.StatusOK, statusCode)
 
-	// For M2M, the subject is built from the product: "admin/<product>-editor-role".
-	assert.Equal(t, "admin/my-app-editor-role", capturedBody["sub"])
+	// For M2M, the subject is the real sub claim of the application token.
+	assert.Equal(t, "app-sub", capturedBody["sub"])
 	// Product is NOT forwarded for non-normal-user tokens.
 	_, hasProduct := capturedBody["product"]
 	assert.False(t, hasProduct)
@@ -401,28 +402,14 @@ func TestCheckAuthorization_InvalidToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, statusCode)
 }
 
-func TestCheckAuthorization_EmptyTypeClaim_TreatedAsNonNormalUser(t *testing.T) {
+func TestCheckAuthorization_EmptyTypeClaim_Rejected(t *testing.T) {
 	t.Parallel()
 
-	// When the "type" claim is empty or absent, userType != normalUser,
-	// so the code takes the admin/ branch.
-	var capturedBody map[string]string
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := json.NewDecoder(r.Body).Decode(&capturedBody)
-		if err != nil {
-			t.Errorf("mock server: failed to decode request body: %v", err)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-
-		resp := AuthResponse{Authorized: true}
-
-		encErr := json.NewEncoder(w).Encode(resp)
-		if encErr != nil {
-			t.Errorf("mock server: failed to encode response: %v", encErr)
-		}
+	// When the "type" claim is empty or absent it is not in the whitelist
+	// {normal-user, application}, so the request must fail closed with 401 and
+	// the auth backend must never be reached.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("auth backend must not be called when the type claim is absent")
 	}))
 	defer server.Close()
 
@@ -432,7 +419,7 @@ func TestCheckAuthorization_EmptyTypeClaim_TreatedAsNonNormalUser(t *testing.T) 
 		Logger:  &testLogger{},
 	}
 
-	// No "type" claim at all -> defaults to empty string -> non-normal-user path
+	// No "type" claim at all -> defaults to empty string -> not whitelisted.
 	token := createTestJWT(jwt.MapClaims{
 		"sub": "some-app",
 	})
@@ -441,10 +428,74 @@ func TestCheckAuthorization_EmptyTypeClaim_TreatedAsNonNormalUser(t *testing.T) 
 		context.Background(), "some-app", "resource", "action", token,
 	)
 
-	require.NoError(t, err)
-	assert.True(t, authorized)
-	assert.Equal(t, http.StatusOK, statusCode)
-	assert.Equal(t, "admin/some-app-editor-role", capturedBody["sub"])
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.Contains(t, err.Error(), "unsupported token type")
+}
+
+func TestCheckAuthorization_ApplicationUser_MissingSubClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+
+	// An application token without a "sub" claim must fail closed with 401 before
+	// the auth backend is reached.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("auth backend must not be called when the application sub claim is missing")
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		// "sub" is intentionally missing
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "my-app", "resource", "action", token,
+	)
+
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.Contains(t, err.Error(), "missing sub claim")
+}
+
+func TestCheckAuthorization_NonCanonicalType_Rejected(t *testing.T) {
+	t.Parallel()
+
+	// Any type outside the whitelist {normal-user, application} must fail closed
+	// with 401 and never reach the auth backend.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("auth backend must not be called for a non-canonical token type")
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "service-account",
+		"owner": "acme-org",
+		"sub":   "svc-1",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token,
+	)
+
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.Contains(t, err.Error(), "unsupported token type")
 }
 
 func TestCheckAuthorization_MockServerDown(t *testing.T) {
