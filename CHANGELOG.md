@@ -1,3 +1,10 @@
+## [3.0.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.1...v3.0.0-beta.2) (2026-07-16)
+
+
+### Features
+
+* real M2M subject and token type whitelist ([e31ac53](https://github.com/LerianStudio/lib-auth/commit/e31ac531043129eee3394afd88d70cd6ad1b8b7e))
+
 ## [3.0.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.9.0...v3.0.0-beta.1) (2026-07-15)
 
 
