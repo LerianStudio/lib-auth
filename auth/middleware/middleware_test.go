@@ -162,7 +162,110 @@ func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 
 	// For M2M, the subject is the real sub claim of the application token.
 	assert.Equal(t, "app-sub", capturedBody["sub"])
-	// Product is NOT forwarded for non-normal-user tokens.
+	// Product is NOT forwarded for application tokens when ForwardM2MProduct is off (default).
+	_, hasProduct := capturedBody["product"]
+	assert.False(t, hasProduct)
+}
+
+func TestCheckAuthorization_Application_ForwardM2MProductEnabled_ForwardsProduct(t *testing.T) {
+	t.Parallel()
+
+	// With ForwardM2MProduct enabled, an application (M2M) token forwards the route
+	// product so the auth service can strip the "{product}/" prefix from stored
+	// resources and dual-match a bare request. The subject stays the real sub claim.
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&capturedBody)
+		if err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		resp := AuthResponse{Authorized: true}
+
+		encErr := json.NewEncoder(w).Encode(resp)
+		if encErr != nil {
+			t.Errorf("mock server: failed to encode response: %v", encErr)
+		}
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:           server.URL,
+		Enabled:           true,
+		Logger:            &testLogger{},
+		ForwardM2MProduct: true,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		"sub":  "acme-org/my-app",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, authorized)
+	assert.Equal(t, http.StatusOK, statusCode)
+
+	// Subject is still the real sub of the application token.
+	assert.Equal(t, "acme-org/my-app", capturedBody["sub"])
+	// Product IS forwarded for M2M when ForwardM2MProduct is enabled.
+	assert.Equal(t, "midaz", capturedBody["product"])
+}
+
+func TestCheckAuthorization_Application_ForwardM2MProductEnabled_EmptyProduct_NotForwarded(t *testing.T) {
+	t.Parallel()
+
+	// Even with ForwardM2MProduct enabled, an empty product is never forwarded
+	// (gate-by-presence preserved).
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&capturedBody)
+		if err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		resp := AuthResponse{Authorized: true}
+
+		encErr := json.NewEncoder(w).Encode(resp)
+		if encErr != nil {
+			t.Errorf("mock server: failed to encode response: %v", encErr)
+		}
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:           server.URL,
+		Enabled:           true,
+		Logger:            &testLogger{},
+		ForwardM2MProduct: true,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		"sub":  "acme-org/my-app",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "", "resource", "action", token,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, authorized)
+	assert.Equal(t, http.StatusOK, statusCode)
+
 	_, hasProduct := capturedBody["product"]
 	assert.False(t, hasProduct)
 }
@@ -558,6 +661,38 @@ func TestCheckAuthorization_ServerReturnsInvalidJSON(t *testing.T) {
 	assert.False(t, authorized)
 	assert.Equal(t, http.StatusInternalServerError, statusCode)
 	assert.Contains(t, err.Error(), "failed to unmarshal")
+}
+
+// ---------------------------------------------------------------------------
+// NewAuthClient - ForwardM2MProduct flag
+// ---------------------------------------------------------------------------
+
+func TestNewAuthClient_ReadsForwardM2MProductFlag(t *testing.T) {
+	// Cannot use t.Parallel(): subtests use t.Setenv which modifies process env.
+	// enabled=false / empty address returns early without any network call, so the
+	// flag wiring is exercised in isolation.
+	logger := log.Logger(&testLogger{})
+
+	t.Run("flag_true_enables_forward", func(t *testing.T) {
+		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "true")
+
+		client := NewAuthClient("", false, &logger)
+		assert.True(t, client.ForwardM2MProduct)
+	})
+
+	t.Run("flag_absent_defaults_false", func(t *testing.T) {
+		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "")
+
+		client := NewAuthClient("", false, &logger)
+		assert.False(t, client.ForwardM2MProduct)
+	})
+
+	t.Run("flag_non_true_value_is_false", func(t *testing.T) {
+		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "1")
+
+		client := NewAuthClient("", false, &logger)
+		assert.False(t, client.ForwardM2MProduct)
+	})
 }
 
 // ---------------------------------------------------------------------------

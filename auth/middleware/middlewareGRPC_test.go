@@ -767,7 +767,7 @@ func TestAuthPayload_ProductGating(t *testing.T) {
 			"sub":   "user123",
 		})
 
-		payload := authPayload(token, "midaz", "resource", "read")
+		payload := authPayload(token, "midaz", "resource", "read", false)
 
 		// resource/action are always present.
 		assert.Equal(t, "resource", payload["resource"])
@@ -776,7 +776,7 @@ func TestAuthPayload_ProductGating(t *testing.T) {
 		assert.Equal(t, "midaz", payload["product"])
 	})
 
-	t.Run("application_omits_product", func(t *testing.T) {
+	t.Run("application_flag_off_omits_product", func(t *testing.T) {
 		t.Parallel()
 
 		token := createTestJWT(jwt.MapClaims{
@@ -785,11 +785,46 @@ func TestAuthPayload_ProductGating(t *testing.T) {
 			"sub":  "acme-org/my-app",
 		})
 
-		payload := authPayload(token, "midaz", "resource", "read")
+		payload := authPayload(token, "midaz", "resource", "read", false)
 
 		assert.Equal(t, "resource", payload["resource"])
 		assert.Equal(t, "read", payload["action"])
-		// M2M carries no product isolation, so product is not recorded.
+		// With the flag off, M2M forwards no product isolation, so it is not recorded.
+		_, hasProduct := payload["product"]
+		assert.False(t, hasProduct)
+	})
+
+	t.Run("application_flag_on_includes_product", func(t *testing.T) {
+		t.Parallel()
+
+		token := createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"name": "my-app",
+			"sub":  "acme-org/my-app",
+		})
+
+		payload := authPayload(token, "midaz", "resource", "read", true)
+
+		assert.Equal(t, "resource", payload["resource"])
+		assert.Equal(t, "read", payload["action"])
+		// With the flag on, M2M forwards the product, so telemetry mirrors it.
+		assert.Equal(t, "midaz", payload["product"])
+	})
+
+	t.Run("application_flag_on_empty_product_omits_product", func(t *testing.T) {
+		t.Parallel()
+
+		token := createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"name": "my-app",
+			"sub":  "acme-org/my-app",
+		})
+
+		payload := authPayload(token, "", "resource", "read", true)
+
+		assert.Equal(t, "resource", payload["resource"])
+		assert.Equal(t, "read", payload["action"])
+		// Empty product is never forwarded, even with the flag on.
 		_, hasProduct := payload["product"]
 		assert.False(t, hasProduct)
 	})
@@ -803,7 +838,7 @@ func TestAuthPayload_ProductGating(t *testing.T) {
 			"sub":   "user123",
 		})
 
-		payload := authPayload(token, "", "resource", "read")
+		payload := authPayload(token, "", "resource", "read", false)
 
 		assert.Equal(t, "resource", payload["resource"])
 		assert.Equal(t, "read", payload["action"])
@@ -879,9 +914,77 @@ func TestNewGRPCAuthUnaryPolicy_ApplicationSubject(t *testing.T) {
 
 	// Subject is the real sub of the application token.
 	assert.Equal(t, "acme-org/my-app", capturedBody["sub"])
-	// Product is not forwarded for M2M tokens.
+	// Product is not forwarded for M2M tokens when the flag is off (default).
 	_, hasProduct := capturedBody["product"]
 	assert.False(t, hasProduct)
+}
+
+func TestNewGRPCAuthUnaryPolicy_ApplicationSubject_ForwardM2MProductEnabled(t *testing.T) {
+	t.Parallel()
+
+	// With ForwardM2MProduct enabled, an application (M2M) token flowing through the
+	// gRPC unary path must forward the resolved product in the request body so the
+	// auth service can dual-match the "{product}/" prefix on stored resources.
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: true}); err != nil {
+			t.Errorf("mock server: failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:           server.URL,
+		Enabled:           true,
+		Logger:            &testLogger{},
+		ForwardM2MProduct: true,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		"sub":  "acme-org/my-app",
+	})
+
+	defaultPol := Policy{Resource: "res", Action: "read"}
+	cfg := PolicyConfig{
+		DefaultPolicy: &defaultPol,
+		SubResolver: func(_ context.Context, _ string, _ any) (string, error) {
+			return "midaz", nil
+		},
+	}
+	interceptor := NewGRPCAuthUnaryPolicy(auth, cfg)
+
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("authorization", "Bearer "+token),
+	)
+
+	called := false
+	handler := func(_ context.Context, _ any) (any, error) {
+		called = true
+		return "ok", nil
+	}
+
+	info := &grpc.UnaryServerInfo{FullMethod: "/pkg.Service/DoThing"}
+
+	resp, err := interceptor(ctx, "req", info, handler)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp)
+	assert.True(t, called)
+
+	// Subject is the real sub of the application token.
+	assert.Equal(t, "acme-org/my-app", capturedBody["sub"])
+	// Product IS forwarded for M2M tokens when the flag is on.
+	assert.Equal(t, "midaz", capturedBody["product"])
 }
 
 // ---------------------------------------------------------------------------

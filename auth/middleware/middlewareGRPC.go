@@ -30,9 +30,9 @@ type Policy struct {
 //   - MethodPolicies keyed by info.FullMethod ("/pkg.Service/Method").
 //   - DefaultPolicy used when a method mapping is absent.
 //   - SubResolver derives the product identifier (e.g., "midaz") passed to
-//     checkAuthorization as its product argument. It is forwarded only for
-//     normal-user tokens (product isolation); M2M (application) tokens carry no
-//     product isolation and are identified by their own subject claim. Return ""
+//     checkAuthorization as its product argument. It is forwarded for normal-user
+//     tokens, and for M2M (application) tokens when AUTH_M2M_PRODUCT_FORWARD_ENABLED
+//     is set; M2M tokens are identified by their own subject claim. Return ""
 //     when not applicable.
 type PolicyConfig struct {
 	MethodPolicies map[string]Policy
@@ -48,8 +48,8 @@ type PolicyConfig struct {
 // Telemetry:
 //   - Sets app.request.request_id.
 //   - Sets app.request.payload with {resource, action}, including product only when
-//     it is actually forwarded to the auth service (normal-user flows with a
-//     non-empty product), mirroring the request body.
+//     it is actually forwarded to the auth service (normal-user, or M2M when
+//     AUTH_M2M_PRODUCT_FORWARD_ENABLED is set), mirroring the request body.
 func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if auth == nil || !auth.Enabled || auth.Address == "" {
@@ -76,8 +76,8 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 		}
 
 		// product is the resolved product identifier passed as checkAuthorization's
-		// product argument. It is forwarded only for normal-user flows; M2M
-		// (application) tokens carry no product isolation.
+		// product argument. It is forwarded for normal-user flows, and for M2M
+		// (application) flows when AUTH_M2M_PRODUCT_FORWARD_ENABLED is set.
 		var product string
 
 		if cfg.SubResolver != nil {
@@ -91,7 +91,7 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 			}
 		}
 
-		payload := authPayload(token, product, pol.Resource, pol.Action)
+		payload := authPayload(token, product, pol.Resource, pol.Action, auth.ForwardM2MProduct)
 		if err := tracing.SetSpanAttributesFromValue(span, "app.request.payload", payload, nil); err != nil {
 			tracing.HandleSpanError(span, "failed to set span payload", err)
 		}
@@ -211,14 +211,15 @@ func SubFromMetadata(key string) func(ctx context.Context, fullMethod string, re
 
 // authPayload builds the telemetry payload mirroring the request body sent to the
 // auth service by checkAuthorization: product is included only when it is actually
-// forwarded (normal-user flows with a non-empty product).
-func authPayload(token, product, resource, action string) map[string]string {
+// forwarded — normal-user flows with a non-empty product, or M2M (application)
+// flows with a non-empty product when forwardM2MProduct is enabled.
+func authPayload(token, product, resource, action string, forwardM2MProduct bool) map[string]string {
 	payload := map[string]string{
 		"resource": resource,
 		"action":   action,
 	}
 
-	if tokenTypeClaim(token) == normalUser && product != "" {
+	if shouldForwardProduct(tokenTypeClaim(token), product, forwardM2MProduct) {
 		payload["product"] = product
 	}
 
@@ -290,8 +291,8 @@ func NewGRPCAuthStreamPolicy(auth *AuthClient, cfg PolicyConfig) grpc.StreamServ
 		}
 
 		// product is the resolved product identifier passed as checkAuthorization's
-		// product argument. It is forwarded only for normal-user flows; M2M
-		// (application) tokens carry no product isolation.
+		// product argument. It is forwarded for normal-user flows, and for M2M
+		// (application) flows when AUTH_M2M_PRODUCT_FORWARD_ENABLED is set.
 		var product string
 
 		if cfg.SubResolver != nil {

@@ -30,6 +30,15 @@ type AuthClient struct {
 	Address string
 	Enabled bool
 	Logger  log.Logger
+
+	// ForwardM2MProduct, when true, forwards the route product on M2M
+	// (application-token) authorization calls, letting the auth service strip the
+	// "{product}/" prefix from stored resources and dual-match a bare request.
+	// It is read once from AUTH_M2M_PRODUCT_FORWARD_ENABLED at construction; the
+	// default (false) preserves the prior behavior of sending no product for M2M.
+	// Gating it by env keeps deploy != release: flipping the flag activates M2M
+	// product isolation without a code change in consumers.
+	ForwardM2MProduct bool
 }
 
 type AuthResponse struct {
@@ -165,11 +174,14 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		}
 	}
 
+	forwardM2MProduct := os.Getenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED") == "true"
+
 	if !enabled || address == "" {
 		return &AuthClient{
-			Address: address,
-			Enabled: enabled,
-			Logger:  l,
+			Address:           address,
+			Enabled:           enabled,
+			Logger:            l,
+			ForwardM2MProduct: forwardM2MProduct,
 		}
 	}
 
@@ -182,21 +194,21 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	if err != nil {
 		logErrorf(context.Background(), l, failedToConnectMsg, err)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logErrorf(context.Background(), l, failedToConnectMsg, resp.Status)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct}
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logErrorf(context.Background(), l, "Failed to read response body: %v", err)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct}
 	}
 
 	if string(body) == "healthy" {
@@ -206,15 +218,16 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	}
 
 	return &AuthClient{
-		Address: address,
-		Enabled: enabled,
-		Logger:  l,
+		Address:           address,
+		Enabled:           enabled,
+		Logger:            l,
+		ForwardM2MProduct: forwardM2MProduct,
 	}
 }
 
 // Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
-// product identifies the product/application owning the route (e.g. "midaz"); it is forwarded only for normal-user flows so the auth service can
-// isolate permissions by product. M2M (application) tokens carry no product isolation and are identified by their own subject claim.
+// product identifies the product/application owning the route (e.g. "midaz"); it is forwarded for normal-user flows, and for M2M (application)
+// flows when AUTH_M2M_PRODUCT_FORWARD_ENABLED is set, so the auth service can isolate permissions by product. M2M tokens are identified by their own subject claim.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
 	return func(c fiber.Ctx) error {
@@ -322,6 +335,19 @@ func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, clai
 	}
 }
 
+// shouldForwardProduct reports whether the route product must be forwarded to the
+// auth service so it can isolate permissions by product (strip the "{product}/"
+// prefix from stored resources and dual-match a bare request). It is forwarded for
+// normal-user flows, and for M2M (application) flows when forwardM2MProduct is
+// enabled; an empty product is never forwarded (gate-by-presence).
+func shouldForwardProduct(userType, product string, forwardM2MProduct bool) bool {
+	if product == "" {
+		return false
+	}
+
+	return userType == normalUser || (userType == application && forwardM2MProduct)
+}
+
 func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken string) (bool, int, error) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
@@ -367,7 +393,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		"action":   action,
 	}
 
-	if userType == normalUser && product != "" {
+	if shouldForwardProduct(userType, product, auth.ForwardM2MProduct) {
 		requestBody["product"] = product
 	}
 
