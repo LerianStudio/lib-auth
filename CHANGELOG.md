@@ -1,3 +1,10 @@
+## [3.0.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.2...v3.0.0-beta.3) (2026-07-17)
+
+
+### Features
+
+* **middleware:** forward product on M2M auth (flag-gated) ([93c44db](https://github.com/LerianStudio/lib-auth/commit/93c44dbc7155db5a4d5e857139e9b35d7ba5847f))
+
 ## [3.0.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.1...v3.0.0-beta.2) (2026-07-16)
 
 
