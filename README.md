@@ -19,6 +19,12 @@ In your environment configuration or `.env` file, set the following environment 
 ```dotenv
 PLUGIN_AUTH_ADDRESS=http://localhost:4000
 PLUGIN_AUTH_ENABLED=true
+
+# Optional. When "true", the client also forwards the route product on M2M
+# (application-token) authorization calls, so the auth service can isolate
+# permissions by product (matching product-prefixed resources). Defaults to
+# false, preserving the previous behavior of sending no product for M2M.
+AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
 ```
 
 ### 2. Create a new instance of the middleware:
