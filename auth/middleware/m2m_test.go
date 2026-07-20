@@ -91,16 +91,17 @@ func newTestM2MAuthenticatorWithIssuer(t *testing.T, pubPEM, issuer string) *M2M
 }
 
 // newTestM2MApp builds a Fiber app whose single route is gated by RequireM2M and
-// echoes the authenticated identity back through response headers.
+// echoes the authenticated identity back through response headers. The downstream
+// handler reads the identity from the framework-agnostic Go context
+// (c.Context()), the same path humafiber-derived handlers rely on.
 func newTestM2MApp(m *M2MAuthenticator) *fiber.App {
 	app := fiber.New()
 
 	app.Put("/declarations/:slug", m.RequireM2M(), func(c fiber.Ctx) error {
-		sub, _ := M2MSubjectFromContext(c)
-		clientID, _ := M2MClientIDFromContext(c)
+		id, _ := M2MIdentityFromContext(c.Context())
 
-		c.Set("X-M2M-Subject", sub)
-		c.Set("X-M2M-Client-Id", clientID)
+		c.Set("X-M2M-Subject", id.Subject)
+		c.Set("X-M2M-Client-Id", id.ClientID)
 
 		return c.SendStatus(http.StatusOK)
 	})
@@ -394,6 +395,9 @@ func TestRequireM2M_MissingToken_Unauthorized(t *testing.T) {
 func TestRequireM2M_ValidToken_AllowsAndExposesIdentity(t *testing.T) {
 	t.Parallel()
 
+	// End-to-end proof that RequireM2M propagates the identity onto the Go
+	// context: the downstream handler reads it via M2MIdentityFromContext(c.Context())
+	// (see newTestM2MApp), the same mechanism humafiber-derived handlers rely on.
 	key, pubPEM := newTestRSAKeyPEM(t)
 	app := newTestM2MApp(newTestM2MAuthenticator(t, pubPEM))
 
@@ -426,4 +430,46 @@ func TestRequireM2M_NormalUserToken_Forbidden(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// ---------------------------------------------------------------------------
+// M2MIdentityFromContext - framework-agnostic accessor
+// ---------------------------------------------------------------------------
+
+func TestM2MIdentityFromContext_Present_RoundTrips(t *testing.T) {
+	t.Parallel()
+
+	want := M2MIdentity{
+		Subject:  "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc",
+		ClientID: "66bac70fbea746daa760",
+	}
+	ctx := context.WithValue(context.Background(), m2mIdentityContextKey{}, want)
+
+	got, ok := M2MIdentityFromContext(ctx)
+
+	require.True(t, ok)
+	assert.Equal(t, want, got)
+}
+
+func TestM2MIdentityFromContext_Absent_ReturnsZeroFalse(t *testing.T) {
+	t.Parallel()
+
+	got, ok := M2MIdentityFromContext(context.Background())
+
+	assert.False(t, ok)
+	assert.Equal(t, M2MIdentity{}, got)
+}
+
+func TestM2MIdentityFromContext_EmptySubject_TreatedAsAbsent(t *testing.T) {
+	t.Parallel()
+
+	// A value with an empty Subject must be reported as absent (ok == false) so a
+	// caller that only checks ok never treats a half-populated identity as
+	// authenticated. RequireM2M never stores such a value (verify rejects an empty
+	// sub), so this only guards against manual/defensive construction.
+	ctx := context.WithValue(context.Background(), m2mIdentityContextKey{}, M2MIdentity{Subject: "", ClientID: "azp-only"})
+
+	_, ok := M2MIdentityFromContext(ctx)
+
+	assert.False(t, ok)
 }
