@@ -469,7 +469,8 @@ func TestM2MIdentityFromContext_EmptySubject_TreatedAsAbsent(t *testing.T) {
 	// sub), so this only guards against manual/defensive construction.
 	ctx := context.WithValue(context.Background(), m2mIdentityContextKey{}, M2MIdentity{Subject: "", ClientID: "azp-only"})
 
-	_, ok := M2MIdentityFromContext(ctx)
+	id, ok := M2MIdentityFromContext(ctx)
 
 	assert.False(t, ok)
+	assert.Equal(t, M2MIdentity{}, id, "an empty-subject identity must be reported as the zero value")
 }

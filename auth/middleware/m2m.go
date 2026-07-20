@@ -237,6 +237,9 @@ func (m *M2MAuthenticator) verify(ctx context.Context, span trace.Span, accessTo
 // half-populated identity as authenticated.
 func M2MIdentityFromContext(ctx context.Context) (M2MIdentity, bool) {
 	id, ok := ctx.Value(m2mIdentityContextKey{}).(M2MIdentity)
+	if !ok || id.Subject == "" {
+		return M2MIdentity{}, false
+	}
 
-	return id, ok && id.Subject != ""
+	return id, true
 }
