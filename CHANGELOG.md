@@ -1,3 +1,11 @@
+## [3.0.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.3...v3.0.0-beta.4) (2026-07-20)
+
+
+### Features
+
+* **middleware:** add M2M authentication gate ([2034198](https://github.com/LerianStudio/lib-auth/commit/20341984c8c3ca57db0abf7c6bd57c85b981d15a))
+* **middleware:** add optional issuer pinning to M2M gate ([5afd305](https://github.com/LerianStudio/lib-auth/commit/5afd3055d9d4a8439e71c5fa78ef75afc68f7624))
+
 ## [3.0.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.2...v3.0.0-beta.3) (2026-07-17)
 
 
