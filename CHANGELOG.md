@@ -1,3 +1,15 @@
+## [3.0.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.4...v3.0.0-beta.5) (2026-07-20)
+
+
+### Features
+
+* **middleware:** expose M2M identity via request context ([c48393a](https://github.com/LerianStudio/lib-auth/commit/c48393ac6cbeb0494524dccfb8e35ee6eb5e5375)), closes [#125](https://github.com/LerianStudio/lib-auth/issues/125)
+
+
+### Bug Fixes
+
+* **middleware:** return zero M2MIdentity when reporting absent ([25fc4ec](https://github.com/LerianStudio/lib-auth/commit/25fc4ec9a44aff13964117ef96420d59468530a2)), closes [#126](https://github.com/LerianStudio/lib-auth/issues/126)
+
 ## [3.0.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.3...v3.0.0-beta.4) (2026-07-20)
 
 
