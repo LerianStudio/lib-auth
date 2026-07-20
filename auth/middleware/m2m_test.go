@@ -73,7 +73,18 @@ func newTestM2MAuthenticator(t *testing.T, pubPEM string) *M2MAuthenticator {
 
 	logger := log.Logger(&testLogger{})
 
-	m, err := NewM2MAuthenticator(pubPEM, true, &logger)
+	m, err := NewM2MAuthenticator(pubPEM, "", true, &logger)
+	require.NoError(t, err)
+
+	return m
+}
+
+func newTestM2MAuthenticatorWithIssuer(t *testing.T, pubPEM, issuer string) *M2MAuthenticator {
+	t.Helper()
+
+	logger := log.Logger(&testLogger{})
+
+	m, err := NewM2MAuthenticator(pubPEM, issuer, true, &logger)
 	require.NoError(t, err)
 
 	return m
@@ -106,7 +117,7 @@ func TestNewM2MAuthenticator_DisabledAllowsEmptyCert(t *testing.T) {
 
 	logger := log.Logger(&testLogger{})
 
-	m, err := NewM2MAuthenticator("", false, &logger)
+	m, err := NewM2MAuthenticator("", "", false, &logger)
 	require.NoError(t, err)
 	require.NotNil(t, m)
 	assert.False(t, m.enabled)
@@ -118,7 +129,7 @@ func TestNewM2MAuthenticator_EnabledRejectsInvalidCert(t *testing.T) {
 
 	logger := log.Logger(&testLogger{})
 
-	m, err := NewM2MAuthenticator("not-a-pem", true, &logger)
+	m, err := NewM2MAuthenticator("not-a-pem", "", true, &logger)
 	require.Error(t, err)
 	assert.Nil(t, m)
 }
@@ -130,7 +141,7 @@ func TestNewM2MAuthenticator_EnabledParsesValidCert(t *testing.T) {
 
 	logger := log.Logger(&testLogger{})
 
-	m, err := NewM2MAuthenticator(pubPEM, true, &logger)
+	m, err := NewM2MAuthenticator(pubPEM, "", true, &logger)
 	require.NoError(t, err)
 	require.NotNil(t, m)
 	assert.True(t, m.enabled)
@@ -264,6 +275,44 @@ func TestVerify_ApplicationMissingSub_Rejected(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, statusCode)
 }
 
+func TestVerify_MatchingIssuer_Allows(t *testing.T) {
+	t.Parallel()
+
+	const issuer = "http://plugin-access-manager-auth-backend:8000"
+
+	key, pubPEM := newTestRSAKeyPEM(t)
+	m := newTestM2MAuthenticatorWithIssuer(t, pubPEM, issuer)
+
+	claims := applicationClaims()
+	claims["iss"] = issuer
+
+	token := signRS256(t, key, claims)
+
+	_, statusCode, err := m.verify(context.Background(), noopSpan(), token)
+
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, statusCode)
+}
+
+func TestVerify_WrongIssuer_Rejected(t *testing.T) {
+	t.Parallel()
+
+	// A validly-signed application token from a different issuer (sharing the same
+	// signing key) must be rejected when an expected issuer is pinned.
+	key, pubPEM := newTestRSAKeyPEM(t)
+	m := newTestM2MAuthenticatorWithIssuer(t, pubPEM, "http://expected-issuer:8000")
+
+	claims := applicationClaims()
+	claims["iss"] = "http://attacker-issuer:8000"
+
+	token := signRS256(t, key, claims)
+
+	_, statusCode, err := m.verify(context.Background(), noopSpan(), token)
+
+	require.Error(t, err)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+}
+
 func TestVerify_NonApplicationType_Forbidden(t *testing.T) {
 	t.Parallel()
 
@@ -316,7 +365,7 @@ func TestRequireM2M_Disabled_PassesThrough(t *testing.T) {
 
 	logger := log.Logger(&testLogger{})
 
-	m, err := NewM2MAuthenticator("", false, &logger)
+	m, err := NewM2MAuthenticator("", "", false, &logger)
 	require.NoError(t, err)
 
 	app := newTestM2MApp(m)

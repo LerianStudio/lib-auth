@@ -42,8 +42,13 @@ const (
 // any service can reuse this by supplying its own issuer certificate.
 type M2MAuthenticator struct {
 	publicKey *rsa.PublicKey
-	enabled   bool
-	logger    log.Logger
+	// expectedIssuer, when non-empty, pins the accepted token "iss" claim so a
+	// token minted by a different issuer sharing the same signing key is
+	// rejected. Empty means the issuer is not checked (acceptable only in a
+	// single-issuer deployment).
+	expectedIssuer string
+	enabled        bool
+	logger         log.Logger
 }
 
 // NewM2MAuthenticator builds an M2MAuthenticator from the issuer's certificate
@@ -56,7 +61,12 @@ type M2MAuthenticator struct {
 // enabled is true a parseable certificate is required; an empty or invalid PEM
 // returns an error so a misconfigured service fails to start rather than
 // silently accepting unverified tokens.
-func NewM2MAuthenticator(certificatePEM string, enabled bool, logger *log.Logger) (*M2MAuthenticator, error) {
+//
+// expectedIssuer, when non-empty, pins the token "iss" claim (defense in depth
+// against reuse of a token minted by a different issuer that shares the same
+// signing key). Pass "" to skip the issuer check; this is only safe in a
+// single-issuer deployment and setting it is recommended otherwise.
+func NewM2MAuthenticator(certificatePEM, expectedIssuer string, enabled bool, logger *log.Logger) (*M2MAuthenticator, error) {
 	var l log.Logger
 
 	if logger != nil {
@@ -73,7 +83,7 @@ func NewM2MAuthenticator(certificatePEM string, enabled bool, logger *log.Logger
 	}
 
 	if !enabled {
-		return &M2MAuthenticator{publicKey: nil, enabled: false, logger: l}, nil
+		return &M2MAuthenticator{publicKey: nil, expectedIssuer: expectedIssuer, enabled: false, logger: l}, nil
 	}
 
 	publicKey, err := jwt.ParseRSAPublicKeyFromPEM([]byte(certificatePEM))
@@ -81,7 +91,7 @@ func NewM2MAuthenticator(certificatePEM string, enabled bool, logger *log.Logger
 		return nil, fmt.Errorf("failed to parse issuer certificate: %w", err)
 	}
 
-	return &M2MAuthenticator{publicKey: publicKey, enabled: true, logger: l}, nil
+	return &M2MAuthenticator{publicKey: publicKey, expectedIssuer: expectedIssuer, enabled: true, logger: l}, nil
 }
 
 // RequireM2M is a Fiber middleware that rejects any request not carrying a
@@ -158,10 +168,17 @@ func (m *M2MAuthenticator) verify(ctx context.Context, span trace.Span, accessTo
 	// public key as the shared secret is rejected before the keyfunc runs).
 	// WithExpirationRequired rejects a validly-signed token that omits "exp", so a
 	// non-expiring credential cannot slip through (Casdoor always emits exp).
-	parser := jwt.NewParser(
+	// WithIssuer, when an expected issuer is configured, rejects a token minted by
+	// a different issuer that shares the same signing key.
+	opts := []jwt.ParserOption{
 		jwt.WithValidMethods([]string{"RS256"}),
 		jwt.WithExpirationRequired(),
-	)
+	}
+	if m.expectedIssuer != "" {
+		opts = append(opts, jwt.WithIssuer(m.expectedIssuer))
+	}
+
+	parser := jwt.NewParser(opts...)
 
 	token, err := parser.ParseWithClaims(accessToken, claims, func(_ *jwt.Token) (any, error) {
 		return m.publicKey, nil
