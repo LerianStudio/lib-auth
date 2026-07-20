@@ -20,13 +20,18 @@ import (
 	jwt "github.com/golang-jwt/jwt/v5"
 )
 
-// Fiber locals keys under which RequireM2M stores the authenticated application
-// identity for downstream handlers. Read them via the typed helpers
-// (M2MSubjectFromContext / M2MClientIDFromContext), not the raw keys.
-const (
-	contextKeyM2MSubject  = "lib_auth.m2m.subject"
-	contextKeyM2MClientID = "lib_auth.m2m.client_id"
-)
+// M2MIdentity is the authenticated application identity extracted from a verified
+// M2M token. RequireM2M stores it on the request Go context; read it back with
+// M2MIdentityFromContext.
+type M2MIdentity struct {
+	Subject  string // "sub" claim, "<owner>/<id>" form
+	ClientID string // "azp" claim (the Casdoor application clientId)
+}
+
+// m2mIdentityContextKey is the unexported, typed key under which RequireM2M stores
+// the M2MIdentity on the request context. A dedicated type (rather than a string)
+// avoids collisions with any other context value.
+type m2mIdentityContextKey struct{}
 
 // M2MAuthenticator authenticates machine-to-machine (application) callers by
 // verifying a Casdoor-issued RS256 access token offline against an injected
@@ -96,8 +101,10 @@ func NewM2MAuthenticator(certificatePEM, expectedIssuer string, enabled bool, lo
 
 // RequireM2M is a Fiber middleware that rejects any request not carrying a
 // valid, unexpired, RS256-signed Casdoor application (M2M) token. On success the
-// application identity is stored in the request locals (see
-// M2MSubjectFromContext / M2MClientIDFromContext) and the request proceeds.
+// application identity is stored on the request Go context (readable via
+// M2MIdentityFromContext, framework-agnostically, by any downstream handler —
+// fiber-native via c.Context(), humafiber-derived, or gRPC) and the request
+// proceeds.
 //
 // All failure modes fail closed:
 //   - missing token                          -> 401 Unauthorized
@@ -135,8 +142,10 @@ func (m *M2MAuthenticator) RequireM2M() fiber.Handler {
 		subject, _ := claims["sub"].(string)
 		clientID, _ := claims["azp"].(string)
 
-		c.Locals(contextKeyM2MSubject, subject)
-		c.Locals(contextKeyM2MClientID, clientID)
+		// Store the identity on the request Go context (derived from c.Context(),
+		// NOT the tracing ctx) so this adds only the identity value without altering
+		// span/tracing topology. Downstream handlers read it via M2MIdentityFromContext.
+		c.SetContext(context.WithValue(c.Context(), m2mIdentityContextKey{}, M2MIdentity{Subject: subject, ClientID: clientID}))
 
 		span.SetAttributes(
 			attribute.String("app.auth.m2m.subject", subject),
@@ -222,18 +231,15 @@ func (m *M2MAuthenticator) verify(ctx context.Context, span trace.Span, accessTo
 	return claims, http.StatusOK, nil
 }
 
-// M2MSubjectFromContext returns the authenticated application subject (the "sub"
-// claim, "<owner>/<id>" form) stored by RequireM2M, or ("", false) when absent.
-func M2MSubjectFromContext(c fiber.Ctx) (string, bool) {
-	v, ok := c.Locals(contextKeyM2MSubject).(string)
+// M2MIdentityFromContext returns the authenticated M2M identity that RequireM2M
+// stored on the request context, or (zero, false) when absent. A stored identity
+// with an empty Subject is reported as absent so callers never treat a
+// half-populated identity as authenticated.
+func M2MIdentityFromContext(ctx context.Context) (M2MIdentity, bool) {
+	id, ok := ctx.Value(m2mIdentityContextKey{}).(M2MIdentity)
+	if !ok || id.Subject == "" {
+		return M2MIdentity{}, false
+	}
 
-	return v, ok && v != ""
-}
-
-// M2MClientIDFromContext returns the authenticated application client id (the
-// "azp" claim) stored by RequireM2M, or ("", false) when absent.
-func M2MClientIDFromContext(c fiber.Ctx) (string, bool) {
-	v, ok := c.Locals(contextKeyM2MClientID).(string)
-
-	return v, ok && v != ""
+	return id, true
 }
