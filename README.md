@@ -26,6 +26,23 @@ PLUGIN_AUTH_ENABLED=true
 # false, preserving the previous behavior of sending no product for M2M.
 AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
 
+# Optional. Opt-in local JWT signature verification for the general authorization
+# path. When unset, tokens are parsed without signature verification (the
+# authorization service remains the trust anchor) — the previous behavior,
+# unchanged. When set, the bearer token is cryptographically verified (RS256,
+# expiry required, and issuer when AUTH_JWT_ISSUER is set) BEFORE its claims are
+# trusted; any failure denies the request (401, fail closed).
+#
+# AUTH_JWT_VERIFY_CERT holds the issuer's PEM certificate(s) or RSA public key(s).
+# Newline-join multiple PEMs to carry the old and new certs simultaneously across
+# a key rotation (zero-downtime: a token verified by ANY listed key is accepted).
+# AUTH_JWT_VERIFY_CERT_PATH points to a mounted PEM file instead (used only when
+# AUTH_JWT_VERIFY_CERT is empty). A configured-but-unparseable cert is logged at
+# ERROR and leaves verification disabled; it is never silently accepted.
+AUTH_JWT_VERIFY_CERT=
+AUTH_JWT_VERIFY_CERT_PATH=
+AUTH_JWT_ISSUER=
+
 # Optional. When "true", the middleware fails closed: if auth is disabled
 # (PLUGIN_AUTH_ENABLED=false) or misconfigured (empty PLUGIN_AUTH_ADDRESS),
 # every protected route refuses to serve (HTTP 503 / gRPC Unavailable) instead

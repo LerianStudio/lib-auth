@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,6 +74,18 @@ type AuthClient struct {
 	// failures (network/timeout/5xx). Read once from AUTH_RETRY_MAX; 0 disables
 	// retry (opt-in). Authoritative decisions (401/403) are never retried.
 	retryMax uint
+
+	// verifyKeys holds the RSA public keys used to cryptographically verify the
+	// bearer token locally before its claims are trusted. When empty (the default)
+	// the general path preserves the historical ParseUnverified behavior and the
+	// authz round-trip remains the trust anchor. It is populated from
+	// AUTH_JWT_VERIFY_CERT / AUTH_JWT_VERIFY_CERT_PATH at construction; carrying more
+	// than one key supports zero-downtime cert rotation (any key may verify).
+	verifyKeys []*rsa.PublicKey
+
+	// verifyIssuer, when non-empty, pins the accepted token "iss" claim during local
+	// verification. Read once from AUTH_JWT_ISSUER; inert when verifyKeys is empty.
+	verifyIssuer string
 }
 
 type AuthResponse struct {
@@ -208,6 +221,8 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		}
 	}
 
+	verifyKeys, verifyIssuer := loadVerification(l)
+
 	// Build the client once with all env-derived config, then return it from every
 	// path below; the health check only logs, it never changes these fields.
 	c := &AuthClient{
@@ -220,6 +235,8 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		cache:             newDecisionCacheFromEnv(),
 		breaker:           newBreakerFromEnv(),
 		retryMax:          parseRetryMax(),
+		verifyKeys:        verifyKeys,
+		verifyIssuer:      verifyIssuer,
 	}
 
 	if !enabled || address == "" {
@@ -427,24 +444,9 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
 	defer cancel()
 
-	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
+	claims, statusCode, err := auth.extractClaims(ctx, span, accessToken)
 	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to parse token: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to parse token", err)
-
-		return false, http.StatusUnauthorized, err
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		logErrorf(ctx, auth.Logger, "Failed to parse claims: token.Claims is not of type jwt.MapClaims")
-
-		err := errors.New("token claims are not in the expected format")
-
-		tracing.HandleSpanError(span, "Failed to parse claims", err)
-
-		return false, http.StatusUnauthorized, err
+		return false, statusCode, err
 	}
 
 	userType, _ := claims["type"].(string)
