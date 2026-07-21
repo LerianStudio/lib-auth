@@ -170,42 +170,18 @@ func (m *M2MAuthenticator) verify(ctx context.Context, span trace.Span, accessTo
 		return nil, http.StatusUnauthorized, err
 	}
 
-	claims := jwt.MapClaims{}
-
-	// WithValidMethods pins the accepted signing algorithm to RS256, closing the
-	// alg-substitution hole (a token forged with "none" or with HS256 using the
-	// public key as the shared secret is rejected before the keyfunc runs).
-	// WithExpirationRequired rejects a validly-signed token that omits "exp", so a
-	// non-expiring credential cannot slip through (Casdoor always emits exp).
-	// WithIssuer, when an expected issuer is configured, rejects a token minted by
-	// a different issuer that shares the same signing key.
-	opts := []jwt.ParserOption{
-		jwt.WithValidMethods([]string{"RS256"}),
-		jwt.WithExpirationRequired(),
-	}
-	if m.expectedIssuer != "" {
-		opts = append(opts, jwt.WithIssuer(m.expectedIssuer))
-	}
-
-	parser := jwt.NewParser(opts...)
-
-	token, err := parser.ParseWithClaims(accessToken, claims, func(_ *jwt.Token) (any, error) {
-		return m.publicKey, nil
-	})
+	// verifyToken is the shared hardened RS256 verifier: it pins RS256 (closing the
+	// alg-substitution hole — a token forged with "none" or with HS256 using the
+	// public key as the shared secret is rejected before the keyfunc runs), requires
+	// "exp" (Casdoor always emits it, so a non-expiring credential cannot slip
+	// through), and pins "iss" when expectedIssuer is set. A single-key set is passed
+	// here; the general path may pass several for rotation overlap.
+	claims, statusCode, err := verifyToken([]*rsa.PublicKey{m.publicKey}, m.expectedIssuer, accessToken)
 	if err != nil {
 		logErrorf(ctx, m.logger, "Failed to verify M2M token: %v", err)
 		tracing.HandleSpanError(span, "Failed to verify M2M token", err)
 
-		return nil, http.StatusUnauthorized, errors.New("invalid token")
-	}
-
-	if !token.Valid {
-		err := errors.New("invalid token")
-
-		logErrorf(ctx, m.logger, "M2M token failed validation")
-		tracing.HandleSpanError(span, "M2M token failed validation", err)
-
-		return nil, http.StatusUnauthorized, err
+		return nil, statusCode, err
 	}
 
 	userType, _ := claims["type"].(string)

@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,18 @@ type AuthClient struct {
 	// Gating it by env keeps deploy != release: flipping the flag activates M2M
 	// product isolation without a code change in consumers.
 	ForwardM2MProduct bool
+
+	// verifyKeys holds the RSA public keys used to cryptographically verify the
+	// bearer token locally before its claims are trusted. When empty (the default)
+	// the general path preserves the historical ParseUnverified behavior and the
+	// authz round-trip remains the trust anchor. It is populated from
+	// AUTH_JWT_VERIFY_CERT / AUTH_JWT_VERIFY_CERT_PATH at construction; carrying more
+	// than one key supports zero-downtime cert rotation (any key may verify).
+	verifyKeys []*rsa.PublicKey
+
+	// verifyIssuer, when non-empty, pins the accepted token "iss" claim during local
+	// verification. Read once from AUTH_JWT_ISSUER; inert when verifyKeys is empty.
+	verifyIssuer string
 }
 
 type AuthResponse struct {
@@ -176,12 +189,16 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 
 	forwardM2MProduct := os.Getenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED") == "true"
 
+	verifyKeys, verifyIssuer := loadVerification(l)
+
 	if !enabled || address == "" {
 		return &AuthClient{
 			Address:           address,
 			Enabled:           enabled,
 			Logger:            l,
 			ForwardM2MProduct: forwardM2MProduct,
+			verifyKeys:        verifyKeys,
+			verifyIssuer:      verifyIssuer,
 		}
 	}
 
@@ -194,21 +211,21 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	if err != nil {
 		logErrorf(context.Background(), l, failedToConnectMsg, err)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct, verifyKeys: verifyKeys, verifyIssuer: verifyIssuer}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logErrorf(context.Background(), l, failedToConnectMsg, resp.Status)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct, verifyKeys: verifyKeys, verifyIssuer: verifyIssuer}
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logErrorf(context.Background(), l, "Failed to read response body: %v", err)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct, verifyKeys: verifyKeys, verifyIssuer: verifyIssuer}
 	}
 
 	if string(body) == "healthy" {
@@ -222,6 +239,8 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		Enabled:           enabled,
 		Logger:            l,
 		ForwardM2MProduct: forwardM2MProduct,
+		verifyKeys:        verifyKeys,
+		verifyIssuer:      verifyIssuer,
 	}
 }
 
@@ -360,24 +379,9 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 
 	client := sharedHTTPClient
 
-	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
+	claims, statusCode, err := auth.extractClaims(ctx, span, accessToken)
 	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to parse token: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to parse token", err)
-
-		return false, http.StatusUnauthorized, err
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		logErrorf(ctx, auth.Logger, "Failed to parse claims: token.Claims is not of type jwt.MapClaims")
-
-		err := errors.New("token claims are not in the expected format")
-
-		tracing.HandleSpanError(span, "Failed to parse claims", err)
-
-		return false, http.StatusUnauthorized, err
+		return false, statusCode, err
 	}
 
 	userType, _ := claims["type"].(string)
