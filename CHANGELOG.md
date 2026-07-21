@@ -1,3 +1,10 @@
+## [3.0.0-beta.8](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.7...v3.0.0-beta.8) (2026-07-21)
+
+
+### Features
+
+* **middleware:** add opt-in local JWT signature verification ([#128](https://github.com/LerianStudio/lib-auth/issues/128)) ([48b81a3](https://github.com/LerianStudio/lib-auth/commit/48b81a355cabbc65fc2fe229b6b214c9fa62fc37)), closes [#106](https://github.com/LerianStudio/lib-auth/issues/106)
+
 ## [3.0.0-beta.7](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.6...v3.0.0-beta.7) (2026-07-21)
 
 
