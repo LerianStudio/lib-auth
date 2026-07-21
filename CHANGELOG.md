@@ -1,3 +1,10 @@
+## [3.0.0-beta.7](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.6...v3.0.0-beta.7) (2026-07-21)
+
+
+### Features
+
+* **middleware:** add authz cache, circuit breaker, and bounded retry ([c0469e6](https://github.com/LerianStudio/lib-auth/commit/c0469e6741e7a20e5400b82d2912f7ea2630f016)), closes [#107](https://github.com/LerianStudio/lib-auth/issues/107) [#127](https://github.com/LerianStudio/lib-auth/issues/127) [#127](https://github.com/LerianStudio/lib-auth/issues/127) [#108](https://github.com/LerianStudio/lib-auth/issues/108)
+
 ## [3.0.0-beta.6](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.5...v3.0.0-beta.6) (2026-07-21)
 
 
