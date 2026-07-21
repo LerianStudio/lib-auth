@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	observability "github.com/LerianStudio/lib-observability/v2"
 	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -692,6 +694,115 @@ func TestNewAuthClient_ReadsForwardM2MProductFlag(t *testing.T) {
 
 		client := NewAuthClient("", false, &logger)
 		assert.False(t, client.ForwardM2MProduct)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// NewAuthClient - Required (AUTH_REQUIRED) flag
+// ---------------------------------------------------------------------------
+
+func TestNewAuthClient_ReadsRequiredFlag(t *testing.T) {
+	// Cannot use t.Parallel(): subtests use t.Setenv which modifies process env.
+	// enabled=false / empty address returns early without any network call, so the
+	// flag wiring is exercised in isolation.
+	logger := log.Logger(&testLogger{})
+
+	t.Run("flag_true_enables_required", func(t *testing.T) {
+		t.Setenv("AUTH_REQUIRED", "true")
+
+		client := NewAuthClient("", false, &logger)
+		assert.True(t, client.Required)
+	})
+
+	t.Run("flag_absent_defaults_false", func(t *testing.T) {
+		t.Setenv("AUTH_REQUIRED", "")
+
+		client := NewAuthClient("", false, &logger)
+		assert.False(t, client.Required)
+	})
+
+	t.Run("flag_non_true_value_is_false", func(t *testing.T) {
+		t.Setenv("AUTH_REQUIRED", "1")
+
+		client := NewAuthClient("", false, &logger)
+		assert.False(t, client.Required)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Authorize - fail-closed (AUTH_REQUIRED) posture
+// ---------------------------------------------------------------------------
+
+func TestAuthorize_FailClosed(t *testing.T) {
+	t.Parallel()
+
+	const reached = "reached handler"
+
+	newApp := func(auth *AuthClient) *fiber.App {
+		app := fiber.New()
+		app.Get("/x", auth.Authorize("product", "resource", "get"), func(c fiber.Ctx) error {
+			return c.SendString(reached)
+		})
+
+		return app
+	}
+
+	t.Run("required_and_disabled_refuses_with_503", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{Enabled: false, Required: true, Logger: &testLogger{}}
+
+		resp, err := newApp(auth).Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	})
+
+	t.Run("required_and_empty_address_refuses_with_503", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{Address: "", Enabled: true, Required: true, Logger: &testLogger{}}
+
+		resp, err := newApp(auth).Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	})
+
+	t.Run("not_required_and_disabled_passes_through", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{Enabled: false, Required: false, Logger: &testLogger{}}
+
+		resp, err := newApp(auth).Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, reached, string(body))
+	})
+
+	t.Run("required_and_enabled_authorizes_normally", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Required: true, Logger: &testLogger{}}
+
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "org1",
+			"sub":   "user1",
+		}))
+
+		resp, err := newApp(auth).Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, reached, string(body))
 	})
 }
 

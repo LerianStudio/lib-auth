@@ -52,7 +52,13 @@ type PolicyConfig struct {
 //     AUTH_M2M_PRODUCT_FORWARD_ENABLED is set), mirroring the request body.
 func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		if auth == nil || !auth.Enabled || auth.Address == "" {
+		if auth.mustRefuse() {
+			// AUTH_REQUIRED opted in but auth is disabled/misconfigured: refuse the
+			// RPC (fail closed) instead of silently passing it through.
+			return nil, status.Error(codes.Unavailable, "service unavailable")
+		}
+
+		if !auth.canAuthorize() {
 			return handler(ctx, req)
 		}
 
@@ -106,28 +112,39 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 		}
 
 		// Propagate tenant claims if multi-tenant mode is enabled
-		if os.Getenv("MULTI_TENANT_ENABLED") == "true" {
-			tenantID, tenantSlug, tOwner, _ := extractTenantClaims(token)
-			md, _ := metadata.FromIncomingContext(ctx)
-			md = md.Copy()
-
-			if tenantID != "" {
-				md.Set("md-tenant-id", tenantID)
-			}
-
-			if tenantSlug != "" {
-				md.Set("md-tenant-slug", tenantSlug)
-			}
-
-			if tOwner != "" {
-				md.Set("md-tenant-owner", tOwner)
-			}
-
-			ctx = metadata.NewIncomingContext(ctx, md)
-		}
+		ctx, _ = tenantContext(ctx, token)
 
 		return handler(ctx, req)
 	}
+}
+
+// tenantContext returns ctx augmented with tenant metadata (md-tenant-id/slug/owner)
+// extracted from the token when MULTI_TENANT_ENABLED is set, along with whether it
+// added anything. When multi-tenant mode is off it returns ctx unchanged and false.
+// Shared by the unary and stream interceptors to avoid duplicating the propagation
+// logic; the bool lets the stream interceptor decide whether to wrap its stream.
+func tenantContext(ctx context.Context, token string) (context.Context, bool) {
+	if os.Getenv("MULTI_TENANT_ENABLED") != "true" {
+		return ctx, false
+	}
+
+	tenantID, tenantSlug, tOwner, _ := extractTenantClaims(token)
+	md, _ := metadata.FromIncomingContext(ctx)
+	md = md.Copy()
+
+	if tenantID != "" {
+		md.Set("md-tenant-id", tenantID)
+	}
+
+	if tenantSlug != "" {
+		md.Set("md-tenant-slug", tenantSlug)
+	}
+
+	if tOwner != "" {
+		md.Set("md-tenant-owner", tOwner)
+	}
+
+	return metadata.NewIncomingContext(ctx, md), true
 }
 
 // extractTokenFromMD returns the bearer token from incoming metadata "authorization".
@@ -274,7 +291,13 @@ func extractTenantClaims(tokenString string) (tenantID, tenantSlug, owner string
 // - Propagates tenant claims when MULTI_TENANT_ENABLED=true.
 func NewGRPCAuthStreamPolicy(auth *AuthClient, cfg PolicyConfig) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		if auth == nil || !auth.Enabled || auth.Address == "" {
+		if auth.mustRefuse() {
+			// AUTH_REQUIRED opted in but auth is disabled/misconfigured: refuse the
+			// stream (fail closed) instead of silently passing it through.
+			return status.Error(codes.Unavailable, "service unavailable")
+		}
+
+		if !auth.canAuthorize() {
 			return handler(srv, ss)
 		}
 
@@ -314,25 +337,8 @@ func NewGRPCAuthStreamPolicy(auth *AuthClient, cfg PolicyConfig) grpc.StreamServ
 		}
 
 		// Propagate tenant claims if multi-tenant mode is enabled
-		if os.Getenv("MULTI_TENANT_ENABLED") == "true" {
-			tenantID, tenantSlug, tOwner, _ := extractTenantClaims(token)
-			md, _ := metadata.FromIncomingContext(ctx)
-			md = md.Copy()
-
-			if tenantID != "" {
-				md.Set("md-tenant-id", tenantID)
-			}
-
-			if tenantSlug != "" {
-				md.Set("md-tenant-slug", tenantSlug)
-			}
-
-			if tOwner != "" {
-				md.Set("md-tenant-owner", tOwner)
-			}
-
-			ctx = metadata.NewIncomingContext(ctx, md)
-			ss = &wrappedServerStream{ServerStream: ss, ctx: ctx}
+		if tenantCtx, wrapped := tenantContext(ctx, token); wrapped {
+			ss = &wrappedServerStream{ServerStream: ss, ctx: tenantCtx}
 		}
 
 		return handler(srv, ss)
