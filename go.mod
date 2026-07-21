@@ -19,8 +19,8 @@ require (
 )
 
 require (
-	github.com/LerianStudio/lib-commons/v6 v6.0.0-beta.2
-	github.com/LerianStudio/lib-observability/v2 v2.0.0-beta.1
+	github.com/LerianStudio/lib-commons/v6 v6.0.0
+	github.com/LerianStudio/lib-observability/v2 v2.0.0
 	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/bxcodec/dbresolver/v2 v2.2.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3
