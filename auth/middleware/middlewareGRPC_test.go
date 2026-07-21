@@ -487,6 +487,50 @@ func TestNewGRPCAuthUnaryPolicy(t *testing.T) {
 		assert.True(t, called)
 	})
 
+	t.Run("required_and_disabled_refuses_with_unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+		handler := func(_ context.Context, _ any) (any, error) {
+			called = true
+			return "ok", nil
+		}
+
+		auth := &AuthClient{Address: "http://localhost:9999", Enabled: false, Required: true}
+		interceptor := NewGRPCAuthUnaryPolicy(auth, PolicyConfig{})
+
+		resp, err := interceptor(context.Background(), "req", dummyInfo, handler)
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.False(t, called)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unavailable, st.Code())
+	})
+
+	t.Run("required_and_empty_address_refuses_with_unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+		handler := func(_ context.Context, _ any) (any, error) {
+			called = true
+			return "ok", nil
+		}
+
+		auth := &AuthClient{Address: "", Enabled: true, Required: true}
+		interceptor := NewGRPCAuthUnaryPolicy(auth, PolicyConfig{})
+
+		resp, err := interceptor(context.Background(), "req", dummyInfo, handler)
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.False(t, called)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unavailable, st.Code())
+	})
+
 	t.Run("missing_token_returns_unauthenticated", func(t *testing.T) {
 		t.Parallel()
 
@@ -1045,6 +1089,30 @@ func TestNewGRPCAuthStreamPolicy(t *testing.T) {
 		err := interceptor(nil, ss, dummyInfo, handler)
 		require.NoError(t, err)
 		assert.True(t, called)
+	})
+
+	t.Run("required_and_disabled_refuses_with_unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+
+		handler := func(_ any, _ grpc.ServerStream) error {
+			called = true
+			return nil
+		}
+
+		auth := &AuthClient{Address: "http://localhost:9999", Enabled: false, Required: true}
+		interceptor := NewGRPCAuthStreamPolicy(auth, PolicyConfig{})
+
+		ss := &fakeServerStream{ctx: context.Background()}
+
+		err := interceptor(nil, ss, dummyInfo, handler)
+		require.Error(t, err)
+		assert.False(t, called)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unavailable, st.Code())
 	})
 
 	t.Run("missing_token_returns_unauthenticated", func(t *testing.T) {
