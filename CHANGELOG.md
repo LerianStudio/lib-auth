@@ -1,3 +1,10 @@
+## [3.0.0-beta.6](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.5...v3.0.0-beta.6) (2026-07-21)
+
+
+### Features
+
+* **middleware:** add fail-closed AUTH_REQUIRED option ([f7fff6c](https://github.com/LerianStudio/lib-auth/commit/f7fff6c2ab78b30c4d851d2ab39afc362c8a2570)), closes [#107](https://github.com/LerianStudio/lib-auth/issues/107)
+
 ## [3.0.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.4...v3.0.0-beta.5) (2026-07-20)
 
 
