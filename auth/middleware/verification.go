@@ -140,7 +140,7 @@ func loadVerification(logger log.Logger) (keys []*rsa.PublicKey, issuer string) 
 	keys, err = parseRSAPublicKeys(pemData)
 	if err != nil {
 		logErrorf(context.Background(), logger,
-			"AUTH_JWT_VERIFY_CERT unparseable, local JWT verification disabled: %v", err)
+			"failed to parse verification certificate, local JWT verification disabled: %v", err)
 
 		return nil, issuer
 	}
@@ -153,7 +153,7 @@ func loadVerification(logger log.Logger) (keys []*rsa.PublicKey, issuer string) 
 // AUTH_JWT_VERIFY_CERT_PATH. It returns (nil, nil) when neither is set, which
 // leaves verification off (opt-in by presence, like the M2M cert gate).
 func loadVerifyCertPEM() ([]byte, error) {
-	if inline := os.Getenv("AUTH_JWT_VERIFY_CERT"); inline != "" {
+	if inline := strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT")); inline != "" {
 		return []byte(inline), nil
 	}
 
