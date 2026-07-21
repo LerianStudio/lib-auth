@@ -39,6 +39,16 @@ type AuthClient struct {
 	// Gating it by env keeps deploy != release: flipping the flag activates M2M
 	// product isolation without a code change in consumers.
 	ForwardM2MProduct bool
+
+	// Required, when true, makes the middleware fail closed: if auth is disabled
+	// or misconfigured (!Enabled || Address == ""), every protected route refuses
+	// to serve (HTTP 503 / gRPC Unavailable) instead of passing through with
+	// c.Next()/handler(). It is read once from AUTH_REQUIRED at construction; the
+	// default (false) preserves the prior fail-open pass-through behavior exactly.
+	// This inverts the default posture only for deployments that opt in, so a
+	// missing/typo'd address can no longer silently downgrade a protected service
+	// to fully open.
+	Required bool
 }
 
 type AuthResponse struct {
@@ -175,13 +185,20 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	}
 
 	forwardM2MProduct := os.Getenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED") == "true"
+	required := os.Getenv("AUTH_REQUIRED") == "true"
 
 	if !enabled || address == "" {
+		if required {
+			logErrorf(context.Background(), l,
+				"AUTH_REQUIRED is set but auth is disabled or address is empty: middleware will fail closed (refuse to serve)")
+		}
+
 		return &AuthClient{
 			Address:           address,
 			Enabled:           enabled,
 			Logger:            l,
 			ForwardM2MProduct: forwardM2MProduct,
+			Required:          required,
 		}
 	}
 
@@ -194,21 +211,21 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	if err != nil {
 		logErrorf(context.Background(), l, failedToConnectMsg, err)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct, Required: required}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logErrorf(context.Background(), l, failedToConnectMsg, resp.Status)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct, Required: required}
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logErrorf(context.Background(), l, "Failed to read response body: %v", err)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct}
+		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct, Required: required}
 	}
 
 	if string(body) == "healthy" {
@@ -222,7 +239,24 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		Enabled:           enabled,
 		Logger:            l,
 		ForwardM2MProduct: forwardM2MProduct,
+		Required:          required,
 	}
+}
+
+// canAuthorize reports whether the client is able to perform an authorization
+// check: non-nil, Enabled, and holding an Address. When it returns false the
+// caller passes the request through (default, fail open) unless Required is set.
+// A nil receiver is safe and reports false, so a nil client is never usable.
+func (auth *AuthClient) canAuthorize() bool {
+	return auth != nil && auth.Enabled && auth.Address != ""
+}
+
+// mustRefuse reports whether a client that cannot authorize must fail closed
+// (refuse to serve) instead of passing the request through. It is true only when
+// the client is non-nil, opted in via Required (AUTH_REQUIRED), and cannot
+// authorize (disabled or no address). This is the fail-closed switch from #107.
+func (auth *AuthClient) mustRefuse() bool {
+	return auth != nil && auth.Required && !auth.canAuthorize()
 }
 
 // Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
@@ -235,7 +269,13 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 
 		_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
-		if !auth.Enabled || auth.Address == "" {
+		if auth.mustRefuse() {
+			// AUTH_REQUIRED opted in but auth is disabled/misconfigured: refuse to
+			// serve (fail closed) instead of silently passing the request through.
+			return c.Status(http.StatusServiceUnavailable).SendString("Service Unavailable")
+		}
+
+		if !auth.canAuthorize() {
 			return c.Next()
 		}
 

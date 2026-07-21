@@ -25,6 +25,14 @@ PLUGIN_AUTH_ENABLED=true
 # permissions by product (matching product-prefixed resources). Defaults to
 # false, preserving the previous behavior of sending no product for M2M.
 AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
+
+# Optional. When "true", the middleware fails closed: if auth is disabled
+# (PLUGIN_AUTH_ENABLED=false) or misconfigured (empty PLUGIN_AUTH_ADDRESS),
+# every protected route refuses to serve (HTTP 503 / gRPC Unavailable) instead
+# of passing through unauthenticated. Defaults to false, preserving the prior
+# fail-open behavior. Set it in security-sensitive deployments so a
+# missing/typo'd address cannot silently downgrade a protected service to open.
+AUTH_REQUIRED=false
 ```
 
 ### 2. Create a new instance of the middleware:
