@@ -24,6 +24,7 @@ import (
 	libHTTP "github.com/LerianStudio/lib-commons/v6/commons/net/http"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/sony/gobreaker"
 )
 
 type AuthClient struct {
@@ -49,6 +50,29 @@ type AuthClient struct {
 	// missing/typo'd address can no longer silently downgrade a protected service
 	// to fully open.
 	Required bool
+
+	// timeout bounds each authorization round-trip via a per-request context
+	// deadline. Read once from AUTH_TIMEOUT; defaults to 30s (behavior-neutral,
+	// matching the prior client-wide HTTP timeout) when unset/invalid. It also caps
+	// the retry budget.
+	timeout time.Duration
+
+	// cache, when non-nil, memoizes authorization decisions for a short TTL keyed by
+	// (sub, resource, action, product) — NEVER the raw token. Enabled by
+	// AUTH_CACHE_TTL > 0 (opt-in; nil = no caching, prior behavior). It trades a
+	// bounded revocation-propagation lag (= TTL) for load shedding and outage
+	// resilience.
+	cache *decisionCache
+
+	// breaker, when non-nil, short-circuits the authorization call after sustained
+	// failures (opt-in via AUTH_BREAKER_ENABLED). While open it serves only a fresh
+	// positive cache hit and otherwise denies — it never fails open.
+	breaker *gobreaker.CircuitBreaker
+
+	// retryMax is the maximum number of retries applied to TRANSIENT authorization
+	// failures (network/timeout/5xx). Read once from AUTH_RETRY_MAX; 0 disables
+	// retry (opt-in). Authoritative decisions (401/403) are never retried.
+	retryMax uint
 }
 
 type AuthResponse struct {
@@ -184,22 +208,27 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		}
 	}
 
-	forwardM2MProduct := os.Getenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED") == "true"
-	required := os.Getenv("AUTH_REQUIRED") == "true"
+	// Build the client once with all env-derived config, then return it from every
+	// path below; the health check only logs, it never changes these fields.
+	c := &AuthClient{
+		Address:           address,
+		Enabled:           enabled,
+		Logger:            l,
+		ForwardM2MProduct: os.Getenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED") == "true",
+		Required:          os.Getenv("AUTH_REQUIRED") == "true",
+		timeout:           parseAuthTimeout(),
+		cache:             newDecisionCacheFromEnv(),
+		breaker:           newBreakerFromEnv(),
+		retryMax:          parseRetryMax(),
+	}
 
 	if !enabled || address == "" {
-		if required {
+		if c.Required {
 			logErrorf(context.Background(), l,
 				"AUTH_REQUIRED is set but auth is disabled or address is empty: middleware will fail closed (refuse to serve)")
 		}
 
-		return &AuthClient{
-			Address:           address,
-			Enabled:           enabled,
-			Logger:            l,
-			ForwardM2MProduct: forwardM2MProduct,
-			Required:          required,
-		}
+		return c
 	}
 
 	client := sharedHTTPClient
@@ -211,21 +240,21 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	if err != nil {
 		logErrorf(context.Background(), l, failedToConnectMsg, err)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct, Required: required}
+		return c
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logErrorf(context.Background(), l, failedToConnectMsg, resp.Status)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct, Required: required}
+		return c
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logErrorf(context.Background(), l, "Failed to read response body: %v", err)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l, ForwardM2MProduct: forwardM2MProduct, Required: required}
+		return c
 	}
 
 	if string(body) == "healthy" {
@@ -234,13 +263,7 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		logErrorf(context.Background(), l, failedToConnectMsg, string(body))
 	}
 
-	return &AuthClient{
-		Address:           address,
-		Enabled:           enabled,
-		Logger:            l,
-		ForwardM2MProduct: forwardM2MProduct,
-		Required:          required,
-	}
+	return c
 }
 
 // canAuthorize reports whether the client is able to perform an authorization
@@ -398,7 +421,11 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		attribute.String("app.request.request_id", reqID),
 	)
 
-	client := sharedHTTPClient
+	// Per-request deadline: propagate the caller's cancellation/deadline to the
+	// authz call (the request was previously built without a context, so an upstream
+	// cancel could not abort it) and cap the retry budget. Defaults to 30s.
+	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
+	defer cancel()
 
 	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
 	if err != nil {
@@ -453,66 +480,21 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		return false, http.StatusInternalServerError, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.Address), bytes.NewBuffer(requestBodyJSON))
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to create request: %v", err)
+	// Cache key = exactly the authz request inputs (never the raw token). product is
+	// the value actually forwarded ("" when not forwarded), so the key matches the
+	// decision the authz service made.
+	key := cacheKey{sub: sub, resource: resource, action: action, product: requestBody["product"]}
 
-		tracing.HandleSpanError(span, "Failed to create request", err)
-
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to create request: %w", err)
+	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so
+	// the breaker only ever runs on a miss — its open state then denies (never
+	// serving a stale grant).
+	if auth.cache != nil {
+		if authorized, hit := auth.cache.get(key); hit {
+			return authorized, http.StatusOK, nil
+		}
 	}
 
-	tracing.InjectHTTPContext(ctx, req.Header)
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", accessToken)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to make request: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to make request", err)
-
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to read response body: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to read response body", err)
-
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	respError, err := unmarshalErrorResponse(body)
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to unmarshal auth error response: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to unmarshal auth error response", err)
-
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to unmarshal auth error response: %w", err)
-	}
-
-	if respError.Code != "" && resp.StatusCode != http.StatusInternalServerError {
-		logErrorf(ctx, auth.Logger, "Authorization request failed: %s", respError.Message)
-
-		tracing.HandleSpanError(span, "Authorization request failed", respError)
-
-		return false, resp.StatusCode, respError
-	}
-
-	var response AuthResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to unmarshal response: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to unmarshal response", err)
-
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return response.Authorized, resp.StatusCode, nil
+	return auth.resolveAuthz(ctx, span, accessToken, requestBodyJSON, key)
 }
 
 // GetApplicationToken sends a POST request to the authorization service to get a token for the application.
