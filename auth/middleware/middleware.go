@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,23 +14,78 @@ import (
 	"strings"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability"
-	"github.com/LerianStudio/lib-observability/log"
-	"github.com/LerianStudio/lib-observability/tracing"
-	"github.com/LerianStudio/lib-observability/zap"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-observability/v2/tracing"
+	"github.com/LerianStudio/lib-observability/v2/zap"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/LerianStudio/lib-commons/v5/commons"
-	libHTTP "github.com/LerianStudio/lib-commons/v5/commons/net/http"
-	"github.com/gofiber/fiber/v2"
+	"github.com/LerianStudio/lib-commons/v6/commons"
+	libHTTP "github.com/LerianStudio/lib-commons/v6/commons/net/http"
+	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/sony/gobreaker"
 )
 
 type AuthClient struct {
 	Address string
 	Enabled bool
 	Logger  log.Logger
+
+	// ForwardM2MProduct, when true, forwards the route product on M2M
+	// (application-token) authorization calls, letting the auth service strip the
+	// "{product}/" prefix from stored resources and dual-match a bare request.
+	// It is read once from AUTH_M2M_PRODUCT_FORWARD_ENABLED at construction; the
+	// default (false) preserves the prior behavior of sending no product for M2M.
+	// Gating it by env keeps deploy != release: flipping the flag activates M2M
+	// product isolation without a code change in consumers.
+	ForwardM2MProduct bool
+
+	// Required, when true, makes the middleware fail closed: if auth is disabled
+	// or misconfigured (!Enabled || Address == ""), every protected route refuses
+	// to serve (HTTP 503 / gRPC Unavailable) instead of passing through with
+	// c.Next()/handler(). It is read once from AUTH_REQUIRED at construction; the
+	// default (false) preserves the prior fail-open pass-through behavior exactly.
+	// This inverts the default posture only for deployments that opt in, so a
+	// missing/typo'd address can no longer silently downgrade a protected service
+	// to fully open.
+	Required bool
+
+	// timeout bounds each authorization round-trip via a per-request context
+	// deadline. Read once from AUTH_TIMEOUT; defaults to 30s (behavior-neutral,
+	// matching the prior client-wide HTTP timeout) when unset/invalid. It also caps
+	// the retry budget.
+	timeout time.Duration
+
+	// cache, when non-nil, memoizes authorization decisions for a short TTL keyed by
+	// (sub, resource, action, product) — NEVER the raw token. Enabled by
+	// AUTH_CACHE_TTL > 0 (opt-in; nil = no caching, prior behavior). It trades a
+	// bounded revocation-propagation lag (= TTL) for load shedding and outage
+	// resilience.
+	cache *decisionCache
+
+	// breaker, when non-nil, short-circuits the authorization call after sustained
+	// failures (opt-in via AUTH_BREAKER_ENABLED). While open it serves only a fresh
+	// positive cache hit and otherwise denies — it never fails open.
+	breaker *gobreaker.CircuitBreaker
+
+	// retryMax is the maximum number of retries applied to TRANSIENT authorization
+	// failures (network/timeout/5xx). Read once from AUTH_RETRY_MAX; 0 disables
+	// retry (opt-in). Authoritative decisions (401/403) are never retried.
+	retryMax uint
+
+	// verifyKeys holds the RSA public keys used to cryptographically verify the
+	// bearer token locally before its claims are trusted. When empty (the default)
+	// the general path preserves the historical ParseUnverified behavior and the
+	// authz round-trip remains the trust anchor. It is populated from
+	// AUTH_JWT_VERIFY_CERT / AUTH_JWT_VERIFY_CERT_PATH at construction; carrying more
+	// than one key supports zero-downtime cert rotation (any key may verify).
+	verifyKeys []*rsa.PublicKey
+
+	// verifyIssuer, when non-empty, pins the accepted token "iss" claim during local
+	// verification. Read once from AUTH_JWT_ISSUER; inert when verifyKeys is empty.
+	verifyIssuer string
 }
 
 type AuthResponse struct {
@@ -47,8 +103,9 @@ type oauth2Token struct {
 }
 
 const (
-	normalUser string = "normal-user"
-	pluginName string = "plugin-auth"
+	normalUser  string = "normal-user"
+	application string = "application"
+	pluginName  string = "plugin-auth"
 )
 
 // sharedHTTPClient is a package-level HTTP client with a custom transport
@@ -164,12 +221,31 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		}
 	}
 
+	verifyKeys, verifyIssuer := loadVerification(l)
+
+	// Build the client once with all env-derived config, then return it from every
+	// path below; the health check only logs, it never changes these fields.
+	c := &AuthClient{
+		Address:           address,
+		Enabled:           enabled,
+		Logger:            l,
+		ForwardM2MProduct: os.Getenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED") == "true",
+		Required:          os.Getenv("AUTH_REQUIRED") == "true",
+		timeout:           parseAuthTimeout(),
+		cache:             newDecisionCacheFromEnv(),
+		breaker:           newBreakerFromEnv(),
+		retryMax:          parseRetryMax(),
+		verifyKeys:        verifyKeys,
+		verifyIssuer:      verifyIssuer,
+	}
+
 	if !enabled || address == "" {
-		return &AuthClient{
-			Address: address,
-			Enabled: enabled,
-			Logger:  l,
+		if c.Required {
+			logErrorf(context.Background(), l,
+				"AUTH_REQUIRED is set but auth is disabled or address is empty: middleware will fail closed (refuse to serve)")
 		}
+
+		return c
 	}
 
 	client := sharedHTTPClient
@@ -181,21 +257,21 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	if err != nil {
 		logErrorf(context.Background(), l, failedToConnectMsg, err)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
+		return c
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logErrorf(context.Background(), l, failedToConnectMsg, resp.Status)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
+		return c
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logErrorf(context.Background(), l, "Failed to read response body: %v", err)
 
-		return &AuthClient{Address: address, Enabled: enabled, Logger: l}
+		return c
 	}
 
 	if string(body) == "healthy" {
@@ -204,23 +280,42 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		logErrorf(context.Background(), l, failedToConnectMsg, string(body))
 	}
 
-	return &AuthClient{
-		Address: address,
-		Enabled: enabled,
-		Logger:  l,
-	}
+	return c
+}
+
+// canAuthorize reports whether the client is able to perform an authorization
+// check: non-nil, Enabled, and holding an Address. When it returns false the
+// caller passes the request through (default, fail open) unless Required is set.
+// A nil receiver is safe and reports false, so a nil client is never usable.
+func (auth *AuthClient) canAuthorize() bool {
+	return auth != nil && auth.Enabled && auth.Address != ""
+}
+
+// mustRefuse reports whether a client that cannot authorize must fail closed
+// (refuse to serve) instead of passing the request through. It is true only when
+// the client is non-nil, opted in via Required (AUTH_REQUIRED), and cannot
+// authorize (disabled or no address). This is the fail-closed switch from #107.
+func (auth *AuthClient) mustRefuse() bool {
+	return auth != nil && auth.Required && !auth.canAuthorize()
 }
 
 // Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
-// product identifies the product/application owning the route (e.g. "midaz"); it builds the M2M role and is forwarded for user-flow isolation.
+// product identifies the product/application owning the route (e.g. "midaz"); it is forwarded for normal-user flows, and for M2M (application)
+// flows when AUTH_M2M_PRODUCT_FORWARD_ENABLED is set, so the auth service can isolate permissions by product. M2M tokens are identified by their own subject claim.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		ctx := tracing.ExtractHTTPContext(c.UserContext(), c)
+	return func(c fiber.Ctx) error {
+		ctx := tracing.ExtractHTTPContext(c.Context(), c)
 
 		_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
-		if !auth.Enabled || auth.Address == "" {
+		if auth.mustRefuse() {
+			// AUTH_REQUIRED opted in but auth is disabled/misconfigured: refuse to
+			// serve (fail closed) instead of silently passing the request through.
+			return c.Status(http.StatusServiceUnavailable).SendString("Service Unavailable")
+		}
+
+		if !auth.canAuthorize() {
 			return c.Next()
 		}
 
@@ -261,42 +356,76 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 	}
 }
 
-// checkAuthorization sends an authorization request to the external service and returns whether the action is authorized.
-// product identifies the product/plugin owning the route. The subject is derived from it: M2M tokens map to the product's
-// editor role, while normal users are identified by their JWT (owner/userId) and the product is forwarded so the auth
-// service can isolate permissions by product. Empty product keeps the previous behavior.
-// deriveSubject builds the authorization subject from the token claims.
-// For M2M tokens it is the product's editor role ("admin/<product>-editor-role");
-// for normal-user tokens it is the JWT identity ("<owner>/<userID>"), failing
-// closed with 401 when the owner or sub claim is missing.
-func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, claims jwt.MapClaims, userType, product string) (string, int, error) {
-	if userType != normalUser {
-		return fmt.Sprintf("admin/%s-editor-role", product), http.StatusOK, nil
-	}
+// deriveSubject builds the authorization subject from the token claims based on
+// the whitelisted token type. It fails closed (401) for any type outside
+// {normal-user, application}:
+//   - normal-user: the JWT identity ("<owner>/<userID>"), failing closed with 401
+//     when the owner or sub claim is missing.
+//   - application (M2M): the token's own sub claim (already in "<owner>/<name>"
+//     form), failing closed with 401 when sub is missing. No product-scoped role
+//     is fabricated, since M2M has no product isolation.
+//   - any other type (including empty/absent): rejected with 401.
+func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, claims jwt.MapClaims, userType string) (string, int, error) {
+	switch userType {
+	case normalUser:
+		owner, _ := claims["owner"].(string)
+		if owner == "" {
+			logErrorf(ctx, auth.Logger, "Missing owner claim in token")
 
-	owner, _ := claims["owner"].(string)
-	if owner == "" {
-		logErrorf(ctx, auth.Logger, "Missing owner claim in token")
+			err := errors.New("missing owner claim in token")
 
-		err := errors.New("missing owner claim in token")
+			tracing.HandleSpanError(span, "Missing owner claim in token", err)
 
-		tracing.HandleSpanError(span, "Missing owner claim in token", err)
+			return "", http.StatusUnauthorized, err
+		}
+
+		userID, _ := claims["sub"].(string)
+		if userID == "" {
+			logErrorf(ctx, auth.Logger, "Missing sub claim in token")
+
+			err := errors.New("missing sub claim in token")
+
+			tracing.HandleSpanError(span, "Missing sub claim in token", err)
+
+			return "", http.StatusUnauthorized, err
+		}
+
+		return fmt.Sprintf("%s/%s", owner, userID), http.StatusOK, nil
+	case application:
+		sub, _ := claims["sub"].(string)
+		if sub == "" {
+			logErrorf(ctx, auth.Logger, "Missing sub claim in application token")
+
+			err := errors.New("missing sub claim in token")
+
+			tracing.HandleSpanError(span, "Missing sub claim in application token", err)
+
+			return "", http.StatusUnauthorized, err
+		}
+
+		return sub, http.StatusOK, nil
+	default:
+		logErrorf(ctx, auth.Logger, "Unsupported token type: %q", userType)
+
+		err := errors.New("unsupported token type")
+
+		tracing.HandleSpanError(span, "Unsupported token type", err)
 
 		return "", http.StatusUnauthorized, err
 	}
+}
 
-	userID, _ := claims["sub"].(string)
-	if userID == "" {
-		logErrorf(ctx, auth.Logger, "Missing sub claim in token")
-
-		err := errors.New("missing sub claim in token")
-
-		tracing.HandleSpanError(span, "Missing sub claim in token", err)
-
-		return "", http.StatusUnauthorized, err
+// shouldForwardProduct reports whether the route product must be forwarded to the
+// auth service so it can isolate permissions by product (strip the "{product}/"
+// prefix from stored resources and dual-match a bare request). It is forwarded for
+// normal-user flows, and for M2M (application) flows when forwardM2MProduct is
+// enabled; an empty product is never forwarded (gate-by-presence).
+func shouldForwardProduct(userType, product string, forwardM2MProduct bool) bool {
+	if product == "" {
+		return false
 	}
 
-	return fmt.Sprintf("%s/%s", owner, userID), http.StatusOK, nil
+	return userType == normalUser || (userType == application && forwardM2MProduct)
 }
 
 func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken string) (bool, int, error) {
@@ -309,31 +438,20 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		attribute.String("app.request.request_id", reqID),
 	)
 
-	client := sharedHTTPClient
+	// Per-request deadline: propagate the caller's cancellation/deadline to the
+	// authz call (the request was previously built without a context, so an upstream
+	// cancel could not abort it) and cap the retry budget. Defaults to 30s.
+	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
+	defer cancel()
 
-	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
+	claims, statusCode, err := auth.extractClaims(ctx, span, accessToken)
 	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to parse token: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to parse token", err)
-
-		return false, http.StatusUnauthorized, err
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		logErrorf(ctx, auth.Logger, "Failed to parse claims: token.Claims is not of type jwt.MapClaims")
-
-		err := errors.New("token claims are not in the expected format")
-
-		tracing.HandleSpanError(span, "Failed to parse claims", err)
-
-		return false, http.StatusUnauthorized, err
+		return false, statusCode, err
 	}
 
 	userType, _ := claims["type"].(string)
 
-	sub, statusCode, err := auth.deriveSubject(ctx, span, claims, userType, product)
+	sub, statusCode, err := auth.deriveSubject(ctx, span, claims, userType)
 	if err != nil {
 		return false, statusCode, err
 	}
@@ -344,7 +462,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		"action":   action,
 	}
 
-	if userType == normalUser && product != "" {
+	if shouldForwardProduct(userType, product, auth.ForwardM2MProduct) {
 		requestBody["product"] = product
 	}
 
@@ -364,66 +482,21 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		return false, http.StatusInternalServerError, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/authorize", auth.Address), bytes.NewBuffer(requestBodyJSON))
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to create request: %v", err)
+	// Cache key = exactly the authz request inputs (never the raw token). product is
+	// the value actually forwarded ("" when not forwarded), so the key matches the
+	// decision the authz service made.
+	key := cacheKey{sub: sub, resource: resource, action: action, product: requestBody["product"]}
 
-		tracing.HandleSpanError(span, "Failed to create request", err)
-
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to create request: %w", err)
+	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so
+	// the breaker only ever runs on a miss — its open state then denies (never
+	// serving a stale grant).
+	if auth.cache != nil {
+		if authorized, hit := auth.cache.get(key); hit {
+			return authorized, http.StatusOK, nil
+		}
 	}
 
-	tracing.InjectHTTPContext(ctx, req.Header)
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", accessToken)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to make request: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to make request", err)
-
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to read response body: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to read response body", err)
-
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	respError, err := unmarshalErrorResponse(body)
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to unmarshal auth error response: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to unmarshal auth error response", err)
-
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to unmarshal auth error response: %w", err)
-	}
-
-	if respError.Code != "" && resp.StatusCode != http.StatusInternalServerError {
-		logErrorf(ctx, auth.Logger, "Authorization request failed: %s", respError.Message)
-
-		tracing.HandleSpanError(span, "Authorization request failed", respError)
-
-		return false, resp.StatusCode, respError
-	}
-
-	var response AuthResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to unmarshal response: %v", err)
-
-		tracing.HandleSpanError(span, "Failed to unmarshal response", err)
-
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return response.Authorized, resp.StatusCode, nil
+	return auth.resolveAuthz(ctx, span, accessToken, requestBodyJSON, key)
 }
 
 // GetApplicationToken sends a POST request to the authorization service to get a token for the application.

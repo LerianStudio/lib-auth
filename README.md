@@ -7,7 +7,7 @@ Repository: [lib-auth](https://github.com/LerianStudio/lib-auth)
 ## 📦 Installation
 
 ```bash
-go get -u github.com/LerianStudio/lib-auth/v2
+go get github.com/LerianStudio/lib-auth/v3@latest
 ```
 
 ## 🚀 How to Use
@@ -19,6 +19,57 @@ In your environment configuration or `.env` file, set the following environment 
 ```dotenv
 PLUGIN_AUTH_ADDRESS=http://localhost:4000
 PLUGIN_AUTH_ENABLED=true
+
+# Optional. When "true", the client also forwards the route product on M2M
+# (application-token) authorization calls, so the auth service can isolate
+# permissions by product (matching product-prefixed resources). Defaults to
+# false, preserving the previous behavior of sending no product for M2M.
+AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
+
+# Optional. Opt-in local JWT signature verification for the general authorization
+# path. When unset, tokens are parsed without signature verification (the
+# authorization service remains the trust anchor) — the previous behavior,
+# unchanged. When set, the bearer token is cryptographically verified (RS256,
+# expiry required, and issuer when AUTH_JWT_ISSUER is set) BEFORE its claims are
+# trusted; any failure denies the request (401, fail closed).
+#
+# AUTH_JWT_VERIFY_CERT holds the issuer's PEM certificate(s) or RSA public key(s).
+# Newline-join multiple PEMs to carry the old and new certs simultaneously across
+# a key rotation (zero-downtime: a token verified by ANY listed key is accepted).
+# AUTH_JWT_VERIFY_CERT_PATH points to a mounted PEM file instead (used only when
+# AUTH_JWT_VERIFY_CERT is empty). A configured-but-unparseable cert is logged at
+# ERROR and leaves verification disabled; it is never silently accepted.
+AUTH_JWT_VERIFY_CERT=
+AUTH_JWT_VERIFY_CERT_PATH=
+AUTH_JWT_ISSUER=
+
+# Optional. When "true", the middleware fails closed: if auth is disabled
+# (PLUGIN_AUTH_ENABLED=false) or misconfigured (empty PLUGIN_AUTH_ADDRESS),
+# every protected route refuses to serve (HTTP 503 / gRPC Unavailable) instead
+# of passing through unauthenticated. Defaults to false, preserving the prior
+# fail-open behavior. Set it in security-sensitive deployments so a
+# missing/typo'd address cannot silently downgrade a protected service to open.
+AUTH_REQUIRED=false
+
+# Optional authorization resilience (all opt-in; defaults preserve prior behavior).
+# Every fallback denies (fail closed) — no path serves a request on an outage.
+#
+# AUTH_TIMEOUT bounds each authorization round-trip with a per-request deadline
+# (Go duration). Defaults to 30s (behavior-neutral). It also caps the retry budget.
+AUTH_TIMEOUT=30s
+# AUTH_CACHE_TTL enables a short-lived decision cache when > 0, keyed by
+# (subject, resource, action, product) — never the token. Empty/0 disables it
+# (default). Security tradeoff: a permission revocation takes up to the TTL to
+# propagate, so keep it small (5–15s). It sheds load and, with the breaker,
+# survives brief authz outages by serving fresh positive decisions.
+AUTH_CACHE_TTL=
+# AUTH_BREAKER_ENABLED opens a circuit breaker after sustained authz failures.
+# While open it serves ONLY a fresh positive cache hit and otherwise denies;
+# it never serves a stale decision. Defaults to disabled.
+AUTH_BREAKER_ENABLED=false
+# AUTH_RETRY_MAX retries only TRANSIENT failures (network/timeout/5xx) up to N
+# times within AUTH_TIMEOUT; authoritative 401/403 are never retried. 0 disables.
+AUTH_RETRY_MAX=0
 ```
 
 ### 2. Create a new instance of the middleware:
@@ -37,7 +88,7 @@ logger := zap.InitializeLogger()
 ```
 
 ```go
-import "github.com/LerianStudio/lib-auth/v2/auth/middleware"
+import "github.com/LerianStudio/lib-auth/v3/auth/middleware"
 
 authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, &logger)
 ```
@@ -99,7 +150,7 @@ Secure a gRPC server with the unary interceptor using per-method policies. It re
 import (
     "context"
     "google.golang.org/grpc"
-    "github.com/LerianStudio/lib-auth/v2/auth/middleware"
+    "github.com/LerianStudio/lib-auth/v3/auth/middleware"
 )
 
 // Create the auth client once (same as HTTP)

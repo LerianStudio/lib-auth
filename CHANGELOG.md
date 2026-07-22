@@ -1,3 +1,74 @@
+## [3.0.0-beta.9](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.8...v3.0.0-beta.9) (2026-07-21)
+
+## [3.0.0-beta.8](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.7...v3.0.0-beta.8) (2026-07-21)
+
+
+### Features
+
+* **middleware:** add opt-in local JWT signature verification ([#128](https://github.com/LerianStudio/lib-auth/issues/128)) ([48b81a3](https://github.com/LerianStudio/lib-auth/commit/48b81a355cabbc65fc2fe229b6b214c9fa62fc37)), closes [#106](https://github.com/LerianStudio/lib-auth/issues/106)
+
+## [3.0.0-beta.7](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.6...v3.0.0-beta.7) (2026-07-21)
+
+
+### Features
+
+* **middleware:** add authz cache, circuit breaker, and bounded retry ([c0469e6](https://github.com/LerianStudio/lib-auth/commit/c0469e6741e7a20e5400b82d2912f7ea2630f016)), closes [#107](https://github.com/LerianStudio/lib-auth/issues/107) [#127](https://github.com/LerianStudio/lib-auth/issues/127) [#127](https://github.com/LerianStudio/lib-auth/issues/127) [#108](https://github.com/LerianStudio/lib-auth/issues/108)
+
+## [3.0.0-beta.6](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.5...v3.0.0-beta.6) (2026-07-21)
+
+
+### Features
+
+* **middleware:** add fail-closed AUTH_REQUIRED option ([f7fff6c](https://github.com/LerianStudio/lib-auth/commit/f7fff6c2ab78b30c4d851d2ab39afc362c8a2570)), closes [#107](https://github.com/LerianStudio/lib-auth/issues/107)
+
+## [3.0.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.4...v3.0.0-beta.5) (2026-07-20)
+
+
+### Features
+
+* **middleware:** expose M2M identity via request context ([c48393a](https://github.com/LerianStudio/lib-auth/commit/c48393ac6cbeb0494524dccfb8e35ee6eb5e5375)), closes [#125](https://github.com/LerianStudio/lib-auth/issues/125)
+
+
+### Bug Fixes
+
+* **middleware:** return zero M2MIdentity when reporting absent ([25fc4ec](https://github.com/LerianStudio/lib-auth/commit/25fc4ec9a44aff13964117ef96420d59468530a2)), closes [#126](https://github.com/LerianStudio/lib-auth/issues/126)
+
+## [3.0.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.3...v3.0.0-beta.4) (2026-07-20)
+
+
+### Features
+
+* **middleware:** add M2M authentication gate ([2034198](https://github.com/LerianStudio/lib-auth/commit/20341984c8c3ca57db0abf7c6bd57c85b981d15a))
+* **middleware:** add optional issuer pinning to M2M gate ([5afd305](https://github.com/LerianStudio/lib-auth/commit/5afd3055d9d4a8439e71c5fa78ef75afc68f7624))
+
+## [3.0.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.2...v3.0.0-beta.3) (2026-07-17)
+
+
+### Features
+
+* **middleware:** forward product on M2M auth (flag-gated) ([93c44db](https://github.com/LerianStudio/lib-auth/commit/93c44dbc7155db5a4d5e857139e9b35d7ba5847f))
+
+## [3.0.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v3.0.0-beta.1...v3.0.0-beta.2) (2026-07-16)
+
+
+### Features
+
+* real M2M subject and token type whitelist ([e31ac53](https://github.com/LerianStudio/lib-auth/commit/e31ac531043129eee3394afd88d70cd6ad1b8b7e))
+
+## [3.0.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v2.9.0...v3.0.0-beta.1) (2026-07-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **middleware:** module path is now github.com/LerianStudio/lib-auth/v3 and the
+Authorize middleware requires Fiber v3.
+
+X-Lerian-Ref: 0x1
+
+### Features
+
+* **middleware:** migrate to Fiber v3, cut /v3 major ([024a909](https://github.com/LerianStudio/lib-auth/commit/024a90903ac84277ade60603a38c726b89af5b00))
+
 ## [2.9.0](https://github.com/LerianStudio/lib-auth/compare/v2.8.1...v2.9.0) (2026-06-26)
 
 

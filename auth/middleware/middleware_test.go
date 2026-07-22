@@ -3,13 +3,15 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	observability "github.com/LerianStudio/lib-observability"
-	"github.com/LerianStudio/lib-observability/log"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -118,7 +120,8 @@ func TestCheckAuthorization_NormalUser_SubjectConstruction(t *testing.T) {
 func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 	t.Parallel()
 
-	// Documents the current behavior: non-normal-user types get "admin/<product>-editor-role".
+	// Application (M2M) tokens are identified by their real sub claim (already in
+	// "owner/name" form); no product-editor-role is fabricated and product is not forwarded.
 	var capturedBody map[string]string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,9 +162,112 @@ func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 	assert.True(t, authorized)
 	assert.Equal(t, http.StatusOK, statusCode)
 
-	// For M2M, the subject is built from the product: "admin/<product>-editor-role".
-	assert.Equal(t, "admin/my-app-editor-role", capturedBody["sub"])
-	// Product is NOT forwarded for non-normal-user tokens.
+	// For M2M, the subject is the real sub claim of the application token.
+	assert.Equal(t, "app-sub", capturedBody["sub"])
+	// Product is NOT forwarded for application tokens when ForwardM2MProduct is off (default).
+	_, hasProduct := capturedBody["product"]
+	assert.False(t, hasProduct)
+}
+
+func TestCheckAuthorization_Application_ForwardM2MProductEnabled_ForwardsProduct(t *testing.T) {
+	t.Parallel()
+
+	// With ForwardM2MProduct enabled, an application (M2M) token forwards the route
+	// product so the auth service can strip the "{product}/" prefix from stored
+	// resources and dual-match a bare request. The subject stays the real sub claim.
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&capturedBody)
+		if err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		resp := AuthResponse{Authorized: true}
+
+		encErr := json.NewEncoder(w).Encode(resp)
+		if encErr != nil {
+			t.Errorf("mock server: failed to encode response: %v", encErr)
+		}
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:           server.URL,
+		Enabled:           true,
+		Logger:            &testLogger{},
+		ForwardM2MProduct: true,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		"sub":  "acme-org/my-app",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, authorized)
+	assert.Equal(t, http.StatusOK, statusCode)
+
+	// Subject is still the real sub of the application token.
+	assert.Equal(t, "acme-org/my-app", capturedBody["sub"])
+	// Product IS forwarded for M2M when ForwardM2MProduct is enabled.
+	assert.Equal(t, "midaz", capturedBody["product"])
+}
+
+func TestCheckAuthorization_Application_ForwardM2MProductEnabled_EmptyProduct_NotForwarded(t *testing.T) {
+	t.Parallel()
+
+	// Even with ForwardM2MProduct enabled, an empty product is never forwarded
+	// (gate-by-presence preserved).
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&capturedBody)
+		if err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		resp := AuthResponse{Authorized: true}
+
+		encErr := json.NewEncoder(w).Encode(resp)
+		if encErr != nil {
+			t.Errorf("mock server: failed to encode response: %v", encErr)
+		}
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:           server.URL,
+		Enabled:           true,
+		Logger:            &testLogger{},
+		ForwardM2MProduct: true,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		"sub":  "acme-org/my-app",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "", "resource", "action", token,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, authorized)
+	assert.Equal(t, http.StatusOK, statusCode)
+
 	_, hasProduct := capturedBody["product"]
 	assert.False(t, hasProduct)
 }
@@ -401,28 +507,14 @@ func TestCheckAuthorization_InvalidToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, statusCode)
 }
 
-func TestCheckAuthorization_EmptyTypeClaim_TreatedAsNonNormalUser(t *testing.T) {
+func TestCheckAuthorization_EmptyTypeClaim_Rejected(t *testing.T) {
 	t.Parallel()
 
-	// When the "type" claim is empty or absent, userType != normalUser,
-	// so the code takes the admin/ branch.
-	var capturedBody map[string]string
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := json.NewDecoder(r.Body).Decode(&capturedBody)
-		if err != nil {
-			t.Errorf("mock server: failed to decode request body: %v", err)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-
-		resp := AuthResponse{Authorized: true}
-
-		encErr := json.NewEncoder(w).Encode(resp)
-		if encErr != nil {
-			t.Errorf("mock server: failed to encode response: %v", encErr)
-		}
+	// When the "type" claim is empty or absent it is not in the whitelist
+	// {normal-user, application}, so the request must fail closed with 401 and
+	// the auth backend must never be reached.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("auth backend must not be called when the type claim is absent")
 	}))
 	defer server.Close()
 
@@ -432,7 +524,7 @@ func TestCheckAuthorization_EmptyTypeClaim_TreatedAsNonNormalUser(t *testing.T) 
 		Logger:  &testLogger{},
 	}
 
-	// No "type" claim at all -> defaults to empty string -> non-normal-user path
+	// No "type" claim at all -> defaults to empty string -> not whitelisted.
 	token := createTestJWT(jwt.MapClaims{
 		"sub": "some-app",
 	})
@@ -441,10 +533,74 @@ func TestCheckAuthorization_EmptyTypeClaim_TreatedAsNonNormalUser(t *testing.T) 
 		context.Background(), "some-app", "resource", "action", token,
 	)
 
-	require.NoError(t, err)
-	assert.True(t, authorized)
-	assert.Equal(t, http.StatusOK, statusCode)
-	assert.Equal(t, "admin/some-app-editor-role", capturedBody["sub"])
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.Contains(t, err.Error(), "unsupported token type")
+}
+
+func TestCheckAuthorization_ApplicationUser_MissingSubClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+
+	// An application token without a "sub" claim must fail closed with 401 before
+	// the auth backend is reached.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("auth backend must not be called when the application sub claim is missing")
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		// "sub" is intentionally missing
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "my-app", "resource", "action", token,
+	)
+
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.Contains(t, err.Error(), "missing sub claim")
+}
+
+func TestCheckAuthorization_NonCanonicalType_Rejected(t *testing.T) {
+	t.Parallel()
+
+	// Any type outside the whitelist {normal-user, application} must fail closed
+	// with 401 and never reach the auth backend.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("auth backend must not be called for a non-canonical token type")
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "service-account",
+		"owner": "acme-org",
+		"sub":   "svc-1",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token,
+	)
+
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.Contains(t, err.Error(), "unsupported token type")
 }
 
 func TestCheckAuthorization_MockServerDown(t *testing.T) {
@@ -507,6 +663,147 @@ func TestCheckAuthorization_ServerReturnsInvalidJSON(t *testing.T) {
 	assert.False(t, authorized)
 	assert.Equal(t, http.StatusInternalServerError, statusCode)
 	assert.Contains(t, err.Error(), "failed to unmarshal")
+}
+
+// ---------------------------------------------------------------------------
+// NewAuthClient - ForwardM2MProduct flag
+// ---------------------------------------------------------------------------
+
+func TestNewAuthClient_ReadsForwardM2MProductFlag(t *testing.T) {
+	// Cannot use t.Parallel(): subtests use t.Setenv which modifies process env.
+	// enabled=false / empty address returns early without any network call, so the
+	// flag wiring is exercised in isolation.
+	logger := log.Logger(&testLogger{})
+
+	t.Run("flag_true_enables_forward", func(t *testing.T) {
+		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "true")
+
+		client := NewAuthClient("", false, &logger)
+		assert.True(t, client.ForwardM2MProduct)
+	})
+
+	t.Run("flag_absent_defaults_false", func(t *testing.T) {
+		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "")
+
+		client := NewAuthClient("", false, &logger)
+		assert.False(t, client.ForwardM2MProduct)
+	})
+
+	t.Run("flag_non_true_value_is_false", func(t *testing.T) {
+		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "1")
+
+		client := NewAuthClient("", false, &logger)
+		assert.False(t, client.ForwardM2MProduct)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// NewAuthClient - Required (AUTH_REQUIRED) flag
+// ---------------------------------------------------------------------------
+
+func TestNewAuthClient_ReadsRequiredFlag(t *testing.T) {
+	// Cannot use t.Parallel(): subtests use t.Setenv which modifies process env.
+	// enabled=false / empty address returns early without any network call, so the
+	// flag wiring is exercised in isolation.
+	logger := log.Logger(&testLogger{})
+
+	t.Run("flag_true_enables_required", func(t *testing.T) {
+		t.Setenv("AUTH_REQUIRED", "true")
+
+		client := NewAuthClient("", false, &logger)
+		assert.True(t, client.Required)
+	})
+
+	t.Run("flag_absent_defaults_false", func(t *testing.T) {
+		t.Setenv("AUTH_REQUIRED", "")
+
+		client := NewAuthClient("", false, &logger)
+		assert.False(t, client.Required)
+	})
+
+	t.Run("flag_non_true_value_is_false", func(t *testing.T) {
+		t.Setenv("AUTH_REQUIRED", "1")
+
+		client := NewAuthClient("", false, &logger)
+		assert.False(t, client.Required)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Authorize - fail-closed (AUTH_REQUIRED) posture
+// ---------------------------------------------------------------------------
+
+func TestAuthorize_FailClosed(t *testing.T) {
+	t.Parallel()
+
+	const reached = "reached handler"
+
+	newApp := func(auth *AuthClient) *fiber.App {
+		app := fiber.New()
+		app.Get("/x", auth.Authorize("product", "resource", "get"), func(c fiber.Ctx) error {
+			return c.SendString(reached)
+		})
+
+		return app
+	}
+
+	t.Run("required_and_disabled_refuses_with_503", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{Enabled: false, Required: true, Logger: &testLogger{}}
+
+		resp, err := newApp(auth).Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	})
+
+	t.Run("required_and_empty_address_refuses_with_503", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{Address: "", Enabled: true, Required: true, Logger: &testLogger{}}
+
+		resp, err := newApp(auth).Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	})
+
+	t.Run("not_required_and_disabled_passes_through", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{Enabled: false, Required: false, Logger: &testLogger{}}
+
+		resp, err := newApp(auth).Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, reached, string(body))
+	})
+
+	t.Run("required_and_enabled_authorizes_normally", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Required: true, Logger: &testLogger{}}
+
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "org1",
+			"sub":   "user1",
+		}))
+
+		resp, err := newApp(auth).Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, reached, string(body))
+	})
 }
 
 // ---------------------------------------------------------------------------

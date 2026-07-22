@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	jwt "github.com/golang-jwt/jwt/v5"
@@ -485,6 +487,50 @@ func TestNewGRPCAuthUnaryPolicy(t *testing.T) {
 		assert.True(t, called)
 	})
 
+	t.Run("required_and_disabled_refuses_with_unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+		handler := func(_ context.Context, _ any) (any, error) {
+			called = true
+			return "ok", nil
+		}
+
+		auth := &AuthClient{Address: "http://localhost:9999", Enabled: false, Required: true}
+		interceptor := NewGRPCAuthUnaryPolicy(auth, PolicyConfig{})
+
+		resp, err := interceptor(context.Background(), "req", dummyInfo, handler)
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.False(t, called)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unavailable, st.Code())
+	})
+
+	t.Run("required_and_empty_address_refuses_with_unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+		handler := func(_ context.Context, _ any) (any, error) {
+			called = true
+			return "ok", nil
+		}
+
+		auth := &AuthClient{Address: "", Enabled: true, Required: true}
+		interceptor := NewGRPCAuthUnaryPolicy(auth, PolicyConfig{})
+
+		resp, err := interceptor(context.Background(), "req", dummyInfo, handler)
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.False(t, called)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unavailable, st.Code())
+	})
+
 	t.Run("missing_token_returns_unauthenticated", func(t *testing.T) {
 		t.Parallel()
 
@@ -750,6 +796,242 @@ func TestNewGRPCAuthUnaryPolicy_TenantPropagation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// authPayload - product gating in telemetry
+// ---------------------------------------------------------------------------
+
+func TestAuthPayload_ProductGating(t *testing.T) {
+	t.Parallel()
+
+	t.Run("normal_user_with_product_includes_product", func(t *testing.T) {
+		t.Parallel()
+
+		token := createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+			"sub":   "user123",
+		})
+
+		payload := authPayload(token, "midaz", "resource", "read", false)
+
+		// resource/action are always present.
+		assert.Equal(t, "resource", payload["resource"])
+		assert.Equal(t, "read", payload["action"])
+		// product is forwarded for normal-user flows with a non-empty product.
+		assert.Equal(t, "midaz", payload["product"])
+	})
+
+	t.Run("application_flag_off_omits_product", func(t *testing.T) {
+		t.Parallel()
+
+		token := createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"name": "my-app",
+			"sub":  "acme-org/my-app",
+		})
+
+		payload := authPayload(token, "midaz", "resource", "read", false)
+
+		assert.Equal(t, "resource", payload["resource"])
+		assert.Equal(t, "read", payload["action"])
+		// With the flag off, M2M forwards no product isolation, so it is not recorded.
+		_, hasProduct := payload["product"]
+		assert.False(t, hasProduct)
+	})
+
+	t.Run("application_flag_on_includes_product", func(t *testing.T) {
+		t.Parallel()
+
+		token := createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"name": "my-app",
+			"sub":  "acme-org/my-app",
+		})
+
+		payload := authPayload(token, "midaz", "resource", "read", true)
+
+		assert.Equal(t, "resource", payload["resource"])
+		assert.Equal(t, "read", payload["action"])
+		// With the flag on, M2M forwards the product, so telemetry mirrors it.
+		assert.Equal(t, "midaz", payload["product"])
+	})
+
+	t.Run("application_flag_on_empty_product_omits_product", func(t *testing.T) {
+		t.Parallel()
+
+		token := createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"name": "my-app",
+			"sub":  "acme-org/my-app",
+		})
+
+		payload := authPayload(token, "", "resource", "read", true)
+
+		assert.Equal(t, "resource", payload["resource"])
+		assert.Equal(t, "read", payload["action"])
+		// Empty product is never forwarded, even with the flag on.
+		_, hasProduct := payload["product"]
+		assert.False(t, hasProduct)
+	})
+
+	t.Run("normal_user_with_empty_product_omits_product", func(t *testing.T) {
+		t.Parallel()
+
+		token := createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+			"sub":   "user123",
+		})
+
+		payload := authPayload(token, "", "resource", "read", false)
+
+		assert.Equal(t, "resource", payload["resource"])
+		assert.Equal(t, "read", payload["action"])
+		// Empty product is never forwarded.
+		_, hasProduct := payload["product"]
+		assert.False(t, hasProduct)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// NewGRPCAuthUnaryPolicy - M2M subject construction
+// ---------------------------------------------------------------------------
+
+func TestNewGRPCAuthUnaryPolicy_ApplicationSubject(t *testing.T) {
+	t.Parallel()
+
+	// An application (M2M) token flowing through the gRPC unary path must be
+	// identified by its real sub claim, with product not forwarded in the body.
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: true}); err != nil {
+			t.Errorf("mock server: failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		"sub":  "acme-org/my-app",
+	})
+
+	defaultPol := Policy{Resource: "res", Action: "read"}
+	cfg := PolicyConfig{
+		DefaultPolicy: &defaultPol,
+		SubResolver: func(_ context.Context, _ string, _ any) (string, error) {
+			return "midaz", nil
+		},
+	}
+	interceptor := NewGRPCAuthUnaryPolicy(auth, cfg)
+
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("authorization", "Bearer "+token),
+	)
+
+	called := false
+	handler := func(_ context.Context, _ any) (any, error) {
+		called = true
+		return "ok", nil
+	}
+
+	info := &grpc.UnaryServerInfo{FullMethod: "/pkg.Service/DoThing"}
+
+	resp, err := interceptor(ctx, "req", info, handler)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp)
+	assert.True(t, called)
+
+	// Subject is the real sub of the application token.
+	assert.Equal(t, "acme-org/my-app", capturedBody["sub"])
+	// Product is not forwarded for M2M tokens when the flag is off (default).
+	_, hasProduct := capturedBody["product"]
+	assert.False(t, hasProduct)
+}
+
+func TestNewGRPCAuthUnaryPolicy_ApplicationSubject_ForwardM2MProductEnabled(t *testing.T) {
+	t.Parallel()
+
+	// With ForwardM2MProduct enabled, an application (M2M) token flowing through the
+	// gRPC unary path must forward the resolved product in the request body so the
+	// auth service can dual-match the "{product}/" prefix on stored resources.
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: true}); err != nil {
+			t.Errorf("mock server: failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:           server.URL,
+		Enabled:           true,
+		Logger:            &testLogger{},
+		ForwardM2MProduct: true,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		"sub":  "acme-org/my-app",
+	})
+
+	defaultPol := Policy{Resource: "res", Action: "read"}
+	cfg := PolicyConfig{
+		DefaultPolicy: &defaultPol,
+		SubResolver: func(_ context.Context, _ string, _ any) (string, error) {
+			return "midaz", nil
+		},
+	}
+	interceptor := NewGRPCAuthUnaryPolicy(auth, cfg)
+
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("authorization", "Bearer "+token),
+	)
+
+	called := false
+	handler := func(_ context.Context, _ any) (any, error) {
+		called = true
+		return "ok", nil
+	}
+
+	info := &grpc.UnaryServerInfo{FullMethod: "/pkg.Service/DoThing"}
+
+	resp, err := interceptor(ctx, "req", info, handler)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp)
+	assert.True(t, called)
+
+	// Subject is the real sub of the application token.
+	assert.Equal(t, "acme-org/my-app", capturedBody["sub"])
+	// Product IS forwarded for M2M tokens when the flag is on.
+	assert.Equal(t, "midaz", capturedBody["product"])
+}
+
+// ---------------------------------------------------------------------------
 // NewGRPCAuthStreamPolicy
 // ---------------------------------------------------------------------------
 
@@ -807,6 +1089,30 @@ func TestNewGRPCAuthStreamPolicy(t *testing.T) {
 		err := interceptor(nil, ss, dummyInfo, handler)
 		require.NoError(t, err)
 		assert.True(t, called)
+	})
+
+	t.Run("required_and_disabled_refuses_with_unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+
+		handler := func(_ any, _ grpc.ServerStream) error {
+			called = true
+			return nil
+		}
+
+		auth := &AuthClient{Address: "http://localhost:9999", Enabled: false, Required: true}
+		interceptor := NewGRPCAuthStreamPolicy(auth, PolicyConfig{})
+
+		ss := &fakeServerStream{ctx: context.Background()}
+
+		err := interceptor(nil, ss, dummyInfo, handler)
+		require.Error(t, err)
+		assert.False(t, called)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unavailable, st.Code())
 	})
 
 	t.Run("missing_token_returns_unauthenticated", func(t *testing.T) {
