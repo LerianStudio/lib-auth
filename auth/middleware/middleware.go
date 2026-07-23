@@ -333,7 +333,13 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 			return c.Status(http.StatusUnauthorized).SendString("Missing Token")
 		}
 
-		if authorized, statusCode, err := auth.checkAuthorization(ctx, product, resource, action, accessToken); err != nil {
+		// Capture the caller IP resolved by Fiber (honoring the configured trusted
+		// proxy / ProxyHeader chain) and forward it so the auth service can apply
+		// IP-based policy. It is optional end-to-end: an empty value is omitted from
+		// the request body (see checkAuthorization).
+		clientIP := c.IP()
+
+		if authorized, statusCode, err := auth.checkAuthorization(ctx, product, resource, action, accessToken, clientIP); err != nil {
 			var commonsErr commons.Response
 			if errors.As(err, &commonsErr) {
 				span.End()
@@ -428,7 +434,13 @@ func shouldForwardProduct(userType, product string, forwardM2MProduct bool) bool
 	return userType == normalUser || (userType == application && forwardM2MProduct)
 }
 
-func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken string) (bool, int, error) {
+// checkAuthorization builds and sends the authorization request to the auth
+// service. clientIP is the resolved caller IP forwarded as the OPTIONAL
+// "clientIp" body field; when empty (e.g. gRPC callers, which do not extract a
+// peer IP in v1) the field is omitted so the wire body stays byte-identical to
+// the pre-IP behavior for every deployed access-manager. The auth service
+// interprets the IP; this layer never parses or validates it.
+func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -466,6 +478,12 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		requestBody["product"] = product
 	}
 
+	// clientIp is optional: include it only when a caller IP was resolved, so an
+	// empty IP leaves the request body byte-identical to the pre-IP behavior.
+	if clientIP != "" {
+		requestBody["clientIp"] = clientIP
+	}
+
 	err = tracing.SetSpanAttributesFromValue(span, "app.request.payload", requestBody, nil)
 	if err != nil {
 		tracing.HandleSpanError(span, "Failed to convert request body to JSON string", err)
@@ -484,8 +502,9 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 
 	// Cache key = exactly the authz request inputs (never the raw token). product is
 	// the value actually forwarded ("" when not forwarded), so the key matches the
-	// decision the authz service made.
-	key := cacheKey{sub: sub, resource: resource, action: action, product: requestBody["product"]}
+	// decision the authz service made. clientIP is in the key because the decision is
+	// IP-dependent (tenant IP-allowlist): a cross-IP cache hit would bypass it.
+	key := cacheKey{sub: sub, resource: resource, action: action, product: requestBody["product"], clientIP: clientIP}
 
 	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so
 	// the breaker only ever runs on a miss — its open state then denies (never

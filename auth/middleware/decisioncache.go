@@ -28,6 +28,13 @@ type cacheKey struct {
 	resource string
 	action   string
 	product  string
+	// clientIP scopes the decision to the source IP it was made for. The
+	// /v1/authorize decision is IP-dependent (tenant IP-allowlist), so omitting it
+	// would let an "authorized" decision cached for an allowed IP be served to a
+	// request from a blocked IP with the same {sub,resource,action,product} —
+	// bypassing the allowlist. Empty (gRPC / no forwarded IP) keys as "", unchanged
+	// from before. This trades a little hit rate for correctness, which is required.
+	clientIP string
 }
 
 // cacheEntry is a cached authorization decision with its expiry.
@@ -65,7 +72,7 @@ func newDecisionCache(ttl time.Duration) *decisionCache {
 // distinct field boundaries cannot collide (e.g. {"a","b"} vs {"ab",""}).
 func (c *decisionCache) shardFor(k cacheKey) *cacheShard {
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(k.sub + "\x00" + k.resource + "\x00" + k.action + "\x00" + k.product))
+	_, _ = h.Write([]byte(k.sub + "\x00" + k.resource + "\x00" + k.action + "\x00" + k.product + "\x00" + k.clientIP))
 
 	return c.shards[h.Sum32()%decisionCacheShards]
 }

@@ -102,7 +102,9 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 			tracing.HandleSpanError(span, "failed to set span payload", err)
 		}
 
-		authorized, httpStatus, err := auth.checkAuthorization(ctx, product, pol.Resource, pol.Action, token)
+		// clientIP is empty for gRPC: peer/metadata IP extraction is the approved
+		// follow-up epic, out of v1 scope, so no clientIp is forwarded here.
+		authorized, httpStatus, err := auth.checkAuthorization(ctx, product, pol.Resource, pol.Action, token, "")
 		if err != nil {
 			return nil, grpcErrorFromHTTP(httpStatus)
 		}
@@ -327,7 +329,9 @@ func NewGRPCAuthStreamPolicy(auth *AuthClient, cfg PolicyConfig) grpc.StreamServ
 			}
 		}
 
-		authorized, httpStatus, err := auth.checkAuthorization(ctx, product, pol.Resource, pol.Action, token)
+		// clientIP is empty for gRPC: peer/metadata IP extraction is the approved
+		// follow-up epic, out of v1 scope, so no clientIp is forwarded here.
+		authorized, httpStatus, err := auth.checkAuthorization(ctx, product, pol.Resource, pol.Action, token, "")
 		if err != nil {
 			return grpcErrorFromHTTP(httpStatus)
 		}
