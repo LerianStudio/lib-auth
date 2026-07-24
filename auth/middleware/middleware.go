@@ -59,9 +59,11 @@ type AuthClient struct {
 	timeout time.Duration
 
 	// cache, when non-nil, memoizes authorization decisions for a short TTL keyed by
-	// (sub, resource, action, product) — NEVER the raw token. Enabled by
-	// AUTH_CACHE_TTL > 0 (opt-in; nil = no caching, prior behavior). It trades a
-	// bounded revocation-propagation lag (= TTL) for load shedding and outage
+	// (sub, resource, action, product, clientIp) — NEVER the access token. clientIp
+	// is part of the key because decisions are IP-dependent (tenant IP-allowlist), so
+	// a cross-IP cache hit would bypass the allowlist; do NOT drop it from the key.
+	// Enabled by AUTH_CACHE_TTL > 0 (opt-in; nil = no caching, prior behavior). It
+	// trades a bounded revocation-propagation lag (= TTL) for load shedding and outage
 	// resilience.
 	cache *decisionCache
 

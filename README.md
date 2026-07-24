@@ -142,7 +142,22 @@ The `clientIp` field is optional. On the Fiber path it is set automatically to `
 On the Fiber path, `Authorize` automatically sends `clientIp = c.IP()` to `POST /v1/authorize`, enabling the access manager to enforce a per-tenant IP allowlist downstream.
 
 * **No code change needed.** The public `Authorize(sub, resource, action)` signature is unchanged. Consuming services get this behavior by upgrading the library — bump the version, nothing else.
-* **Configure trusted proxies.** For `c.IP()` to report the real client IP behind a proxy or ingress, the consuming service must configure Fiber's trusted proxies (its own `TRUSTED_PROXIES` / `TrustProxy` setup). Without it, `c.IP()` is the socket peer (the proxy), not the caller.
+* **Configure trusted proxies (Fiber v3).** For `c.IP()` to report the real client IP behind a proxy or ingress, the consuming service must configure Fiber v3's trusted-proxy settings on its `fiber.New(fiber.Config{...})`:
+  * `TrustProxy: true` — enable proxy-header trust (Fiber v3 renamed the v2 `EnableTrustedProxyCheck`).
+  * `TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"10.0.0.0/8", "<ingress-cidr>"}}` — the exact set of upstream proxy IPs/CIDRs allowed to set the forwarded header. Never leave this empty while trusting the header, or any caller can spoof its IP.
+  * `ProxyHeader: fiber.HeaderXForwardedFor` — the header `c.IP()` reads the client IP from.
+  * `EnableIPValidation: true` — validates that the value is a well-formed IP, so `c.IP()` cannot return a spoofable raw `X-Forwarded-For` string.
+
+  Without this, `c.IP()` is the socket peer (the proxy), not the caller; misconfigured (trusting the header without pinning `Proxies`), it is attacker-controlled. Example:
+
+  ```go
+  f := fiber.New(fiber.Config{
+      TrustProxy:         true,
+      TrustProxyConfig:   fiber.TrustProxyConfig{Proxies: []string{"10.0.0.0/8"}},
+      ProxyHeader:        fiber.HeaderXForwardedFor,
+      EnableIPValidation: true,
+  })
+  ```
 * **gRPC is not IP-enforced yet.** The gRPC interceptors do not forward a client IP in this version, so gRPC-authorized calls skip IP allowlist enforcement. Peer/metadata IP extraction is a planned follow-up.
 * **Cache is IP-scoped.** When `AUTH_CACHE_TTL > 0`, the decision cache key includes `clientIp`, so a decision cached for one IP is never reused for another. IP-dependent decisions stay correct under caching.
 
