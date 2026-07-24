@@ -42,6 +42,19 @@ type AuthClient struct {
 	// product isolation without a code change in consumers.
 	ForwardM2MProduct bool
 
+	// M2MInversionEnabled, when true, selects the "inversion of responsibility"
+	// M2M/authz model (#122): an application-type token authorizes under its own
+	// real sub claim and any token type outside {normal-user, application} fails
+	// closed with 401. When false (the DEFAULT) the legacy pre-#122 model is used:
+	// any non-normal-user type is treated as M2M and authorizes under the fabricated
+	// "admin/{product}-editor-role" subject, and an unknown/empty type is never
+	// rejected (fail open). It is read once from AUTH_M2M_INVERSION_ENABLED at
+	// construction; the default (false) preserves the prior behavior exactly, so a
+	// consumer bumping this library for Fiber v3 is NOT forced into the new authz
+	// model. Gating it by env keeps deploy != release: flipping the flag activates
+	// the inversion without a code change in consumers.
+	M2MInversionEnabled bool
+
 	// Required, when true, makes the middleware fail closed: if auth is disabled
 	// or misconfigured (!Enabled || Address == ""), every protected route refuses
 	// to serve (HTTP 503 / gRPC Unavailable) instead of passing through with
@@ -228,17 +241,18 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 	// Build the client once with all env-derived config, then return it from every
 	// path below; the health check only logs, it never changes these fields.
 	c := &AuthClient{
-		Address:           address,
-		Enabled:           enabled,
-		Logger:            l,
-		ForwardM2MProduct: os.Getenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED") == "true",
-		Required:          os.Getenv("AUTH_REQUIRED") == "true",
-		timeout:           parseAuthTimeout(),
-		cache:             newDecisionCacheFromEnv(),
-		breaker:           newBreakerFromEnv(),
-		retryMax:          parseRetryMax(),
-		verifyKeys:        verifyKeys,
-		verifyIssuer:      verifyIssuer,
+		Address:             address,
+		Enabled:             enabled,
+		Logger:              l,
+		ForwardM2MProduct:   os.Getenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED") == "true",
+		M2MInversionEnabled: os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true",
+		Required:            os.Getenv("AUTH_REQUIRED") == "true",
+		timeout:             parseAuthTimeout(),
+		cache:               newDecisionCacheFromEnv(),
+		breaker:             newBreakerFromEnv(),
+		retryMax:            parseRetryMax(),
+		verifyKeys:          verifyKeys,
+		verifyIssuer:        verifyIssuer,
 	}
 
 	if !enabled || address == "" {
@@ -365,15 +379,31 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 }
 
 // deriveSubject builds the authorization subject from the token claims based on
-// the whitelisted token type. It fails closed (401) for any type outside
-// {normal-user, application}:
+// the token type. Its behavior is gated by AUTH_M2M_INVERSION_ENABLED
+// (auth.M2MInversionEnabled):
+//
+// Inversion OFF (default, legacy pre-#122): fail OPEN on type. Any type other than
+// normal-user is treated as M2M and yields the fabricated product-scoped role
+// "admin/<product>-editor-role"; an unknown/empty type is never rejected.
+//
+// Inversion ON (current v3.0.0): fail CLOSED on type. Only {normal-user,
+// application} are whitelisted:
 //   - normal-user: the JWT identity ("<owner>/<userID>"), failing closed with 401
 //     when the owner or sub claim is missing.
 //   - application (M2M): the token's own sub claim (already in "<owner>/<name>"
 //     form), failing closed with 401 when sub is missing. No product-scoped role
 //     is fabricated, since M2M has no product isolation.
 //   - any other type (including empty/absent): rejected with 401.
-func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, claims jwt.MapClaims, userType string) (string, int, error) {
+//
+// The normal-user branch is identical in both modes.
+func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, claims jwt.MapClaims, userType, product string) (string, int, error) {
+	if !auth.M2MInversionEnabled && userType != normalUser {
+		// LEGACY (pre-#122): any non-normal-user type is treated as M2M and
+		// authorizes under a fabricated product-scoped editor role. The type is
+		// never rejected (fail open) and the token's real sub is not consulted.
+		return fmt.Sprintf("admin/%s-editor-role", product), http.StatusOK, nil
+	}
+
 	switch userType {
 	case normalUser:
 		owner, _ := claims["owner"].(string)
@@ -465,7 +495,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 
 	userType, _ := claims["type"].(string)
 
-	sub, statusCode, err := auth.deriveSubject(ctx, span, claims, userType)
+	sub, statusCode, err := auth.deriveSubject(ctx, span, claims, userType, product)
 	if err != nil {
 		return false, statusCode, err
 	}
@@ -476,7 +506,11 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		"action":   action,
 	}
 
-	if shouldForwardProduct(userType, product, auth.ForwardM2MProduct) {
+	// M2M product forwarding only applies under the inversion model; the legacy
+	// path (inversion OFF) forwards product for normal-user flows only (pre-#122).
+	// shouldForwardProduct(userType, product, false) == the legacy normal-user rule.
+	forwardM2MProduct := auth.ForwardM2MProduct && auth.M2MInversionEnabled
+	if shouldForwardProduct(userType, product, forwardM2MProduct) {
 		requestBody["product"] = product
 	}
 

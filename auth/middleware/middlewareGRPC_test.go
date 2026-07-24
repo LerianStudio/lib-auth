@@ -918,9 +918,10 @@ func TestNewGRPCAuthUnaryPolicy_ApplicationSubject(t *testing.T) {
 	defer server.Close()
 
 	auth := &AuthClient{
-		Address: server.URL,
-		Enabled: true,
-		Logger:  &testLogger{},
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: true,
 	}
 
 	token := createTestJWT(jwt.MapClaims{
@@ -958,7 +959,7 @@ func TestNewGRPCAuthUnaryPolicy_ApplicationSubject(t *testing.T) {
 
 	// Subject is the real sub of the application token.
 	assert.Equal(t, "acme-org/my-app", capturedBody["sub"])
-	// Product is not forwarded for M2M tokens when the flag is off (default).
+	// Product is not forwarded for M2M tokens when ForwardM2MProduct is off (default).
 	_, hasProduct := capturedBody["product"]
 	assert.False(t, hasProduct)
 }
@@ -1092,10 +1093,11 @@ func TestNewGRPCAuthUnaryPolicy_ApplicationSubject_ForwardM2MProductEnabled(t *t
 	defer server.Close()
 
 	auth := &AuthClient{
-		Address:           server.URL,
-		Enabled:           true,
-		Logger:            &testLogger{},
-		ForwardM2MProduct: true,
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		ForwardM2MProduct:   true,
+		M2MInversionEnabled: true,
 	}
 
 	token := createTestJWT(jwt.MapClaims{
