@@ -26,6 +26,15 @@ PLUGIN_AUTH_ENABLED=true
 # false, preserving the previous behavior of sending no product for M2M.
 AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
 
+# Optional. When "true", enables the M2M/authz "inversion of responsibility"
+# model: application tokens authorize under their own real sub claim and any token
+# type outside {normal-user, application} fails closed with 401. Defaults to false,
+# preserving the legacy pre-inversion model (non-normal-user types authorize under
+# the fabricated "admin/{product}-editor-role" subject and unknown types fail open).
+# Keep it false when your Casdoor seed still uses the legacy model; opt in once
+# seeds are migrated.
+AUTH_M2M_INVERSION_ENABLED=false
+
 # Optional. Opt-in local JWT signature verification for the general authorization
 # path. When unset, tokens are parsed without signature verification (the
 # authorization service remains the trust anchor) — the previous behavior,
