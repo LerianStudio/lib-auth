@@ -1008,6 +1008,7 @@ func TestNewGRPCAuthUnaryPolicy_NoClientIP(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ok", resp)
 
+	require.NotNil(t, capturedBody, "authorization request was not captured")
 	_, hasClientIP := capturedBody["clientIp"]
 	assert.False(t, hasClientIP, "gRPC path must not send clientIp")
 }
@@ -1063,6 +1064,7 @@ func TestNewGRPCAuthStreamPolicy_NoClientIP(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, called)
 
+	require.NotNil(t, capturedBody, "authorization request was not captured")
 	_, hasClientIP := capturedBody["clientIp"]
 	assert.False(t, hasClientIP, "gRPC stream path must not send clientIp")
 }
