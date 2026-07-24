@@ -1,3 +1,10 @@
+## [3.1.0](https://github.com/LerianStudio/lib-auth/compare/v3.0.0...v3.1.0) (2026-07-24)
+
+
+### Features
+
+* **middleware:** opt-in flag for M2M inversion ([55c23ee](https://github.com/LerianStudio/lib-auth/commit/55c23eea505c248ea1ce4884f506e84bbb112478)), closes [#122](https://github.com/LerianStudio/lib-auth/issues/122) [pre-#122](https://github.com/LerianStudio/pre-/issues/122)
+
 ## [3.0.0](https://github.com/LerianStudio/lib-auth/compare/v2.9.0...v3.0.0) (2026-07-22)
 
 
