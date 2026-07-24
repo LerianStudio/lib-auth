@@ -478,8 +478,8 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		requestBody["product"] = product
 	}
 
-	// clientIp is optional: include it only when a caller IP was resolved, so an
-	// empty IP leaves the request body byte-identical to the pre-IP behavior.
+	// clientIp is optional: the field is omitted when empty, so callers that don't
+	// resolve a client IP send the same request body (no clientIp key) as before.
 	if clientIP != "" {
 		requestBody["clientIp"] = clientIP
 	}
