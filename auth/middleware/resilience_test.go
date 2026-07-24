@@ -149,7 +149,7 @@ func TestCheckAuthorization_CacheHit_AvoidsSecondPost(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken())
+		authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken(), "")
 		require.NoError(t, err)
 		assert.True(t, authorized)
 		assert.Equal(t, http.StatusOK, statusCode)
@@ -172,12 +172,12 @@ func TestCheckAuthorization_CacheExpiry_RequeriesAuthz(t *testing.T) {
 		cache:   newDecisionCache(15 * time.Millisecond),
 	}
 
-	_, _, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken())
+	_, _, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken(), "")
 	require.NoError(t, err)
 
 	time.Sleep(40 * time.Millisecond)
 
-	_, _, err = auth.checkAuthorization(context.Background(), "", "res", "read", userToken())
+	_, _, err = auth.checkAuthorization(context.Background(), "", "res", "read", userToken(), "")
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(2), hits.Load(), "an expired cache entry must trigger a fresh authz query")
@@ -198,7 +198,7 @@ func TestCheckAuthorization_NegativeCache_Served(t *testing.T) {
 	}
 
 	for i := 0; i < 2; i++ {
-		authorized, _, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken())
+		authorized, _, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken(), "")
 		require.NoError(t, err)
 		assert.False(t, authorized)
 	}
@@ -231,7 +231,7 @@ func TestCheckAuthorization_Retry_On5xx_EventuallySucceeds(t *testing.T) {
 		retryMax: 2,
 	}
 
-	authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken())
+	authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken(), "")
 
 	require.NoError(t, err)
 	assert.True(t, authorized)
@@ -256,7 +256,7 @@ func TestCheckAuthorization_Retry_NotOn403(t *testing.T) {
 		retryMax: 3,
 	}
 
-	authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "write", userToken())
+	authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "write", userToken(), "")
 
 	require.Error(t, err)
 	assert.False(t, authorized)
@@ -284,14 +284,14 @@ func TestCheckAuthorization_Breaker_OpensAfterN_AndDenies(t *testing.T) {
 
 	// Two consecutive transient (5xx) failures trip the breaker.
 	for i := 0; i < 2; i++ {
-		authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken())
+		authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken(), "")
 		require.NoError(t, err, "runtime outage denies without surfacing an error")
 		assert.False(t, authorized)
 		assert.Equal(t, http.StatusForbidden, statusCode)
 	}
 
 	// Breaker now open: the next call is denied WITHOUT touching the authz service.
-	authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken())
+	authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken(), "")
 	require.NoError(t, err)
 	assert.False(t, authorized)
 	assert.Equal(t, http.StatusForbidden, statusCode)
@@ -323,7 +323,7 @@ func TestCheckAuthorization_BreakerOpen_ServesFreshPositiveCacheOnly(t *testing.
 	}
 
 	// Phase 1: prime a positive decision for "resCached" while the service is healthy.
-	authorized, _, err := auth.checkAuthorization(context.Background(), "", "resCached", "read", userToken())
+	authorized, _, err := auth.checkAuthorization(context.Background(), "", "resCached", "read", userToken(), "")
 	require.NoError(t, err)
 	require.True(t, authorized)
 
@@ -331,20 +331,20 @@ func TestCheckAuthorization_BreakerOpen_ServesFreshPositiveCacheOnly(t *testing.
 	failing.Store(true)
 
 	for i := 0; i < 2; i++ {
-		_, _, err = auth.checkAuthorization(context.Background(), "", "resTrip", "read", userToken())
+		_, _, err = auth.checkAuthorization(context.Background(), "", "resTrip", "read", userToken(), "")
 		require.NoError(t, err)
 	}
 
 	hitsAfterTrip := hits.Load()
 
 	// Breaker open + fresh positive cache hit -> allow (served from cache, no network).
-	authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "resCached", "read", userToken())
+	authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "resCached", "read", userToken(), "")
 	require.NoError(t, err)
 	assert.True(t, authorized, "a fresh positive cache hit is served even while the breaker is open")
 	assert.Equal(t, http.StatusOK, statusCode)
 
 	// Breaker open + no cache -> deny.
-	authorized, statusCode, err = auth.checkAuthorization(context.Background(), "", "resUncached", "read", userToken())
+	authorized, statusCode, err = auth.checkAuthorization(context.Background(), "", "resUncached", "read", userToken(), "")
 	require.NoError(t, err)
 	assert.False(t, authorized, "with the breaker open and no fresh cache, the request is denied")
 	assert.Equal(t, http.StatusForbidden, statusCode)
@@ -378,7 +378,7 @@ func TestCheckAuthorization_ContextTimeout_AbortsCall(t *testing.T) {
 	}
 
 	start := time.Now()
-	authorized, _, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken())
+	authorized, _, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken(), "")
 	elapsed := time.Since(start)
 
 	require.Error(t, err, "the per-request deadline must abort the authz call")
@@ -415,7 +415,7 @@ func TestCheckAuthorization_CallerCancellation_Propagates(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, _, err := auth.checkAuthorization(ctx, "", "res", "read", userToken())
+	_, _, err := auth.checkAuthorization(ctx, "", "res", "read", userToken(), "")
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
