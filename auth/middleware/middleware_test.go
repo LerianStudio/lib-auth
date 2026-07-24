@@ -145,9 +145,10 @@ func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 	defer server.Close()
 
 	auth := &AuthClient{
-		Address: server.URL,
-		Enabled: true,
-		Logger:  &testLogger{},
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: true,
 	}
 
 	token := createTestJWT(jwt.MapClaims{
@@ -198,10 +199,11 @@ func TestCheckAuthorization_Application_ForwardM2MProductEnabled_ForwardsProduct
 	defer server.Close()
 
 	auth := &AuthClient{
-		Address:           server.URL,
-		Enabled:           true,
-		Logger:            &testLogger{},
-		ForwardM2MProduct: true,
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		ForwardM2MProduct:   true,
+		M2MInversionEnabled: true,
 	}
 
 	token := createTestJWT(jwt.MapClaims{
@@ -250,10 +252,11 @@ func TestCheckAuthorization_Application_ForwardM2MProductEnabled_EmptyProduct_No
 	defer server.Close()
 
 	auth := &AuthClient{
-		Address:           server.URL,
-		Enabled:           true,
-		Logger:            &testLogger{},
-		ForwardM2MProduct: true,
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		ForwardM2MProduct:   true,
+		M2MInversionEnabled: true,
 	}
 
 	token := createTestJWT(jwt.MapClaims{
@@ -521,9 +524,10 @@ func TestCheckAuthorization_EmptyTypeClaim_Rejected(t *testing.T) {
 	defer server.Close()
 
 	auth := &AuthClient{
-		Address: server.URL,
-		Enabled: true,
-		Logger:  &testLogger{},
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: true,
 	}
 
 	// No "type" claim at all -> defaults to empty string -> not whitelisted.
@@ -552,9 +556,10 @@ func TestCheckAuthorization_ApplicationUser_MissingSubClaim_FailsClosed(t *testi
 	defer server.Close()
 
 	auth := &AuthClient{
-		Address: server.URL,
-		Enabled: true,
-		Logger:  &testLogger{},
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: true,
 	}
 
 	token := createTestJWT(jwt.MapClaims{
@@ -584,9 +589,10 @@ func TestCheckAuthorization_NonCanonicalType_Rejected(t *testing.T) {
 	defer server.Close()
 
 	auth := &AuthClient{
-		Address: server.URL,
-		Enabled: true,
-		Logger:  &testLogger{},
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: true,
 	}
 
 	token := createTestJWT(jwt.MapClaims{
@@ -1089,4 +1095,279 @@ func TestAuthResponse_JSONRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, original.Authorized, decoded.Authorized)
+}
+
+// ---------------------------------------------------------------------------
+// AUTH_M2M_INVERSION_ENABLED - M2M/authz inversion toggle
+// ---------------------------------------------------------------------------
+
+// captureAuthServer returns a mock /v1/authorize server that decodes the request
+// body into capturedBody and always authorizes. Reaching it proves the type was
+// NOT rejected before the backend call (fail-open).
+func captureAuthServer(t *testing.T, capturedBody *map[string]string) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(capturedBody); err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: true}); err != nil {
+			t.Errorf("mock server: failed to encode response: %v", err)
+		}
+	}))
+}
+
+func TestCheckAuthorization_M2MInversionOff_ApplicationGetsEditorRole(t *testing.T) {
+	t.Parallel()
+
+	// Legacy (pre-#122) behavior with the inversion flag OFF (default): an
+	// application (M2M) token yields the fabricated product-scoped role
+	// "admin/<product>-editor-role" and the real sub is NOT used.
+	var capturedBody map[string]string
+
+	server := captureAuthServer(t, &capturedBody)
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: false,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		"sub":  "acme-org/my-app",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token, "",
+	)
+
+	require.NoError(t, err)
+	assert.True(t, authorized)
+	assert.Equal(t, http.StatusOK, statusCode)
+	assert.Equal(t, "admin/midaz-editor-role", capturedBody["sub"])
+	// Legacy forwards product only for normal-user, never for M2M.
+	_, hasProduct := capturedBody["product"]
+	assert.False(t, hasProduct)
+}
+
+func TestCheckAuthorization_M2MInversionOff_UnknownType_FailsOpen(t *testing.T) {
+	t.Parallel()
+
+	// Legacy (pre-#122) fail-open behavior: any non-normal-user type (including an
+	// unknown one) is treated as M2M and yields the editor role. It is NEVER
+	// rejected on type and DOES reach the backend.
+	var capturedBody map[string]string
+
+	server := captureAuthServer(t, &capturedBody)
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: false,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "service-account",
+		"owner": "acme-org",
+		"sub":   "svc-1",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token, "",
+	)
+
+	require.NoError(t, err)
+	assert.True(t, authorized)
+	assert.Equal(t, http.StatusOK, statusCode)
+	assert.Equal(t, "admin/midaz-editor-role", capturedBody["sub"])
+}
+
+func TestCheckAuthorization_M2MInversionOff_EmptyType_FailsOpen(t *testing.T) {
+	t.Parallel()
+
+	// An absent "type" claim is also non-normal-user under the legacy path, so it
+	// fails open with the editor role rather than returning 401.
+	var capturedBody map[string]string
+
+	server := captureAuthServer(t, &capturedBody)
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: false,
+	}
+
+	// No "type" claim -> empty string -> non-normal-user under legacy.
+	token := createTestJWT(jwt.MapClaims{
+		"sub": "some-app",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token, "",
+	)
+
+	require.NoError(t, err)
+	assert.True(t, authorized)
+	assert.Equal(t, http.StatusOK, statusCode)
+	assert.Equal(t, "admin/midaz-editor-role", capturedBody["sub"])
+}
+
+func TestCheckAuthorization_M2MInversionOn_ApplicationGetsRealSub(t *testing.T) {
+	t.Parallel()
+
+	// Inversion ON: an application (M2M) token is identified by its real sub claim;
+	// no product-scoped role is fabricated.
+	var capturedBody map[string]string
+
+	server := captureAuthServer(t, &capturedBody)
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: true,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		"sub":  "acme-org/my-app",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token, "",
+	)
+
+	require.NoError(t, err)
+	assert.True(t, authorized)
+	assert.Equal(t, http.StatusOK, statusCode)
+	assert.Equal(t, "acme-org/my-app", capturedBody["sub"])
+}
+
+func TestCheckAuthorization_M2MInversionOn_UnknownType_FailsClosed(t *testing.T) {
+	t.Parallel()
+
+	// Inversion ON: any type outside {normal-user, application} fails closed with
+	// 401 and never reaches the backend.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("auth backend must not be called for a non-canonical token type under inversion")
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: true,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "service-account",
+		"owner": "acme-org",
+		"sub":   "svc-1",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token, "",
+	)
+
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.Contains(t, err.Error(), "unsupported token type")
+}
+
+func TestCheckAuthorization_M2MInversion_NormalUserUnchanged(t *testing.T) {
+	t.Parallel()
+
+	// normal-user behavior is identical in both modes: subject is the JWT identity
+	// "<owner>/<userID>" and the product is forwarded.
+	tests := []struct {
+		name      string
+		inversion bool
+	}{
+		{name: "inversion_off", inversion: false},
+		{name: "inversion_on", inversion: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var capturedBody map[string]string
+
+			server := captureAuthServer(t, &capturedBody)
+			defer server.Close()
+
+			auth := &AuthClient{
+				Address:             server.URL,
+				Enabled:             true,
+				Logger:              &testLogger{},
+				M2MInversionEnabled: tt.inversion,
+			}
+
+			token := createTestJWT(jwt.MapClaims{
+				"type":  "normal-user",
+				"owner": "acme-org",
+				"sub":   "user123",
+			})
+
+			authorized, statusCode, err := auth.checkAuthorization(
+				context.Background(), "midaz", "resource", "action", token, "",
+			)
+
+			require.NoError(t, err)
+			assert.True(t, authorized)
+			assert.Equal(t, http.StatusOK, statusCode)
+			assert.Equal(t, "acme-org/user123", capturedBody["sub"])
+			assert.Equal(t, "midaz", capturedBody["product"])
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewAuthClient - M2MInversionEnabled (AUTH_M2M_INVERSION_ENABLED) flag
+// ---------------------------------------------------------------------------
+
+func TestNewAuthClient_ReadsM2MInversionFlag(t *testing.T) {
+	// Cannot use t.Parallel(): subtests use t.Setenv which modifies process env.
+	// enabled=false / empty address returns early without any network call, so the
+	// flag wiring is exercised in isolation.
+	logger := log.Logger(&testLogger{})
+
+	t.Run("flag_true_enables_inversion", func(t *testing.T) {
+		t.Setenv("AUTH_M2M_INVERSION_ENABLED", "true")
+
+		client := NewAuthClient("", false, &logger)
+		assert.True(t, client.M2MInversionEnabled)
+	})
+
+	t.Run("flag_absent_defaults_false", func(t *testing.T) {
+		t.Setenv("AUTH_M2M_INVERSION_ENABLED", "")
+
+		client := NewAuthClient("", false, &logger)
+		assert.False(t, client.M2MInversionEnabled)
+	})
+
+	t.Run("flag_non_true_value_is_false", func(t *testing.T) {
+		t.Setenv("AUTH_M2M_INVERSION_ENABLED", "1")
+
+		client := NewAuthClient("", false, &logger)
+		assert.False(t, client.M2MInversionEnabled)
+	})
 }
