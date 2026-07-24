@@ -1,3 +1,10 @@
+## [3.2.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.1.0...v3.2.0-beta.1) (2026-07-24)
+
+
+### Features
+
+* **middleware:** forward client IP to /v1/authorize + scope decision cache by it ([cbee470](https://github.com/LerianStudio/lib-auth/commit/cbee4709d749adee4300bcccc34630c2cd9cc208))
+
 ## [3.1.0](https://github.com/LerianStudio/lib-auth/compare/v3.0.0...v3.1.0) (2026-07-24)
 
 
