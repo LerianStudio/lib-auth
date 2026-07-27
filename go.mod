@@ -7,7 +7,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
-	google.golang.org/grpc v1.81.1
+	google.golang.org/grpc v1.82.1
 )
 
 require (
@@ -16,11 +16,12 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
+	go.uber.org/zap/exp v0.3.0 // indirect
 )
 
 require (
 	github.com/LerianStudio/lib-commons/v6 v6.0.0
-	github.com/LerianStudio/lib-observability/v2 v2.0.0
+	github.com/LerianStudio/lib-observability/v2 v2.1.0
 	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/bxcodec/dbresolver/v2 v2.2.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3
