@@ -964,6 +964,112 @@ func TestNewGRPCAuthUnaryPolicy_ApplicationSubject(t *testing.T) {
 	assert.False(t, hasProduct)
 }
 
+// TestNewGRPCAuthUnaryPolicy_NoClientIP asserts the gRPC unary path never sends a
+// clientIp field: peer/metadata IP extraction for gRPC is an approved follow-up
+// epic, out of v1 scope, so checkAuthorization is called with an empty clientIP.
+func TestNewGRPCAuthUnaryPolicy_NoClientIP(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: true}); err != nil {
+			t.Errorf("mock server: failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	defaultPol := Policy{Resource: "res", Action: "read"}
+	interceptor := NewGRPCAuthUnaryPolicy(auth, PolicyConfig{DefaultPolicy: &defaultPol})
+
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("authorization", "Bearer "+token),
+	)
+
+	handler := func(_ context.Context, _ any) (any, error) { return "ok", nil }
+	info := &grpc.UnaryServerInfo{FullMethod: "/pkg.Service/DoThing"}
+
+	resp, err := interceptor(ctx, "req", info, handler)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp)
+
+	require.NotNil(t, capturedBody, "authorization request was not captured")
+	_, hasClientIP := capturedBody["clientIp"]
+	assert.False(t, hasClientIP, "gRPC path must not send clientIp")
+}
+
+// TestNewGRPCAuthStreamPolicy_NoClientIP asserts the gRPC stream path never sends a
+// clientIp field: peer/metadata IP extraction for gRPC is an approved follow-up
+// epic, out of v1 scope, so checkAuthorization is called with an empty clientIP.
+func TestNewGRPCAuthStreamPolicy_NoClientIP(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: true}); err != nil {
+			t.Errorf("mock server: failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	defaultPol := Policy{Resource: "res", Action: "read"}
+	interceptor := NewGRPCAuthStreamPolicy(auth, PolicyConfig{DefaultPolicy: &defaultPol})
+
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("authorization", "Bearer "+token),
+	)
+
+	called := false
+	handler := func(_ any, _ grpc.ServerStream) error {
+		called = true
+		return nil
+	}
+
+	info := &grpc.StreamServerInfo{FullMethod: "/pkg.Service/StreamThing"}
+	ss := &fakeServerStream{ctx: ctx}
+
+	err := interceptor(nil, ss, info, handler)
+	require.NoError(t, err)
+	assert.True(t, called)
+
+	require.NotNil(t, capturedBody, "authorization request was not captured")
+	_, hasClientIP := capturedBody["clientIp"]
+	assert.False(t, hasClientIP, "gRPC stream path must not send clientIp")
+}
+
 func TestNewGRPCAuthUnaryPolicy_ApplicationSubject_ForwardM2MProductEnabled(t *testing.T) {
 	t.Parallel()
 

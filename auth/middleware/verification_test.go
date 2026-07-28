@@ -312,7 +312,7 @@ func TestCheckAuthorization_VerificationEnabled_ValidToken_ReachesAuthz(t *testi
 	token := signRS256(t, key, normalUserClaims())
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "read", token,
+		context.Background(), "midaz", "resource", "read", token, "",
 	)
 
 	require.NoError(t, err)
@@ -344,7 +344,7 @@ func TestCheckAuthorization_VerificationEnabled_ForgedToken_DeniedBeforeAuthz(t 
 	token := signRS256(t, attackerKey, normalUserClaims())
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "read", token,
+		context.Background(), "midaz", "resource", "read", token, "",
 	)
 
 	require.Error(t, err)
@@ -377,7 +377,7 @@ func TestCheckAuthorization_VerificationEnabled_ExpiredToken_Denied(t *testing.T
 	token := signRS256(t, key, claims)
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "read", token,
+		context.Background(), "midaz", "resource", "read", token, "",
 	)
 
 	require.Error(t, err)
@@ -408,7 +408,7 @@ func TestCheckAuthorization_VerificationDisabled_UnsignedTokenStillWorks(t *test
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "read", token,
+		context.Background(), "midaz", "resource", "read", token, "",
 	)
 
 	require.NoError(t, err)

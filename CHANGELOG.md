@@ -1,9 +1,30 @@
+## [3.2.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v3.2.0-beta.1...v3.2.0-beta.2) (2026-07-28)
+
+
+### Bug Fixes
+
+* **middleware:** keep the caller IP out of the tracing span ([c94c21a](https://github.com/LerianStudio/lib-auth/commit/c94c21a14d47688a5314e4e3b79caa0df51fa6ed))
+
+## [3.2.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.1.0...v3.2.0-beta.1) (2026-07-24)
+
+
+### Features
+
+* **middleware:** forward client IP to /v1/authorize + scope decision cache by it ([cbee470](https://github.com/LerianStudio/lib-auth/commit/cbee4709d749adee4300bcccc34630c2cd9cc208))
+
 ## [3.1.0](https://github.com/LerianStudio/lib-auth/compare/v3.0.0...v3.1.0) (2026-07-24)
 
 
 ### Features
 
-* **middleware:** opt-in flag for M2M inversion ([55c23ee](https://github.com/LerianStudio/lib-auth/commit/55c23eea505c248ea1ce4884f506e84bbb112478)), closes [#122](https://github.com/LerianStudio/lib-auth/issues/122) [pre-#122](https://github.com/LerianStudio/pre-/issues/122)
+* **middleware:** opt-in flag for M2M inversion ([55c23ee](https://github.com/LerianStudio/lib-auth/commit/55c23eea505c248ea1ce4884f506e84bbb112478)), closes [#122](https://github.com/LerianStudio/lib-auth/issues/122)
+
+## [3.1.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.0.0...v3.1.0-beta.1) (2026-07-24)
+
+
+### Features
+
+* **middleware:** forward client IP to /v1/authorize + scope decision cache by it ([cbee470](https://github.com/LerianStudio/lib-auth/commit/cbee4709d749adee4300bcccc34630c2cd9cc208))
 
 ## [3.0.0](https://github.com/LerianStudio/lib-auth/compare/v2.9.0...v3.0.0) (2026-07-22)
 

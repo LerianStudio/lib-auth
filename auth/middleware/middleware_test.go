@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	observability "github.com/LerianStudio/lib-observability/v2"
 	"github.com/LerianStudio/lib-observability/v2/log"
@@ -104,7 +106,7 @@ func TestCheckAuthorization_NormalUser_SubjectConstruction(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token, "",
 	)
 
 	require.NoError(t, err)
@@ -156,7 +158,7 @@ func TestCheckAuthorization_ApplicationUser_SubjectConstruction(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "my-app", "resource", "action", token,
+		context.Background(), "my-app", "resource", "action", token, "",
 	)
 
 	require.NoError(t, err)
@@ -211,7 +213,7 @@ func TestCheckAuthorization_Application_ForwardM2MProductEnabled_ForwardsProduct
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token, "",
 	)
 
 	require.NoError(t, err)
@@ -264,7 +266,7 @@ func TestCheckAuthorization_Application_ForwardM2MProductEnabled_EmptyProduct_No
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "", "resource", "action", token,
+		context.Background(), "", "resource", "action", token, "",
 	)
 
 	require.NoError(t, err)
@@ -295,7 +297,7 @@ func TestCheckAuthorization_MissingOwnerClaim(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "sub", "resource", "action", token,
+		context.Background(), "sub", "resource", "action", token, "",
 	)
 
 	require.Error(t, err)
@@ -328,7 +330,7 @@ func TestCheckAuthorization_MissingSubClaim(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token, "",
 	)
 
 	require.Error(t, err)
@@ -375,7 +377,7 @@ func TestCheckAuthorization_NormalUser_EmptyProduct_NotForwarded(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "", "resource", "action", token,
+		context.Background(), "", "resource", "action", token, "",
 	)
 
 	require.NoError(t, err)
@@ -408,7 +410,7 @@ func TestCheckAuthorization_MockServerReturnsAuthorizedTrue(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "sub", "resource", "read", token,
+		context.Background(), "sub", "resource", "read", token, "",
 	)
 
 	require.NoError(t, err)
@@ -435,7 +437,7 @@ func TestCheckAuthorization_MockServerReturnsAuthorizedFalse(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "sub", "resource", "read", token,
+		context.Background(), "sub", "resource", "read", token, "",
 	)
 
 	require.NoError(t, err)
@@ -478,7 +480,7 @@ func TestCheckAuthorization_MockServerReturnsForbiddenWithErrorBody(t *testing.T
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "sub", "resource", "write", token,
+		context.Background(), "sub", "resource", "write", token, "",
 	)
 
 	require.Error(t, err)
@@ -502,7 +504,7 @@ func TestCheckAuthorization_InvalidToken(t *testing.T) {
 	invalidToken := "not-a-valid-jwt"
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "sub", "resource", "action", invalidToken,
+		context.Background(), "sub", "resource", "action", invalidToken, "",
 	)
 
 	require.Error(t, err)
@@ -534,7 +536,7 @@ func TestCheckAuthorization_EmptyTypeClaim_Rejected(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "some-app", "resource", "action", token,
+		context.Background(), "some-app", "resource", "action", token, "",
 	)
 
 	require.Error(t, err)
@@ -567,7 +569,7 @@ func TestCheckAuthorization_ApplicationUser_MissingSubClaim_FailsClosed(t *testi
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "my-app", "resource", "action", token,
+		context.Background(), "my-app", "resource", "action", token, "",
 	)
 
 	require.Error(t, err)
@@ -600,7 +602,7 @@ func TestCheckAuthorization_NonCanonicalType_Rejected(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token, "",
 	)
 
 	require.Error(t, err)
@@ -629,7 +631,7 @@ func TestCheckAuthorization_MockServerDown(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "sub", "resource", "read", token,
+		context.Background(), "sub", "resource", "read", token, "",
 	)
 
 	require.Error(t, err)
@@ -662,7 +664,7 @@ func TestCheckAuthorization_ServerReturnsInvalidJSON(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "sub", "resource", "read", token,
+		context.Background(), "sub", "resource", "read", token, "",
 	)
 
 	require.Error(t, err)
@@ -813,8 +815,282 @@ func TestAuthorize_FailClosed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Authorize - client IP forwarding (clientIp)
+// ---------------------------------------------------------------------------
+
+// TestAuthorize_ForwardsClientIP drives a request through the Fiber Authorize
+// middleware and asserts the caller IP resolved by c.IP() is forwarded to the
+// authorize endpoint as an OPTIONAL "clientIp" body field: present (== resolved
+// IP) when an IP is available, and ABSENT when the resolved IP is empty so the
+// wire body stays byte-identical to today for every deployed access-manager.
+func TestAuthorize_ForwardsClientIP(t *testing.T) {
+	t.Parallel()
+
+	// newApp builds a Fiber app whose c.IP() reads the X-Forwarded-For header.
+	// The in-memory test connection reports 0.0.0.0 as its remote address, so it
+	// is added to the trusted-proxy allowlist; this lets a test drive a known
+	// client IP (or an empty one, by omitting the header) deterministically.
+	newApp := func(auth *AuthClient) *fiber.App {
+		app := fiber.New(fiber.Config{
+			TrustProxy:       true,
+			TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"0.0.0.0"}},
+			ProxyHeader:      fiber.HeaderXForwardedFor,
+		})
+		app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+			return c.SendString("reached handler")
+		})
+
+		return app
+	}
+
+	newCapturingServer := func(t *testing.T, captured *map[string]string) *httptest.Server {
+		t.Helper()
+
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(captured); err != nil {
+				t.Errorf("mock server: failed to decode request body: %v", err)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+
+			if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: true}); err != nil {
+				t.Errorf("mock server: failed to encode response: %v", err)
+			}
+		}))
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	t.Run("forwards_resolved_client_ip", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedBody map[string]string
+
+		server := newCapturingServer(t, &capturedBody)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set(fiber.HeaderXForwardedFor, "203.0.113.7")
+
+		resp, err := newApp(auth).Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		// The resolved caller IP is forwarded as the optional clientIp field.
+		assert.Equal(t, "203.0.113.7", capturedBody["clientIp"])
+	})
+
+	t.Run("omits_client_ip_when_empty", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedBody map[string]string
+
+		server := newCapturingServer(t, &capturedBody)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		// No X-Forwarded-For header: the only hop is the test connection's
+		// 0.0.0.0, which newApp lists as a trusted proxy, so the walk skips it
+		// and no untrusted address remains -> c.IP() resolves to "" -> key
+		// omitted. This is not a harness quirk: it mirrors fully-internal
+		// traffic, where every hop is a trusted proxy and no caller IP can be
+		// attributed, which is exactly what the empty-value guard exists for.
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := newApp(auth).Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		_, hasClientIP := capturedBody["clientIp"]
+		assert.False(t, hasClientIP, "clientIp must be absent when the resolved IP is empty")
+	})
+}
+
+// TestAuthorize_DecisionCache_ScopedByClientIP proves the in-memory decision
+// cache keys entries by client IP, so an "authorized" decision cached for an
+// ALLOWED source IP is never served to a request from a DIFFERENT (blocked) IP
+// with the same {sub,resource,action,product}. The /v1/authorize decision is
+// IP-dependent (tenant IP-allowlist), so a cross-IP cache hit would bypass the
+// allowlist entirely. Same-IP requests must still be served from cache.
+func TestAuthorize_DecisionCache_ScopedByClientIP(t *testing.T) {
+	t.Parallel()
+
+	const (
+		allowedIP = "203.0.113.7"
+		blockedIP = "198.51.100.9"
+	)
+
+	// newApp builds a Fiber app whose c.IP() reads X-Forwarded-For (the in-memory
+	// test connection reports 0.0.0.0, added to the trusted-proxy allowlist), so a
+	// test can drive a known client IP deterministically.
+	newApp := func(auth *AuthClient) *fiber.App {
+		app := fiber.New(fiber.Config{
+			TrustProxy:       true,
+			TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"0.0.0.0"}},
+			ProxyHeader:      fiber.HeaderXForwardedFor,
+		})
+		app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+			return c.SendString("reached handler")
+		})
+
+		return app
+	}
+
+	// ipAllowlistServer mimics the access-manager tenant IP-allowlist: it authorizes
+	// only requests whose forwarded clientIp equals allowedIP. It counts hits so a
+	// cache HIT (no request) is distinguishable from a cache MISS (a request).
+	ipAllowlistServer := func(t *testing.T) (*httptest.Server, *atomic.Int64) {
+		return countingAuthServer(t, func(w http.ResponseWriter, r *http.Request, _ int64) {
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("mock server: failed to decode request body: %v", err)
+			}
+
+			writeAuthorized(w, body["clientIp"] == allowedIP)
+		})
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	doGet := func(app *fiber.App, ip string) *http.Response {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set(fiber.HeaderXForwardedFor, ip)
+
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+
+		return resp
+	}
+
+	t.Run("cross_ip_is_a_cache_miss_and_denied", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := ipAllowlistServer(t)
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, cache: newDecisionCache(time.Minute)}
+		app := newApp(auth)
+
+		// Request 1 from the ALLOWED IP: authorized and cached.
+		resp1 := doGet(app, allowedIP)
+		assert.Equal(t, http.StatusOK, resp1.StatusCode)
+
+		// Request 2 from a BLOCKED IP, identical sub/resource/action. With the IP in
+		// the cache key this is a MISS -> the server is re-queried and denies. Without
+		// the IP in the key it would be served the cached allow -> the bypass.
+		resp2 := doGet(app, blockedIP)
+		assert.Equal(t, http.StatusForbidden, resp2.StatusCode, "a blocked IP must not be served the allow cached for a different IP")
+		assert.Equal(t, int64(2), hits.Load(), "the blocked-IP request must re-query the authz service (cache miss on a different IP)")
+	})
+
+	t.Run("same_ip_is_served_from_cache", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := ipAllowlistServer(t)
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, cache: newDecisionCache(time.Minute)}
+		app := newApp(auth)
+
+		// Two identical requests from the SAME allowed IP: the second is served from
+		// cache, so the authz service is queried exactly once.
+		for i := 0; i < 2; i++ {
+			resp := doGet(app, allowedIP)
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+		}
+
+		assert.Equal(t, int64(1), hits.Load(), "a repeat request from the same IP must be served from cache (no second query)")
+	})
+}
+
+// ---------------------------------------------------------------------------
 // GetApplicationToken
 // ---------------------------------------------------------------------------
+
+// TestAuthorize_DoesNotTraceClientIP proves the caller IP reaches the wire body
+// but never a span attribute. A client IP is personal data, and traces are
+// retained longer and read more widely than authz logs, so the span payload is
+// emitted from a copy with clientIp stripped.
+func TestAuthorize_DoesNotTraceClientIP(t *testing.T) {
+	t.Parallel()
+
+	const clientIP = "203.0.113.7"
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		require.NoError(t, json.NewEncoder(w).Encode(AuthResponse{Authorized: true}))
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+	app := fiber.New(fiber.Config{
+		TrustProxy:       true,
+		TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"0.0.0.0"}},
+		ProxyHeader:      fiber.HeaderXForwardedFor,
+	})
+
+	// Seed the tracer the middleware recovers from the request context.
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(observability.ContextWithTracer(c.Context(), tp.Tracer("test")))
+
+		return c.Next()
+	})
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+		return c.SendString("reached handler")
+	})
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set(fiber.HeaderXForwardedFor, clientIP)
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// The wire body still carries the IP — enforcement depends on it.
+	assert.Equal(t, clientIP, capturedBody["clientIp"])
+
+	// No span attribute may expose it, by key or by value.
+	spans := exporter.GetSpans()
+	require.NotEmpty(t, spans, "expected the authorization spans to be exported")
+
+	for _, s := range spans {
+		for _, attr := range s.Attributes {
+			assert.NotContains(t, string(attr.Key), "clientIp",
+				"span %q exposes a clientIp attribute", s.Name)
+			assert.NotContains(t, attr.Value.AsString(), clientIP,
+				"span %q leaks the caller IP in attribute %q", s.Name, attr.Key)
+		}
+	}
+}
 
 func TestGetApplicationToken_DoesNotTraceClientSecret(t *testing.T) {
 	t.Parallel()
@@ -949,7 +1225,7 @@ func TestCheckAuthorization_M2MInversionOff_ApplicationGetsEditorRole(t *testing
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token, "",
 	)
 
 	require.NoError(t, err)
@@ -986,7 +1262,7 @@ func TestCheckAuthorization_M2MInversionOff_UnknownType_FailsOpen(t *testing.T) 
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token, "",
 	)
 
 	require.NoError(t, err)
@@ -1018,7 +1294,7 @@ func TestCheckAuthorization_M2MInversionOff_EmptyType_FailsOpen(t *testing.T) {
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token, "",
 	)
 
 	require.NoError(t, err)
@@ -1051,7 +1327,7 @@ func TestCheckAuthorization_M2MInversionOn_ApplicationGetsRealSub(t *testing.T) 
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token, "",
 	)
 
 	require.NoError(t, err)
@@ -1084,7 +1360,7 @@ func TestCheckAuthorization_M2MInversionOn_UnknownType_FailsClosed(t *testing.T)
 	})
 
 	authorized, statusCode, err := auth.checkAuthorization(
-		context.Background(), "midaz", "resource", "action", token,
+		context.Background(), "midaz", "resource", "action", token, "",
 	)
 
 	require.Error(t, err)
@@ -1131,7 +1407,7 @@ func TestCheckAuthorization_M2MInversion_NormalUserUnchanged(t *testing.T) {
 			})
 
 			authorized, statusCode, err := auth.checkAuthorization(
-				context.Background(), "midaz", "resource", "action", token,
+				context.Background(), "midaz", "resource", "action", token, "",
 			)
 
 			require.NoError(t, err)

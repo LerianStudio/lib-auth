@@ -67,10 +67,12 @@ AUTH_REQUIRED=false
 # (Go duration). Defaults to 30s (behavior-neutral). It also caps the retry budget.
 AUTH_TIMEOUT=30s
 # AUTH_CACHE_TTL enables a short-lived decision cache when > 0, keyed by
-# (subject, resource, action, product) — never the token. Empty/0 disables it
-# (default). Security tradeoff: a permission revocation takes up to the TTL to
-# propagate, so keep it small (5–15s). It sheds load and, with the breaker,
-# survives brief authz outages by serving fresh positive decisions.
+# (subject, resource, action, product, clientIp) — never the token. Empty/0
+# disables it (default). Security tradeoff: a permission revocation takes up to
+# the TTL to propagate, so keep it small (5–15s). It sheds load and, with the
+# breaker, survives brief authz outages by serving fresh positive decisions.
+# The clientIp is part of the key so an IP-dependent decision cached for one
+# caller is never reused for another (see "Client IP forwarding" below).
 AUTH_CACHE_TTL=
 # AUTH_BREAKER_ENABLED opens a circuit breaker after sustained authz failures.
 # While open it serves ONLY a fresh positive cache hit and otherwise denies;
@@ -123,6 +125,7 @@ The `Authorize` function:
 
 * Receives the `sub` (user), `resource` (resource), and `action` (desired action).
 * Sends a POST request to the authorization service.
+* On the Fiber path, forwards the caller's client IP (`c.IP()`) as the optional `clientIp` field (see [Client IP forwarding](#-client-ip-forwarding)).
 * Checks if the response indicates that the user is authorized.
 * Allows the normal application flow or returns a 403 (Forbidden) error.
 
@@ -136,9 +139,36 @@ Authorization: Bearer your_token_here
 {
     "sub":      "lerian/userId",
     "resource": "resourceName",
-    "action":   "get"
+    "action":   "get",
+    "clientIp": "203.0.113.45"
 }
 ```
+
+The `clientIp` field is optional. On the Fiber path it is set automatically to `c.IP()`; the authorization service uses it to enforce the per-tenant IP allowlist.
+
+## 🌐 Client IP forwarding
+
+On the Fiber path, `Authorize` automatically sends `clientIp = c.IP()` to `POST /v1/authorize`, enabling the access manager to enforce a per-tenant IP allowlist downstream.
+
+* **No code change needed.** The public `Authorize(sub, resource, action)` signature is unchanged. Consuming services get this behavior by upgrading the library — bump the version, nothing else.
+* **Configure trusted proxies (Fiber v3).** For `c.IP()` to report the real client IP behind a proxy or ingress, the consuming service must configure Fiber v3's trusted-proxy settings on its `fiber.New(fiber.Config{...})`:
+  * `TrustProxy: true` — enable proxy-header trust (Fiber v3 renamed the v2 `EnableTrustedProxyCheck`).
+  * `TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"10.0.0.0/8", "<ingress-cidr>"}}` — the exact set of upstream proxy IPs/CIDRs allowed to set the forwarded header. Never leave this empty while trusting the header, or any caller can spoof its IP.
+  * `ProxyHeader: fiber.HeaderXForwardedFor` — the header `c.IP()` reads the client IP from.
+  * `EnableIPValidation: true` — validates that the value is a well-formed IP, so `c.IP()` cannot return a spoofable raw `X-Forwarded-For` string.
+
+  Without this, `c.IP()` is the socket peer (the proxy), not the caller; misconfigured (trusting the header without pinning `Proxies`), it is attacker-controlled. Example:
+
+  ```go
+  f := fiber.New(fiber.Config{
+      TrustProxy:         true,
+      TrustProxyConfig:   fiber.TrustProxyConfig{Proxies: []string{"10.0.0.0/8"}},
+      ProxyHeader:        fiber.HeaderXForwardedFor,
+      EnableIPValidation: true,
+  })
+  ```
+* **gRPC is not IP-enforced yet.** The gRPC interceptors do not forward a client IP in this version, so gRPC-authorized calls skip IP allowlist enforcement. Peer/metadata IP extraction is a planned follow-up.
+* **Cache is IP-scoped.** When `AUTH_CACHE_TTL > 0`, the decision cache key includes `clientIp`, so a decision cached for one IP is never reused for another. IP-dependent decisions stay correct under caching.
 
 ## 📡 Expected Authorization Service Response
 
@@ -183,6 +213,7 @@ Notes:
 - Keys in `MethodPolicies` must be full method names in the form `/package.Service/Method`.
 - When `SubResolver` returns an empty string, the subject is derived from token claims.
  - If you already use multiple interceptors, prefer `grpc.ChainUnaryInterceptor(...)` and include the auth interceptor alongside telemetry/logging.
+ - The interceptors do not forward a client IP in this version, so gRPC-authorized calls are not IP-allowlist enforced yet. See [Client IP forwarding](#-client-ip-forwarding).
 
 ## 🚧 Error Handling
 
