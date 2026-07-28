@@ -1,3 +1,15 @@
+## [3.2.0](https://github.com/LerianStudio/lib-auth/compare/v3.1.0...v3.2.0) (2026-07-28)
+
+
+### Features
+
+* **middleware:** forward client IP to /v1/authorize + scope decision cache by it ([cbee470](https://github.com/LerianStudio/lib-auth/commit/cbee4709d749adee4300bcccc34630c2cd9cc208))
+
+
+### Bug Fixes
+
+* **middleware:** keep the caller IP out of the tracing span ([c94c21a](https://github.com/LerianStudio/lib-auth/commit/c94c21a14d47688a5314e4e3b79caa0df51fa6ed))
+
 ## [3.2.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v3.2.0-beta.1...v3.2.0-beta.2) (2026-07-28)
 
 
