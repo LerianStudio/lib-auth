@@ -520,7 +520,21 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		requestBody["clientIp"] = clientIP
 	}
 
-	err = tracing.SetSpanAttributesFromValue(span, "app.request.payload", requestBody, nil)
+	// The span payload omits clientIp: a caller IP is personal data, and traces
+	// are retained longer and read more widely than authz logs. Same split as
+	// getApplicationToken, which keeps the client secret out of the span while
+	// the wire body carries it. The wire body below is unchanged.
+	tracePayload := make(map[string]string, len(requestBody))
+
+	for k, v := range requestBody {
+		if k == "clientIp" {
+			continue
+		}
+
+		tracePayload[k] = v
+	}
+
+	err = tracing.SetSpanAttributesFromValue(span, "app.request.payload", tracePayload, nil)
 	if err != nil {
 		tracing.HandleSpanError(span, "Failed to convert request body to JSON string", err)
 

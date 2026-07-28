@@ -898,7 +898,12 @@ func TestAuthorize_ForwardsClientIP(t *testing.T) {
 
 		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
 
-		// No X-Forwarded-For header -> c.IP() resolves to "" -> key omitted.
+		// No X-Forwarded-For header: the only hop is the test connection's
+		// 0.0.0.0, which newApp lists as a trusted proxy, so the walk skips it
+		// and no untrusted address remains -> c.IP() resolves to "" -> key
+		// omitted. This is not a harness quirk: it mirrors fully-internal
+		// traffic, where every hop is a trusted proxy and no caller IP can be
+		// attributed, which is exactly what the empty-value guard exists for.
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 
@@ -1012,6 +1017,80 @@ func TestAuthorize_DecisionCache_ScopedByClientIP(t *testing.T) {
 // ---------------------------------------------------------------------------
 // GetApplicationToken
 // ---------------------------------------------------------------------------
+
+// TestAuthorize_DoesNotTraceClientIP proves the caller IP reaches the wire body
+// but never a span attribute. A client IP is personal data, and traces are
+// retained longer and read more widely than authz logs, so the span payload is
+// emitted from a copy with clientIp stripped.
+func TestAuthorize_DoesNotTraceClientIP(t *testing.T) {
+	t.Parallel()
+
+	const clientIP = "203.0.113.7"
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+
+	var capturedBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		require.NoError(t, json.NewEncoder(w).Encode(AuthResponse{Authorized: true}))
+	}))
+	defer server.Close()
+
+	auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+	app := fiber.New(fiber.Config{
+		TrustProxy:       true,
+		TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"0.0.0.0"}},
+		ProxyHeader:      fiber.HeaderXForwardedFor,
+	})
+
+	// Seed the tracer the middleware recovers from the request context.
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(observability.ContextWithTracer(c.Context(), tp.Tracer("test")))
+
+		return c.Next()
+	})
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+		return c.SendString("reached handler")
+	})
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set(fiber.HeaderXForwardedFor, clientIP)
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// The wire body still carries the IP — enforcement depends on it.
+	assert.Equal(t, clientIP, capturedBody["clientIp"])
+
+	// No span attribute may expose it, by key or by value.
+	spans := exporter.GetSpans()
+	require.NotEmpty(t, spans, "expected the authorization spans to be exported")
+
+	for _, s := range spans {
+		for _, attr := range s.Attributes {
+			assert.NotContains(t, string(attr.Key), "clientIp",
+				"span %q exposes a clientIp attribute", s.Name)
+			assert.NotContains(t, attr.Value.AsString(), clientIP,
+				"span %q leaks the caller IP in attribute %q", s.Name, attr.Key)
+		}
+	}
+}
 
 func TestGetApplicationToken_DoesNotTraceClientSecret(t *testing.T) {
 	t.Parallel()
