@@ -222,6 +222,43 @@ func TestNew_Validation(t *testing.T) {
 	}
 }
 
+// TestNew_RejectsInvalidIdentityAddr asserts New rejects an IdentityAddr that is
+// not an absolute http(s) URL (empty, scheme-less, wrong scheme, or hostless) at
+// construction, instead of letting it masquerade as a retryable PUT failure, and
+// accepts well-formed http/https base URLs.
+func TestNew_RejectsInvalidIdentityAddr(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	rejected := map[string]string{
+		"empty":        "",
+		"no scheme":    "identity-host:4001",
+		"wrong scheme": "ftp://host",
+		"no host":      "http://",
+	}
+	for name, addr := range rejected {
+		t.Run("reject/"+name, func(t *testing.T) {
+			cfg := testConfig(t, auth.URL, addr)
+
+			_, err := New(cfg)
+			require.Error(t, err, "IdentityAddr %q must be rejected at construction", addr)
+		})
+	}
+
+	accepted := map[string]string{
+		"http localhost": "http://localhost:4001",
+		"https host":     "https://identity.example.com",
+	}
+	for name, addr := range accepted {
+		t.Run("accept/"+name, func(t *testing.T) {
+			cfg := testConfig(t, auth.URL, addr)
+
+			_, err := New(cfg)
+			require.NoError(t, err, "IdentityAddr %q must be accepted", addr)
+		})
+	}
+}
+
 func TestPublish_Success_CacheNil_AlwaysPUTs(t *testing.T) {
 	auth := newAuthServer(t)
 	t.Cleanup(auth.Close)

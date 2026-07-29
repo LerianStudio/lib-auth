@@ -257,9 +257,22 @@ func validateConfig(cfg Config) error {
 		return errors.New("config: ClientID is required")
 	case cfg.ClientSecret == "":
 		return errors.New("config: ClientSecret is required")
-	default:
-		return nil
 	}
+
+	// IdentityAddr must be an absolute http(s) URL: parse cleanly, carry an http or
+	// https scheme, and a non-empty host. A hostless or wrong-scheme value would
+	// otherwise pass here and only fail later inside doPut as a *retryable* PUT
+	// error, masking a boot-time misconfiguration.
+	u, err := url.Parse(cfg.IdentityAddr)
+	if err != nil {
+		return fmt.Errorf("config: IdentityAddr is not a valid URL: %w", err)
+	}
+
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("config: IdentityAddr must be an absolute http(s) URL, got %q", cfg.IdentityAddr)
+	}
+
+	return nil
 }
 
 // cacheKey is the dedup key for the slug's hash.

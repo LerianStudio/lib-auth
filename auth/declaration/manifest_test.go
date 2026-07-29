@@ -152,6 +152,31 @@ func TestCanonicalHash_ContentChangeChangesHash(t *testing.T) {
 	assert.NotEqual(t, hBase, hMut, "any content change must change the hash")
 }
 
+// TestValidate_RejectsDotSegmentService asserts a manifest whose service is a
+// dot-segment ("." or "..") is rejected. url.PathEscape leaves these intact, so an
+// unguarded ".." would form /v1/declarations/.. and a path-normalizing intermediary
+// could redirect the PUT to the wrong endpoint. New enforces slug==service, so
+// guarding service in Validate covers both.
+func TestValidate_RejectsDotSegmentService(t *testing.T) {
+	tests := map[string]string{
+		"single dot": `{"service":".","version":1}`,
+		"double dot": `{"service":"..","version":1}`,
+	}
+
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			m, err := parseManifest([]byte(raw))
+			require.NoError(t, err)
+
+			verr := m.Validate()
+			require.Error(t, verr, "a dot-segment service must be rejected")
+
+			var me *ManifestError
+			assert.ErrorAs(t, verr, &me, "validation error must be a *ManifestError")
+		})
+	}
+}
+
 func TestValidate_Valid(t *testing.T) {
 	m, err := parseManifest([]byte(feesJSON))
 	require.NoError(t, err)

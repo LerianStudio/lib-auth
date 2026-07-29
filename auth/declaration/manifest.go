@@ -179,6 +179,13 @@ func (m *DeclarationManifest) Validate() error {
 		violations = append(violations, "service must not be empty")
 	}
 
+	// A dot-segment service ("." or "..") survives url.PathEscape intact, so it would
+	// form /v1/declarations/.. and a path-normalizing intermediary could redirect the
+	// PUT to the wrong endpoint. New enforces slug==service, so guarding here covers both.
+	if m.Service == "." || m.Service == ".." {
+		violations = append(violations, fmt.Sprintf("service must not be a dot-segment %q", m.Service))
+	}
+
 	if m.Version < 1 {
 		violations = append(violations, "version must be a positive integer")
 	}
