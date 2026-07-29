@@ -3,6 +3,7 @@ package declaration
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,13 +42,15 @@ func newAuthServer(t *testing.T) *httptest.Server {
 // identityServer stands in for the IDENTITY host: PUT /v1/declarations/{slug}.
 type identityServer struct {
 	*httptest.Server
-	mu       sync.Mutex
-	putCount int
-	status   int
-	body     string
-	gotAuth  string
-	gotBody  string
-	puts     chan struct{}
+	mu          sync.Mutex
+	putCount    int
+	status      int
+	body        string
+	gotAuth     string
+	gotBody     string
+	gotPath     string
+	gotRawQuery string
+	puts        chan struct{}
 }
 
 func newIdentityServer(t *testing.T, status int, body string) *identityServer {
@@ -55,13 +58,25 @@ func newIdentityServer(t *testing.T, status int, body string) *identityServer {
 
 	is := &identityServer{status: status, body: body, puts: make(chan struct{}, 16)}
 	is.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Capture the request-target (escaped path + raw query) before any
+		// routing check so URL-construction assertions can see a mis-routed target.
+		is.mu.Lock()
+		is.gotPath = r.URL.EscapedPath()
+		is.gotRawQuery = r.URL.RawQuery
+		is.mu.Unlock()
+
 		if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, "/v1/declarations/") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 
-		buf := make([]byte, r.ContentLength)
-		_, _ = r.Body.Read(buf)
+		// Read the FULL body: a single Read may return a partial payload, which
+		// would let wire-format assertions pass on a truncated request.
+		buf, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read request body", http.StatusInternalServerError)
+			return
+		}
 
 		is.mu.Lock()
 		is.putCount++
@@ -403,6 +418,57 @@ func TestStart_Success(t *testing.T) {
 
 	stop()
 	assert.GreaterOrEqual(t, identity.count(), 1)
+}
+
+// TestPublish_IdentityAddrTrailingSlash_NoDoubleSlash asserts that a trailing
+// slash on IdentityAddr (a common env-var footgun on PLUGIN_IDENTITY_HOST) does
+// NOT produce a "//v1" request target — the base slash must be normalized.
+func TestPublish_IdentityAddrTrailingSlash_NoDoubleSlash(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(identity.Close)
+
+	// Trailing slash on the base URL.
+	cfg := testConfig(t, auth.URL, identity.URL+"/")
+	p := newFastPublisher(t, cfg)
+
+	require.NoError(t, p.Publish(context.Background()))
+	assert.Equal(t, 1, identity.count())
+
+	identity.mu.Lock()
+	defer identity.mu.Unlock()
+	assert.Equal(t, "/v1/declarations/plugin-fees", identity.gotPath,
+		"a trailing slash on IdentityAddr must not yield a double slash in the request path")
+}
+
+// TestPublish_SlugWithReservedChar_EscapedSingleSegment asserts that a slug
+// carrying a reserved character is percent-escaped into a SINGLE path segment and
+// does not leak into the query string (which naive fmt.Sprintf construction allows).
+func TestPublish_SlugWithReservedChar_EscapedSingleSegment(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(identity.Close)
+
+	// New enforces slug == manifest.service, so the reserved char is driven through
+	// a manifest whose service carries it. Production validation is NOT weakened.
+	cfg := testConfig(t, auth.URL, identity.URL)
+	cfg.Slug = "a?b"
+	cfg.Manifest = []byte(`{"service":"a?b","version":1}`)
+	p := newFastPublisher(t, cfg)
+
+	require.NoError(t, p.Publish(context.Background()))
+	assert.Equal(t, 1, identity.count())
+
+	identity.mu.Lock()
+	defer identity.mu.Unlock()
+	assert.Equal(t, "/v1/declarations/a%3Fb", identity.gotPath,
+		"a reserved char in the slug must be percent-escaped as a single path segment")
+	assert.Empty(t, identity.gotRawQuery,
+		"a reserved char in the slug must not leak into the request query string")
 }
 
 func TestPublish_NeverLogsSecretOrToken(t *testing.T) {

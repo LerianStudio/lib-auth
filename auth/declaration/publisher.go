@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -346,9 +347,17 @@ func (p *Publisher) putWithRetry(ctx context.Context, token string) error {
 // either wrapped in backoff.Permanent (deterministic → stop) or plain (transient →
 // retry). nil means the declaration was accepted (200).
 func (p *Publisher) doPut(ctx context.Context, token string) error {
-	url := fmt.Sprintf("%s/v1/declarations/%s", p.identityAddr, p.slug)
+	// Build the URL from a parsed base so a trailing slash on IdentityAddr does not
+	// yield a "//v1" path, and JoinPath escapes the slug as a single path segment so
+	// a reserved char (e.g. '?') cannot alter the request target.
+	base, err := url.Parse(p.identityAddr)
+	if err != nil {
+		return backoff.Permanent(&PublishError{Deterministic: true, Op: "build request", Err: err})
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(p.wire))
+	reqURL := base.JoinPath("v1", "declarations", p.slug).String()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(p.wire))
 	if err != nil {
 		return backoff.Permanent(&PublishError{Deterministic: true, Op: "build request", Err: err})
 	}
