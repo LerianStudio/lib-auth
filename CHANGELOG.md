@@ -1,3 +1,17 @@
+## [3.3.0](https://github.com/LerianStudio/lib-auth/compare/v3.2.0...v3.3.0) (2026-07-29)
+
+
+### Features
+
+* **declaration:** add D7 declaration publisher (startup manifest push) ([766b212](https://github.com/LerianStudio/lib-auth/commit/766b2122af85474724bc19c8ef8968324ee4be51))
+
+
+### Bug Fixes
+
+* **declaration:** escape slug and normalize identity base URL ([01e933d](https://github.com/LerianStudio/lib-auth/commit/01e933deea689824d70984b170947a2b868644c6)), closes [#138](https://github.com/LerianStudio/lib-auth/issues/138)
+* **declaration:** retry token mint and escape slug path segment ([a58998f](https://github.com/LerianStudio/lib-auth/commit/a58998ff6dcd7bf5b488499fc7176605814edb38)), closes [#138](https://github.com/LerianStudio/lib-auth/issues/138)
+* **declaration:** validate identity URL and reject dot-segment slug ([7f686ae](https://github.com/LerianStudio/lib-auth/commit/7f686ae3b09ccd80573459b420d8e205331bd0c6)), closes [#138](https://github.com/LerianStudio/lib-auth/issues/138)
+
 ## [3.3.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.2.0...v3.3.0-beta.1) (2026-07-29)
 
 
