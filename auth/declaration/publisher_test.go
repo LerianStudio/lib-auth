@@ -471,6 +471,34 @@ func TestPublish_SlugWithReservedChar_EscapedSingleSegment(t *testing.T) {
 		"a reserved char in the slug must not leak into the request query string")
 }
 
+// TestPublish_SlugWithSlash_EscapedSingleSegment asserts that a literal '/' in the
+// slug is percent-escaped into a SINGLE path segment (a%2Fb) rather than being
+// treated as a path separator (which would mis-route the PUT to an extra segment).
+func TestPublish_SlugWithSlash_EscapedSingleSegment(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(identity.Close)
+
+	// New enforces slug == manifest.service, so the '/' is driven through a manifest
+	// whose service carries it. Production validation is NOT weakened.
+	cfg := testConfig(t, auth.URL, identity.URL)
+	cfg.Slug = "a/b"
+	cfg.Manifest = []byte(`{"service":"a/b","version":1}`)
+	p := newFastPublisher(t, cfg)
+
+	require.NoError(t, p.Publish(context.Background()))
+	assert.Equal(t, 1, identity.count())
+
+	identity.mu.Lock()
+	defer identity.mu.Unlock()
+	assert.Equal(t, "/v1/declarations/a%2Fb", identity.gotPath,
+		"a literal '/' in the slug must be percent-escaped into a SINGLE path segment")
+	assert.Empty(t, identity.gotRawQuery,
+		"the slug must not leak into the request query string")
+}
+
 func TestPublish_NeverLogsSecretOrToken(t *testing.T) {
 	auth := newAuthServer(t)
 	t.Cleanup(auth.Close)

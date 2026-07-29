@@ -290,26 +290,8 @@ func (p *Publisher) Publish(ctx context.Context) error {
 		}
 	}
 
-	token, err := p.auth.GetApplicationToken(ctx, p.clientID, p.clientSecret)
-	if err != nil {
-		pubErr := &PublishError{Deterministic: false, Op: "mint m2m token", Err: err}
-		p.logWarnf(ctx, "failed to mint M2M token for slug=%s (transient, will retry): %v", p.slug, err)
-		tracing.HandleSpanError(span, "mint m2m token failed", pubErr)
-
-		return pubErr
-	}
-
-	if token == "" {
-		p.logErrorf(ctx, "empty M2M token for slug=%s (auth disabled or misconfigured); not retrying", p.slug)
-
-		pubErr := &PublishError{Deterministic: true, Op: "mint m2m token", Detail: "empty token (auth disabled or misconfigured)"}
-		tracing.HandleSpanError(span, "empty m2m token", pubErr)
-
-		return pubErr
-	}
-
-	if err := p.putWithRetry(ctx, token); err != nil {
-		tracing.HandleSpanError(span, "put declaration failed", err)
+	if err := p.mintAndPutWithRetry(ctx); err != nil {
+		tracing.HandleSpanError(span, "publish declaration failed", err)
 
 		return err
 	}
@@ -323,15 +305,35 @@ func (p *Publisher) Publish(ctx context.Context) error {
 	return nil
 }
 
-// putWithRetry issues the PUT under exponential backoff (with jitter). Deterministic
-// failures short-circuit via backoff.Permanent; transient failures retry until the
-// budget is exhausted, then surface the last error.
-func (p *Publisher) putWithRetry(ctx context.Context, token string) error {
+// mintAndPutWithRetry runs mint→PUT as a SINGLE bounded backoff operation, minting a
+// FRESH token per attempt so a transient auth outage at boot is retried alongside the
+// PUT (not fatal for the whole one-shot pass). Classification is preserved: a
+// transient mint error is a plain error (retried); an empty token (auth
+// disabled/misconfigured) is backoff.Permanent (deterministic, not retried); doPut's
+// own deterministic/transient classification is unchanged. Transient failures retry
+// until the budget is exhausted, then surface the last error.
+func (p *Publisher) mintAndPutWithRetry(ctx context.Context) error {
 	exp := backoff.NewExponentialBackOff()
 	exp.InitialInterval = p.retryInitialInterval
 	exp.MaxInterval = p.retryMaxInterval
 
 	op := func() (struct{}, error) {
+		token, err := p.auth.GetApplicationToken(ctx, p.clientID, p.clientSecret)
+		if err != nil {
+			pubErr := &PublishError{Deterministic: false, Op: "mint m2m token", Err: err}
+			p.logWarnf(ctx, "failed to mint M2M token for slug=%s (transient, will retry): %v", p.slug, err)
+
+			return struct{}{}, pubErr
+		}
+
+		if token == "" {
+			p.logErrorf(ctx, "empty M2M token for slug=%s (auth disabled or misconfigured); not retrying", p.slug)
+
+			pubErr := &PublishError{Deterministic: true, Op: "mint m2m token", Detail: "empty token (auth disabled or misconfigured)"}
+
+			return struct{}{}, backoff.Permanent(pubErr)
+		}
+
 		return struct{}{}, p.doPut(ctx, token)
 	}
 
@@ -348,14 +350,26 @@ func (p *Publisher) putWithRetry(ctx context.Context, token string) error {
 // retry). nil means the declaration was accepted (200).
 func (p *Publisher) doPut(ctx context.Context, token string) error {
 	// Build the URL from a parsed base so a trailing slash on IdentityAddr does not
-	// yield a "//v1" path, and JoinPath escapes the slug as a single path segment so
-	// a reserved char (e.g. '?') cannot alter the request target.
+	// yield a "//v1" path. JoinPath is used only for the STATIC prefix; the slug is
+	// appended as a single, fully percent-escaped path segment via RawPath so a
+	// reserved char (e.g. '?') or a literal '/' cannot add a segment or alter the
+	// request target. Note: passing url.PathEscape(slug) into JoinPath would
+	// double-escape (JoinPath re-escapes the '%'), hence the explicit Path/RawPath.
 	base, err := url.Parse(p.identityAddr)
 	if err != nil {
 		return backoff.Permanent(&PublishError{Deterministic: true, Op: "build request", Err: err})
 	}
 
-	reqURL := base.JoinPath("v1", "declarations", p.slug).String()
+	base = base.JoinPath("v1", "declarations")
+
+	// escapedPrefix is the escaped static prefix (e.g. "/v1/declarations"); compute it
+	// BEFORE mutating Path. Path holds the decoded form; RawPath holds the escaped form
+	// so URL.String() emits "<prefix>/<escaped-slug>" and round-trips unchanged.
+	escapedPrefix := base.EscapedPath()
+	base.Path += "/" + p.slug
+	base.RawPath = escapedPrefix + "/" + url.PathEscape(p.slug)
+
+	reqURL := base.String()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(p.wire))
 	if err != nil {
