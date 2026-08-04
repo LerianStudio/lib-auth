@@ -2,7 +2,11 @@ package declaration
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,15 +103,65 @@ func TestWireFromEnv_MissingRequired(t *testing.T) {
 	}
 }
 
-// TestWireFromEnv_TrimsWhitespace asserts the env values are trimmed before use:
-// a padded-but-present identity host is accepted (it would be an INVALID URL if
-// the surrounding spaces were not trimmed, so a nil error proves trimming ran).
+// capturingAuthServer stands in for the AUTH host and records the credentials it
+// receives on the M2M token-mint call, so a test can prove the TRIMMED values
+// reached the wire (not merely that WireFromEnv returned no error).
+type capturingAuthServer struct {
+	*httptest.Server
+	mu           sync.Mutex
+	gotClientID  string
+	gotSecret    string
+	gotMintCount int
+}
+
+// newCapturingAuthServer builds an auth server that captures the JSON
+// {clientId, clientSecret} body of the token-mint request (the exact shape
+// middleware.AuthClient.GetApplicationToken POSTs) and returns a token.
+func newCapturingAuthServer(t *testing.T) *capturingAuthServer {
+	t.Helper()
+
+	cas := &capturingAuthServer{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/v1/login/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ClientID     string `json:"clientId"`
+			ClientSecret string `json:"clientSecret"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+
+		cas.mu.Lock()
+		cas.gotClientID = body.ClientID
+		cas.gotSecret = body.ClientSecret
+		cas.gotMintCount++
+		cas.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"accessToken":%q}`, testToken)
+	})
+
+	cas.Server = httptest.NewServer(mux)
+
+	return cas
+}
+
+// TestWireFromEnv_TrimsWhitespace asserts the env values are trimmed BEFORE they
+// reach the wire. It does not settle for a nil error (FailFast is false, so a
+// no-op could pass): it waits for the background PUT, then asserts the auth host
+// received the TRIMMED M2M client id/secret and the identity host received the
+// TRIMMED base URL (a clean /v1/declarations/<slug> path, no stray whitespace).
 func TestWireFromEnv_TrimsWhitespace(t *testing.T) {
+	auth := newCapturingAuthServer(t)
+	t.Cleanup(auth.Close)
+
 	identity := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
 	t.Cleanup(identity.Close)
 
 	// Pad identity host, client id and secret with surrounding whitespace.
-	setWireEnv(t, "   "+identity.URL+"   ", "", false)
+	setWireEnv(t, "   "+identity.URL+"   ", auth.URL, true)
 	t.Setenv("M2M_CLIENT_ID", "  "+testClientID+"  ")
 	t.Setenv("M2M_CLIENT_SECRET", "  "+testClientSecret+"  ")
 
@@ -115,8 +169,33 @@ func TestWireFromEnv_TrimsWhitespace(t *testing.T) {
 	require.NoError(t, err,
 		"padded-but-present values must be trimmed (untrimmed IdentityHost would be an invalid URL)")
 	require.NotNil(t, stop)
+	t.Cleanup(stop)
 
-	stop()
+	// Block until the background publisher actually PUTs, so the assertions below
+	// observe a real request rather than a no-op that returned before publishing.
+	select {
+	case <-identity.puts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a background declaration PUT")
+	}
+
+	// The auth host must have minted a token with the TRIMMED credentials.
+	auth.mu.Lock()
+	gotClientID, gotSecret, mintCount := auth.gotClientID, auth.gotSecret, auth.gotMintCount
+	auth.mu.Unlock()
+
+	require.GreaterOrEqual(t, mintCount, 1, "the publisher must have minted a token")
+	assert.Equal(t, testClientID, gotClientID,
+		"the auth host must receive the TRIMMED M2M_CLIENT_ID")
+	assert.Equal(t, testClientSecret, gotSecret,
+		"the auth host must receive the TRIMMED M2M_CLIENT_SECRET")
+
+	// The identity host must see a clean, trimmed path (no leaked whitespace).
+	identity.mu.Lock()
+	gotPath := identity.gotPath
+	identity.mu.Unlock()
+	assert.Equal(t, "/v1/declarations/plugin-fees", gotPath,
+		"the TRIMMED identity host must yield a clean request path")
 }
 
 // TestWireFromEnv_HappyPath asserts the full wiring: valid env + auth/identity

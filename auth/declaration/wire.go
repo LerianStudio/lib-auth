@@ -39,7 +39,7 @@ const (
 	// envM2MClientID / envM2MClientSecret are the plugin's M2M credentials. The
 	// secret's VALUE is never logged.
 	envM2MClientID     = "M2M_CLIENT_ID"
-	envM2MClientSecret = "M2M_CLIENT_SECRET"
+	envM2MClientSecret = "M2M_CLIENT_SECRET" //nosec G101 -- env var NAME, not a credential value
 	// envAuthEnabled / envAuthHost configure the token minter (the AUTH host,
 	// distinct from the identity host). Passed through faithfully to
 	// middleware.NewAuthClient; the publisher fail-opens if a token cannot be
