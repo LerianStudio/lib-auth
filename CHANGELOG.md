@@ -1,3 +1,16 @@
+## [3.4.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.3.1-beta.1...v3.4.0-beta.1) (2026-08-04)
+
+
+### Features
+
+* **declaration:** add WireFromEnv to hoist plugin D7 boilerplate ([7ef812e](https://github.com/LerianStudio/lib-auth/commit/7ef812e4a3d9ec0064984134937a239c3d4705e9))
+
+
+### Bug Fixes
+
+* **declaration:** suppress G101 env-name false positive, align identity env doc, harden trim test ([088aa2e](https://github.com/LerianStudio/lib-auth/commit/088aa2e79bb44a57e861b52768d0281424062af5))
+* **declaration:** use gosec hash-form nosec directive to suppress G101 ([40ee028](https://github.com/LerianStudio/lib-auth/commit/40ee0289db1267f8b1c281cfeba2cb0ac319a5c8))
+
 ## [3.3.1-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.3.0...v3.3.1-beta.1) (2026-07-30)
 
 ## [3.3.0](https://github.com/LerianStudio/lib-auth/compare/v3.2.0...v3.3.0) (2026-07-29)
