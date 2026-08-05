@@ -189,7 +189,13 @@ func TestValidate_Valid(t *testing.T) {
 // action naming standard. The rejection is case-insensitive (compared on the trimmed,
 // lowercased action) and the error names the offending (original-case) action.
 func TestValidate_RejectsHTTPVerbActions(t *testing.T) {
-	verbs := []string{"post", "get", "put", "patch", "POST", "GET", "Put", "PaTcH"}
+	verbs := []string{
+		"post", "get", "put", "patch", "POST", "GET", "Put", "PaTcH",
+		// Whitespace-padded: the validator trims before comparing, so surrounding
+		// spaces must NOT let an HTTP verb slip through. The error still names the
+		// original (untrimmed) action.
+		" post ", "  PATCH  ",
+	}
 
 	for _, verb := range verbs {
 		t.Run(verb, func(t *testing.T) {
@@ -213,7 +219,13 @@ func TestValidate_RejectsHTTPVerbActions(t *testing.T) {
 // the one HTTP method that is ALSO a valid semantic action — and domain verbs are
 // accepted by the HTTP-verb rule (no error attributable to that rule).
 func TestValidate_AllowsSemanticActions(t *testing.T) {
-	actions := []string{"create", "read", "update", "delete", "DELETE", "rotate"}
+	actions := []string{
+		"create", "read", "update", "delete", "DELETE", "rotate",
+		// HTTP methods that are NOT in the CRUD-mapping reject set: only
+		// post/get/put/patch are rejected, so every other HTTP method (head,
+		// options, trace, connect) is a legitimate declared action.
+		"head", "options", "trace", "connect",
+	}
 
 	for _, action := range actions {
 		t.Run(action, func(t *testing.T) {
