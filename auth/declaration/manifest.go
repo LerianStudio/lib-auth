@@ -20,6 +20,20 @@ const (
 	effectDeny  = "deny"
 )
 
+// httpVerbActions is the set of HTTP methods that map 1:1 onto CRUD semantic actions
+// (post->create, get->read, put/patch->update) and are therefore NEVER valid as a
+// declared action: the SEMANTIC action naming standard requires the domain intent, not
+// the transport verb. "delete" is deliberately EXCLUDED — it is the one HTTP method
+// that is also a valid semantic action (delete == delete). The set is kept conservative
+// (head/options/trace/connect are NOT listed) to match the documented HTTP->semantic
+// mapping and avoid false positives on legitimate domain verbs.
+var httpVerbActions = map[string]struct{}{
+	"post":  {},
+	"get":   {},
+	"put":   {},
+	"patch": {},
+}
+
 // DeclarationManifest is the wire model for a plugin's access-manager declaration
 // (the body of PUT /v1/declarations/{slug}). It is a faithful client-side mirror of
 // the server model
@@ -45,8 +59,10 @@ type DeclarationManifest struct {
 }
 
 // DeclarationPermission is a single declared permission. The action is SEMANTIC
-// (create/read/update/delete), never an HTTP verb. The resource is written bare;
-// the central reconciler composes the `{service}/` prefix.
+// (create/read/update/delete), never an HTTP verb — Validate ENFORCES this, rejecting
+// post/get/put/patch (case-insensitive); "delete" is allowed as it is the one HTTP
+// method that is also a valid semantic action. The resource is written bare; the
+// central reconciler composes the `{service}/` prefix.
 type DeclarationPermission struct {
 	Resource string   `json:"resource,omitempty" yaml:"resource,omitempty"`
 	Action   string   `json:"action,omitempty" yaml:"action,omitempty"`
@@ -261,6 +277,8 @@ func (m *DeclarationManifest) validatePermissions(declaredRoles map[string]struc
 
 		if strings.TrimSpace(p.Action) == "" {
 			violations = append(violations, fmt.Sprintf("permissions[%d]: action must not be empty", i))
+		} else if _, isHTTPVerb := httpVerbActions[strings.ToLower(strings.TrimSpace(p.Action))]; isHTTPVerb {
+			violations = append(violations, fmt.Sprintf("permissions[%d]: action %q is an HTTP verb; declare a SEMANTIC action (create/read/update/delete or a domain verb) — only \"delete\" is an HTTP method that is also a valid semantic action", i, p.Action))
 		}
 
 		if p.Effect != effectAllow && p.Effect != effectDeny {
