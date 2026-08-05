@@ -1,3 +1,10 @@
+## [3.4.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.1...v3.4.0-beta.2) (2026-08-05)
+
+
+### Features
+
+* **declaration:** reject HTTP-verb actions in manifest validation ([6ce4f5a](https://github.com/LerianStudio/lib-auth/commit/6ce4f5a0c99bf6ea94fb7a1607e52b1a893bc73b))
+
 ## [3.4.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.3.1-beta.1...v3.4.0-beta.1) (2026-08-04)
 
 
