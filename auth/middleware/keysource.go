@@ -44,6 +44,12 @@ const (
 	// rejected as a defensive (DoS) guard.
 	maxJWKSKeys = 32
 
+	// maxJWKSRedirects caps redirect hops on a JWKS fetch. A custom CheckRedirect
+	// REPLACES net/http's default 10-hop cap, so we must re-impose one: otherwise a
+	// compromised endpoint could return policy-compliant https redirects in a loop
+	// and tie up the fetch for the whole timeout (CWE-400). Matches the stdlib default.
+	maxJWKSRedirects = 10
+
 	// jwksRefreshFlightKey is the fixed single-flight key: all refreshes target the
 	// same JWKS URL, so concurrent forced refreshes collapse onto one in-flight fetch.
 	jwksRefreshFlightKey = "refresh"
@@ -547,7 +553,14 @@ func (s *jwksKeySource) fetch(ctx context.Context) ([]*rsa.PublicKey, map[string
 	// fail-closed https policy). Shallow-copy the client so CheckRedirect is overridden
 	// WITHOUT mutating the caller-injected client; the copy shares the Transport (intended).
 	client := *s.httpClient
-	client.CheckRedirect = func(hopReq *http.Request, _ []*http.Request) error {
+	client.CheckRedirect = func(hopReq *http.Request, via []*http.Request) error {
+		// A custom CheckRedirect replaces net/http's default hop cap, so re-impose one:
+		// a compromised endpoint could otherwise loop policy-compliant redirects for the
+		// whole fetch timeout (CWE-400).
+		if len(via) >= maxJWKSRedirects {
+			return fmt.Errorf("jwks fetch stopped after %d redirects", maxJWKSRedirects)
+		}
+
 		// Re-run the construction-time policy on the redirect target. A non-nil error
 		// aborts the redirect (the hop is NOT followed); the warn bool is irrelevant here.
 		if _, verr := validateJWKSURL(hopReq.URL.String(), s.allowInsecure); verr != nil {

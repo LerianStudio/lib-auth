@@ -1263,6 +1263,32 @@ func TestJWKSKeySource_Fetch_LoopbackToLoopbackRedirect_Allowed(t *testing.T) {
 	assert.Equal(t, []*rsa.PublicKey{pub}, source.Keys(context.Background()))
 }
 
+// A custom CheckRedirect replaces net/http's default 10-hop cap, so an endpoint
+// that loops policy-compliant (loopback) redirects must still be stopped by our
+// explicit hop limit rather than running for the whole fetch timeout.
+func TestJWKSKeySource_Fetch_RedirectLoop_StoppedByHopLimit(t *testing.T) {
+	t.Parallel()
+
+	var hits int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/loop", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		http.Redirect(w, r, "/loop", http.StatusFound) // loopback self-redirect: policy-compliant, infinite
+	})
+
+	srv := httptest.NewServer(mux) // http://127.0.0.1:port (loopback)
+	t.Cleanup(srv.Close)
+
+	source, err := newJWKSKeySource(JWKSConfig{URL: srv.URL + "/loop", HTTPClient: srv.Client()})
+	require.NoError(t, err)
+
+	rerr := source.Refresh(context.Background())
+	require.Error(t, rerr, "an infinite redirect loop must be stopped, not followed to the timeout")
+	assert.Contains(t, rerr.Error(), "redirects")
+	assert.LessOrEqual(t, hits, maxJWKSRedirects+1, "must stop at the hop cap, not loop unbounded")
+}
+
 // ---------------------------------------------------------------------------
 // FIX N3: the forced-refresh cooldown claim must be atomic
 // ---------------------------------------------------------------------------
