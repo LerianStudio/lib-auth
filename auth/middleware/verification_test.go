@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/rsa"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -488,4 +489,108 @@ func TestNewAuthClient_VerificationConfig(t *testing.T) {
 		client := NewAuthClient("", false, &logger)
 		assert.Len(t, client.verifyKeys, 1)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// extractClaims via a dynamic KeySource (card 1.1.7 convergence, lib-auth side)
+//
+// These prove AuthClient's verified path shares the SAME verifyToken + KeySource
+// refresh-and-retry machinery as the M2M gate, and that WithKeySource is additive:
+// the default (nil source) path is untouched.
+// ---------------------------------------------------------------------------
+
+func TestExtractClaims_KeySource_ValidToken_Verifies(t *testing.T) {
+	t.Parallel()
+
+	key, _ := pubKeyOf(t)
+	source := &fakeKeySource{keys: []*rsa.PublicKey{&key.PublicKey}}
+
+	auth := (&AuthClient{Enabled: true, Logger: &testLogger{}}).WithKeySource(source)
+
+	token := signRS256(t, key, normalUserClaims())
+
+	claims, statusCode, err := auth.extractClaims(context.Background(), noopSpan(), token)
+
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, statusCode)
+	assert.Equal(t, "user-123", claims["sub"])
+	assert.Equal(t, 0, source.refreshes(), "a token that verifies on the first try must not refresh")
+}
+
+// The stable-kid rotation recovery is shared: a token signed by a rotated key that is
+// not yet cached triggers exactly ONE forced refresh, then verifies — identical to
+// the M2M gate, via the same verifyTokenWithSource helper.
+func TestExtractClaims_KeySource_StaleKey_RefreshesOnceAndRetries(t *testing.T) {
+	t.Parallel()
+
+	_, oldPub := pubKeyOf(t)
+	newPriv, newPub := pubKeyOf(t)
+
+	source := &fakeKeySource{
+		keys:      []*rsa.PublicKey{oldPub},
+		onRefresh: func() []*rsa.PublicKey { return []*rsa.PublicKey{newPub} },
+	}
+
+	auth := (&AuthClient{Enabled: true, Logger: &testLogger{}}).WithKeySource(source)
+
+	token := signRS256(t, newPriv, normalUserClaims())
+
+	claims, statusCode, err := auth.extractClaims(context.Background(), noopSpan(), token)
+
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, statusCode)
+	assert.Equal(t, "user-123", claims["sub"])
+	assert.Equal(t, 1, source.refreshes(), "exactly ONE forced refresh on the signature failure")
+}
+
+func TestExtractClaims_KeySource_ForgedToken_FailsClosed(t *testing.T) {
+	t.Parallel()
+
+	attackerKey, _ := pubKeyOf(t)
+	_, serverPub := pubKeyOf(t)
+
+	source := &fakeKeySource{keys: []*rsa.PublicKey{serverPub}}
+
+	auth := (&AuthClient{Enabled: true, Logger: &testLogger{}}).WithKeySource(source)
+
+	token := signRS256(t, attackerKey, normalUserClaims())
+
+	_, statusCode, err := auth.extractClaims(context.Background(), noopSpan(), token)
+
+	require.Error(t, err)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.LessOrEqual(t, source.refreshes(), 1,
+		"a forged (bad-signature) token forces at most ONE refresh, never a loop")
+}
+
+// An expired but validly-signed token is a CLAIM failure, not key staleness: the
+// source-path retry logic must NOT force any refresh.
+func TestExtractClaims_KeySource_ExpiredToken_NoRefresh(t *testing.T) {
+	t.Parallel()
+
+	key, pub := pubKeyOf(t)
+	source := &fakeKeySource{keys: []*rsa.PublicKey{pub}}
+
+	auth := (&AuthClient{Enabled: true, Logger: &testLogger{}}).WithKeySource(source)
+
+	claims := normalUserClaims()
+	claims["exp"] = float64(time.Now().Add(-time.Hour).Unix())
+
+	token := signRS256(t, key, claims)
+
+	_, statusCode, err := auth.extractClaims(context.Background(), noopSpan(), token)
+
+	require.Error(t, err)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.Equal(t, 0, source.refreshes(),
+		"an expired validly-signed token is a claim failure, not key staleness: ZERO refreshes")
+}
+
+// WithKeySource is strictly additive: a client with no KeySource keeps the exact
+// prior behavior (env-PEM verifyKeys, else ParseUnverified).
+func TestWithKeySource_NilSource_NoOp(t *testing.T) {
+	t.Parallel()
+
+	auth := (&AuthClient{Enabled: true, Logger: &testLogger{}}).WithKeySource(nil)
+	assert.Nil(t, auth.source)
 }

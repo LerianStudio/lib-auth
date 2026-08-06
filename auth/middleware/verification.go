@@ -69,14 +69,26 @@ func verifyToken(pubKeys []*rsa.PublicKey, expectedIssuer, accessToken string) (
 
 // extractClaims returns the token claims used to build the authorization subject.
 //
-// When local verification is configured (verifyKeys present, from
-// AUTH_JWT_VERIFY_CERT / AUTH_JWT_VERIFY_CERT_PATH) it cryptographically verifies
-// the token first (signature/alg/exp/iss) and fails closed on any error before the
-// claims are used. When it is NOT configured it preserves the historical
-// ParseUnverified behavior exactly — the network authorization call remains the
-// trust anchor — so the feature is opt-in and backward compatible. Verification is
-// gated by presence of a cert, mirroring the M2M cert gate.
+// It routes ALL cryptographic decisions through the single authoritative verifyToken
+// (RS256 + exp + iss), exactly as the M2M gate does — there is one verifier, not two.
+//
+// Three sources of verification keys, in precedence order, all opt-in and additive:
+//  1. a dynamic JWKS KeySource wired via WithKeySource (the same path the M2M gate
+//     uses): resolves keys from the serve-stale cache and forces ONE refresh-and-retry
+//     on a signature failure (the stable-kid rotation case), via the shared
+//     verifyTokenWithSource helper;
+//  2. static env-PEM keys (verifyKeys, from AUTH_JWT_VERIFY_CERT /
+//     AUTH_JWT_VERIFY_CERT_PATH): cryptographically verifies and fails closed;
+//  3. neither configured: preserves the historical ParseUnverified behavior EXACTLY
+//     — the network authorization call remains the trust anchor.
+//
+// Default construction sets neither a KeySource nor verifyKeys, so the unverified
+// path (3) is unchanged and the feature is fully backward compatible.
 func (auth *AuthClient) extractClaims(ctx context.Context, span trace.Span, accessToken string) (jwt.MapClaims, int, error) {
+	if auth.source != nil {
+		return verifyTokenWithSource(ctx, span, auth.source, auth.verifyIssuer, accessToken, auth.Logger)
+	}
+
 	if len(auth.verifyKeys) > 0 {
 		claims, statusCode, err := verifyToken(auth.verifyKeys, auth.verifyIssuer, accessToken)
 		if err != nil {

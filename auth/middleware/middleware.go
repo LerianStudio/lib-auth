@@ -101,6 +101,15 @@ type AuthClient struct {
 	// verifyIssuer, when non-empty, pins the accepted token "iss" claim during local
 	// verification. Read once from AUTH_JWT_ISSUER; inert when verifyKeys is empty.
 	verifyIssuer string
+
+	// source, when non-nil, supplies verification keys dynamically from a JWKS-backed
+	// KeySource — the SAME dynamic path the M2M gate uses (serve-stale cache + forced
+	// refresh-and-retry on a signature failure, the stable-kid rotation case). It is
+	// opt-in and additive: set via WithKeySource after NewAuthClient. When nil (the
+	// default) extractClaims preserves the exact env-PEM / ParseUnverified behavior.
+	// When set it takes precedence over verifyKeys for the verified path, and both
+	// route their crypto through the single shared verifyToken.
+	source KeySource
 }
 
 type AuthResponse struct {
@@ -215,6 +224,23 @@ func initializeDefaultLogger() (log.Logger, error) {
 	}
 
 	return logger, nil
+}
+
+// WithKeySource wires a dynamic JWKS KeySource into the client's local token
+// verification, mirroring the M2M gate's dynamic path (serve-stale cache + forced
+// refresh-and-retry on a signature failure). It is additive and opt-in: the default
+// client (no KeySource) verifies via the env-configured PEM keys or, absent those,
+// preserves the historical ParseUnverified behavior. When set, the KeySource takes
+// precedence over the env-PEM keys for the verified path. Returns the receiver for
+// fluent configuration after NewAuthClient; a nil receiver or nil source is a no-op.
+func (auth *AuthClient) WithKeySource(source KeySource) *AuthClient {
+	if auth == nil || source == nil {
+		return auth
+	}
+
+	auth.source = source
+
+	return auth
 }
 
 // NewAuthClient creates a new instance of AuthClient.
