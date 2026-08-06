@@ -51,9 +51,12 @@ auth's cached keys as standard JWKS-JSON so downstream can parse with the same c
 // KeySource yields the current set of acceptable RSA verification keys.
 // Keys() NEVER blocks on the network (serve-from-cache, serve-stale on failure).
 // Refresh() forces a single-flight re-fetch; used on signature-verification failure.
+// Close() stops any background refresher and releases resources; idempotent and safe
+// to call on a source with no background goroutine (e.g. StaticKeySource).
 type KeySource interface {
     Keys(ctx context.Context) []*rsa.PublicKey
     Refresh(ctx context.Context) error
+    Close() error
 }
 ```
 
@@ -62,6 +65,19 @@ type KeySource interface {
   - `URL string` (JWKS endpoint), `RefreshInterval time.Duration` (short TTL, e.g. 5m),
   - `BootstrapPEM []byte` (seed), `HTTPClient *http.Client` (TLS/cert-pin injected by caller),
   - `Logger`. Seeds cache from BootstrapPEM; starts background TTL refresh; lazy first live fetch.
+  - `ForcedRefreshCooldown time.Duration` — minimum interval between two forced
+    (signature-failure-triggered) upstream fetches; the refresh-amplification guard.
+    Defaults to 15s when zero. Only the forced `Refresh` path is throttled; the
+    background TTL loop is not.
+  - `Ctx context.Context` — bounds the background refresh goroutine's lifecycle;
+    cancelling it stops the background refresher (graceful shutdown / leak-free tests).
+    Defaults to `context.Background()`. (`Close()` also stops it regardless.)
+  - `AllowInsecureURL bool` — permit a non-HTTPS, non-loopback JWKS URL. The JWKS is
+    the trust root for token verification, so plaintext is rejected by default
+    (fail-closed). Loopback hosts (`localhost`, `127.0.0.0/8`, `::1`) are always
+    allowed without this flag. Set true ONLY for a deliberate case (e.g. a ClusterIP
+    where a service mesh terminates mTLS out-of-band); doing so emits a loud WARN at
+    construction and on each refresh.
 - `NewM2MAuthenticatorWithKeySource(source KeySource, expectedIssuer string, enabled bool, logger *log.Logger) (*M2MAuthenticator, error)`
   - `M2MAuthenticator` gains a `source KeySource` field (nil ⇒ legacy static `publicKey` path).
   - `verify` becomes: `keys := source.Keys(ctx)` → `verifyToken(keys,...)`; if err is a

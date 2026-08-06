@@ -70,20 +70,3 @@ func incrJWKSCounter(ctx context.Context, m metrics.Metric, labels map[string]st
 		logger.Log(ctx, log.LevelWarn, fmt.Sprintf("failed to record metric %q: %v", m.Name, err))
 	}
 }
-
-// setJWKSGauge records the current value of a JWKS key-source gauge. Best-effort and
-// non-blocking, using the same factory-from-ctx convention as incrJWKSCounter.
-func setJWKSGauge(ctx context.Context, m metrics.Metric, value int64) {
-	logger, _, _, factory := observability.NewTrackingFromContext(ctx)
-
-	gauge, err := factory.Gauge(m)
-	if err != nil {
-		logger.Log(ctx, log.LevelWarn, fmt.Sprintf("failed to create metric %q: %v", m.Name, err))
-
-		return
-	}
-
-	if err := gauge.Set(ctx, value); err != nil {
-		logger.Log(ctx, log.LevelWarn, fmt.Sprintf("failed to record metric %q: %v", m.Name, err))
-	}
-}

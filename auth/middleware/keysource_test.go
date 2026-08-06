@@ -672,13 +672,16 @@ func TestJWKSKeySource_Close_StopsBackgroundRefresher(t *testing.T) {
 
 	require.NoError(t, source.Close())
 
-	// After Close, let any in-flight fetch settle, then assert fetches have stopped.
-	time.Sleep(60 * time.Millisecond)
-	settled := hits.Load()
+	// After Close the background loop returns on ctx cancellation, so it schedules no
+	// new fetches. At most ONE fetch may already be in flight (the fetch is detached
+	// from the loop ctx and completes rather than being cancelled), so allow that one
+	// to settle and assert the count never advances beyond it — deterministically,
+	// with no fixed sleeps.
+	before := hits.Load()
 
-	time.Sleep(90 * time.Millisecond) // ~6 refresh intervals
-
-	assert.Equal(t, settled, hits.Load(), "no JWKS fetches after Close: the background refresher stopped")
+	require.Never(t, func() bool { return hits.Load() > before+1 },
+		200*time.Millisecond, 10*time.Millisecond,
+		"no new JWKS fetches after Close: the background refresher stopped")
 }
 
 // ---------------------------------------------------------------------------
@@ -895,4 +898,234 @@ func TestVerify_SourcePath_EmptyCache_RefreshesOnce(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, http.StatusUnauthorized, statusCode)
 	assert.Equal(t, 1, source.refreshes(), "an empty key cache warrants exactly one forced refresh")
+}
+
+// ---------------------------------------------------------------------------
+// FIX 1: the JWKS fetch is detached from the caller's request-scoped ctx
+// ---------------------------------------------------------------------------
+
+// capturingLogger records the level + message of every Log call so a test can
+// assert that a specific WARN was emitted (e.g. the plaintext-HTTP warning).
+type capturingLogger struct {
+	mu   sync.Mutex
+	lvls []log.Level
+	msgs []string
+}
+
+func (c *capturingLogger) Log(_ context.Context, lvl log.Level, msg string, _ ...log.Field) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.lvls = append(c.lvls, lvl)
+	c.msgs = append(c.msgs, msg)
+}
+
+func (c *capturingLogger) With(_ ...log.Field) log.Logger { return c }
+func (c *capturingLogger) WithGroup(_ string) log.Logger  { return c }
+func (c *capturingLogger) Enabled(_ log.Level) bool       { return true }
+func (c *capturingLogger) Sync(_ context.Context) error   { return nil }
+
+func (c *capturingLogger) warnCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n := 0
+
+	for _, l := range c.lvls {
+		if l == log.LevelWarn {
+			n++
+		}
+	}
+
+	return n
+}
+
+// cancelRoundTripper is a fake transport that always returns context.Canceled,
+// so a fetch through it yields an error that errors.Is(context.Canceled).
+type cancelRoundTripper struct {
+	hits *atomic.Int64
+}
+
+func (rt cancelRoundTripper) RoundTrip(_ *http.Request) (*http.Response, error) {
+	rt.hits.Add(1)
+
+	return nil, context.Canceled
+}
+
+// A caller ctx that is already cancelled must NOT abort the shared single-flight
+// fetch that fills the process-lifetime cache: the fetch still completes and caches.
+func TestJWKSKeySource_Refresh_CancelledCallerCtx_StillFetchesAndCaches(t *testing.T) {
+	t.Parallel()
+
+	_, pub := pubKeyOf(t)
+	body := jwksJSON(t, "cert-built-in", pub)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	source, err := newJWKSKeySource(JWKSConfig{URL: srv.URL, HTTPClient: srv.Client()})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel BEFORE the fetch: the source fetch must ignore this
+
+	require.NoError(t, source.Refresh(ctx), "a cancelled caller ctx must not abort the shared JWKS fetch")
+	assert.Equal(t, []*rsa.PublicKey{pub}, source.Keys(context.Background()),
+		"the detached fetch must still populate the cache")
+}
+
+// A forced refresh that fails with context.Canceled must RELEASE the cooldown
+// window (a genuinely-cancelled attempt is not the amplification case), so a
+// subsequent forced Refresh within the cooldown is NOT gated.
+func TestJWKSKeySource_Refresh_ContextCanceled_ReleasesCooldownWindow(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int64
+
+	source, err := newJWKSKeySource(JWKSConfig{
+		URL:                   "https://example.com/jwks", // https: passes URL validation; transport is faked
+		HTTPClient:            &http.Client{Transport: cancelRoundTripper{hits: &hits}},
+		ForcedRefreshCooldown: time.Minute,
+	})
+	require.NoError(t, err)
+
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	source.now = clock.Now
+
+	// First forced refresh is cancelled -> releases the window.
+	require.ErrorIs(t, source.Refresh(context.Background()), context.Canceled)
+	require.Equal(t, int64(1), hits.Load())
+
+	// WITHIN the cooldown (clock not advanced): a normal fetch-failure would stay
+	// gated, but a released window means this attempt hits upstream again.
+	require.ErrorIs(t, source.Refresh(context.Background()), context.Canceled)
+	assert.Equal(t, int64(2), hits.Load(),
+		"a context.Canceled forced refresh must release the cooldown window")
+}
+
+// ---------------------------------------------------------------------------
+// FIX 2: require https by default, loopback http carve-out, explicit opt-in
+// ---------------------------------------------------------------------------
+
+func TestNewJWKSKeySource_HTTPSURL_OK(t *testing.T) {
+	t.Parallel()
+
+	_, err := newJWKSKeySource(JWKSConfig{URL: "https://casdoor.example.com/.well-known/jwks"})
+	require.NoError(t, err)
+}
+
+func TestNewJWKSKeySource_LoopbackHTTP_OKWithoutFlag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"ipv4_loopback", "http://127.0.0.1:8000/jwks"},
+		{"ipv4_loopback_range", "http://127.0.0.5:8000/jwks"},
+		{"ipv6_loopback", "http://[::1]:8000/jwks"},
+		{"localhost", "http://localhost:8000/jwks"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := newJWKSKeySource(JWKSConfig{URL: tt.url})
+			require.NoError(t, err, "loopback http must be allowed without AllowInsecureURL")
+		})
+	}
+}
+
+func TestNewJWKSKeySource_NonLoopbackHTTP_RejectedWithoutFlag(t *testing.T) {
+	t.Parallel()
+
+	_, err := newJWKSKeySource(JWKSConfig{URL: "http://casdoor.example.com/jwks"})
+	require.Error(t, err, "plaintext http against a non-loopback host must fail closed without AllowInsecureURL")
+}
+
+func TestNewJWKSKeySource_NonLoopbackHTTP_AllowedWithFlag_Warns(t *testing.T) {
+	t.Parallel()
+
+	cap := &capturingLogger{}
+	logger := log.Logger(cap)
+
+	_, err := newJWKSKeySource(JWKSConfig{
+		URL:              "http://casdoor.example.com/jwks",
+		AllowInsecureURL: true,
+		Logger:           logger,
+	})
+	require.NoError(t, err, "AllowInsecureURL permits plaintext http against a non-loopback host")
+	assert.GreaterOrEqual(t, cap.warnCount(), 1, "an insecure-URL opt-in must emit a loud WARN at construction")
+}
+
+func TestNewJWKSKeySource_InvalidScheme_Rejected(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"ftp", "ftp://example.com/jwks"},
+		{"relative", "/relative/jwks"},
+		{"no_scheme", "example.com/jwks"},
+		{"unparseable", "http://[::1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := newJWKSKeySource(JWKSConfig{URL: tt.url})
+			require.Error(t, err, "a non-http(s) / unparseable URL must be rejected")
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FIX 4: bound the response size (detect truncation) and the key count
+// ---------------------------------------------------------------------------
+
+func TestJWKSKeySource_Fetch_ResponseTooLarge_Errors(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(make([]byte, maxJWKSResponseBytes+64)) // one chunk past the cap
+	}))
+	t.Cleanup(srv.Close)
+
+	source, err := newJWKSKeySource(JWKSConfig{URL: srv.URL, HTTPClient: srv.Client()})
+	require.NoError(t, err)
+
+	err = source.Refresh(context.Background())
+	require.Error(t, err, "an over-cap response must be an explicit size error, not a silent truncation")
+	assert.Contains(t, err.Error(), "exceeds")
+}
+
+func TestJWKSKeySource_Fetch_TooManyKeys_Errors(t *testing.T) {
+	t.Parallel()
+
+	// maxJWKSKeys+1 entries (all the same key is fine: the guard bounds COUNT, and
+	// verifyToken tries keys until one matches, so an oversized set multiplies work).
+	_, pub := pubKeyOf(t)
+
+	pubs := make([]*rsa.PublicKey, maxJWKSKeys+1)
+	for i := range pubs {
+		pubs[i] = pub
+	}
+
+	body := jwksJSON(t, "cert-built-in", pubs...)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	source, err := newJWKSKeySource(JWKSConfig{URL: srv.URL, HTTPClient: srv.Client()})
+	require.NoError(t, err)
+
+	err = source.Refresh(context.Background())
+	require.Error(t, err, "a JWKS with more than maxJWKSKeys RSA keys must be rejected")
 }

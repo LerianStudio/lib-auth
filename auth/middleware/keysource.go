@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,7 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	observability "github.com/LerianStudio/lib-observability/v2"
 	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-observability/v2/metrics"
 	obsruntime "github.com/LerianStudio/lib-observability/v2/runtime"
 	"github.com/MicahParks/jwkset"
 	"golang.org/x/sync/singleflight"
@@ -34,6 +37,12 @@ const (
 	// maxJWKSResponseBytes caps the JWKS response read so a hostile or misbehaving
 	// endpoint cannot exhaust memory. A JWKS with a handful of RSA keys is a few KB.
 	maxJWKSResponseBytes = 1 << 20 // 1 MiB
+
+	// maxJWKSKeys bounds the number of RSA keys accepted from a single JWKS. verifyToken
+	// tries keys until one matches, so an oversized set multiplies per-token RSA work; a
+	// real rotation-overlap JWKS carries at most a few keys. A JWKS exceeding this is
+	// rejected as a defensive (DoS) guard.
+	maxJWKSKeys = 32
 
 	// jwksRefreshFlightKey is the fixed single-flight key: all refreshes target the
 	// same JWKS URL, so concurrent forced refreshes collapse onto one in-flight fetch.
@@ -93,6 +102,13 @@ type JWKSConfig struct {
 	// plugins). Required.
 	URL string
 
+	// AllowInsecureURL permits a non-HTTPS, non-loopback JWKS URL. The JWKS is the
+	// trust root for token verification, so plaintext is rejected by default. Set true
+	// ONLY for a deliberate case — e.g. a ClusterIP where a service mesh terminates
+	// mTLS out-of-band. Loopback hosts (localhost, 127.0.0.0/8, ::1) are always allowed
+	// without this flag.
+	AllowInsecureURL bool
+
 	// RefreshInterval is the short background TTL for proactive re-fetch. Defaults
 	// to defaultJWKSRefreshInterval when zero.
 	RefreshInterval time.Duration
@@ -132,6 +148,11 @@ type jwksKeySource struct {
 	forcedCooldown  time.Duration
 	logger          log.Logger
 
+	// warnInsecure is set when the URL is plaintext http against a non-loopback host
+	// with AllowInsecureURL opted in. It drives a loud WARN at construction AND on
+	// each refresh so an accidental prod enablement stays visible/alertable.
+	warnInsecure bool
+
 	// now is the clock (injectable in tests); defaults to time.Now.
 	now func() time.Time
 
@@ -158,6 +179,13 @@ type jwksKeySource struct {
 	// resolved from ctx — see metrics.go.
 	refreshOK   atomic.Int64
 	refreshFail atomic.Int64
+
+	// cacheAgeGauge is the jwks_cache_age_seconds instrument, built ONCE per source
+	// (guarded by cacheAgeGaugeOnce) so serving keys does not churn a metric builder
+	// or re-WARN on a creation failure on every verify. nil => creation failed or no
+	// factory was resolvable; emission is then skipped (best-effort, never blocks).
+	cacheAgeGaugeOnce sync.Once
+	cacheAgeGauge     *metrics.GaugeBuilder
 }
 
 // kidPresenceChecker is optionally implemented by a KeySource that tracks the kids
@@ -222,11 +250,18 @@ func newJWKSKeySource(cfg JWKSConfig) (*jwksKeySource, error) {
 		cooldown = defaultForcedRefreshCooldown
 	}
 
-	// TLS is expected on the key fetch (consume over ClusterIP with a pinned CA).
-	// Warn — but do NOT fail — on a non-https URL: local/dev reaches Casdoor over http.
-	if u, perr := url.Parse(cfg.URL); perr == nil && u.Scheme != "" && u.Scheme != "https" {
+	// The JWKS is the trust root for token verification, so plaintext is rejected by
+	// default (fail-closed). Loopback http is carved out (local/dev reaches Casdoor over
+	// http); a non-loopback plaintext URL requires an explicit AllowInsecureURL opt-in
+	// and then WARNs loudly.
+	warnInsecure, err := validateJWKSURL(cfg.URL, cfg.AllowInsecureURL)
+	if err != nil {
+		return nil, err
+	}
+
+	if warnInsecure {
 		logger.Log(context.Background(), log.LevelWarn,
-			fmt.Sprintf("JWKS URL scheme %q is not https; use https in production for the key fetch", u.Scheme))
+			fmt.Sprintf("JWKS is fetched over plaintext HTTP against a non-loopback host (URL=%q); the JWKS is the trust root for token verification — enable TLS in production", cfg.URL))
 	}
 
 	src := &jwksKeySource{
@@ -235,6 +270,7 @@ func newJWKSKeySource(cfg JWKSConfig) (*jwksKeySource, error) {
 		refreshInterval: interval,
 		forcedCooldown:  cooldown,
 		logger:          logger,
+		warnInsecure:    warnInsecure,
 		now:             time.Now,
 	}
 
@@ -248,6 +284,52 @@ func newJWKSKeySource(cfg JWKSConfig) (*jwksKeySource, error) {
 	}
 
 	return src, nil
+}
+
+// validateJWKSURL fail-closes on an unusable JWKS URL and reports whether an insecure
+// (plaintext, non-loopback, explicitly-opted-in) URL is in use so the caller can WARN.
+// It rejects a parse error, an empty scheme, or any scheme other than http/https. An
+// https URL is fine; an http URL is fine only for a loopback host, or for a non-loopback
+// host when allowInsecure is true (then warn == true). It performs a PURE literal host
+// check — never a DNS lookup — so it stays non-blocking.
+func validateJWKSURL(raw string, allowInsecure bool) (warn bool, err error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false, fmt.Errorf("invalid jwks url %q: %w", raw, err)
+	}
+
+	switch u.Scheme {
+	case "https":
+		return false, nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return false, nil
+		}
+
+		if !allowInsecure {
+			return false, fmt.Errorf(
+				"jwks url %q uses plaintext http against a non-loopback host; the JWKS is the trust root for token verification — set JWKSConfig.AllowInsecureURL to permit this deliberately",
+				raw)
+		}
+
+		return true, nil
+	default:
+		return false, fmt.Errorf("jwks url %q has unsupported scheme %q (want https, or http for a loopback host)", raw, u.Scheme)
+	}
+}
+
+// isLoopbackHost reports whether host is a loopback target by literal inspection only
+// (no DNS): the name "localhost", or an IP literal in 127.0.0.0/8 or ::1.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+
+	return false
 }
 
 // Keys returns the currently cached verification keys without ever touching the
@@ -291,7 +373,37 @@ func (s *jwksKeySource) emitCacheAge(ctx context.Context, fetchedAt time.Time) {
 		age = 0
 	}
 
-	setJWKSGauge(ctx, metricJWKSCacheAgeSeconds, age)
+	gauge := s.cacheAgeGaugeBuilder(ctx)
+	if gauge == nil {
+		return // instrument unavailable; best-effort, never block verify
+	}
+
+	if err := gauge.Set(ctx, age); err != nil {
+		s.logWarn(ctx, "failed to record metric %q: %v", metricJWKSCacheAgeSeconds.Name, err)
+	}
+}
+
+// cacheAgeGaugeBuilder builds the jwks_cache_age_seconds gauge builder EXACTLY once
+// per source and reuses it thereafter. The lib-observability factory exposes only a
+// synchronous gauge (no observable/async callback), so caching the builder here is the
+// idiomatic way to avoid per-verify instrument churn and, crucially, to WARN at most
+// once on a creation failure rather than on every request. Returns nil when the
+// instrument cannot be created (emission is then skipped, best-effort).
+func (s *jwksKeySource) cacheAgeGaugeBuilder(ctx context.Context) *metrics.GaugeBuilder {
+	s.cacheAgeGaugeOnce.Do(func() {
+		logger, _, _, factory := observability.NewTrackingFromContext(ctx)
+
+		gauge, err := factory.Gauge(metricJWKSCacheAgeSeconds)
+		if err != nil {
+			logger.Log(ctx, log.LevelWarn, fmt.Sprintf("failed to create metric %q: %v", metricJWKSCacheAgeSeconds.Name, err))
+
+			return
+		}
+
+		s.cacheAgeGauge = gauge
+	})
+
+	return s.cacheAgeGauge
 }
 
 // Refresh is the FORCED, cooldown-gated re-fetch invoked by the M2M gate on a
@@ -304,7 +416,8 @@ func (s *jwksKeySource) emitCacheAge(ctx context.Context, fetchedAt time.Time) {
 func (s *jwksKeySource) Refresh(ctx context.Context) error {
 	now := s.now().UnixNano()
 
-	if last := s.lastForcedNano.Load(); last != 0 && now-last < s.forcedCooldown.Nanoseconds() {
+	prev := s.lastForcedNano.Load()
+	if prev != 0 && now-prev < s.forcedCooldown.Nanoseconds() {
 		return nil // gated: serve stale, do not hit upstream
 	}
 
@@ -312,7 +425,18 @@ func (s *jwksKeySource) Refresh(ctx context.Context) error {
 	// of sequential requests each start their own upstream call.
 	s.lastForcedNano.Store(now)
 
-	return s.refreshNow(ctx)
+	err := s.refreshNow(ctx)
+
+	// A genuinely-cancelled attempt (context.Canceled) never meaningfully reached
+	// upstream, so release the window — otherwise a cancellation could stall a real
+	// key rotation for the whole cooldown. Ordinary fetch failures/timeouts (e.g.
+	// DeadlineExceeded, 5xx) SHOULD hold the window: that is the amplification guard.
+	// CompareAndSwap only restores if no concurrent refresh has since re-claimed it.
+	if err != nil && errors.Is(err, context.Canceled) {
+		s.lastForcedNano.CompareAndSwap(now, prev)
+	}
+
+	return err
 }
 
 // refreshNow performs the single-flight re-fetch WITHOUT the cooldown gate.
@@ -321,8 +445,21 @@ func (s *jwksKeySource) Refresh(ctx context.Context) error {
 // returned. Used by the background TTL loop (which must not be throttled) and by
 // the cooldown-gated Refresh.
 func (s *jwksKeySource) refreshNow(ctx context.Context) error {
+	if s.warnInsecure {
+		s.logWarn(ctx, "JWKS refresh over plaintext HTTP against a non-loopback host (URL=%q); enable TLS in production", s.url)
+	}
+
 	_, err, _ := s.group.Do(jwksRefreshFlightKey, func() (any, error) {
-		keys, kids, ferr := s.fetch(ctx)
+		// Detach the fetch from the caller's (request-scoped) ctx: this fill of the
+		// process-lifetime shared cache must not inherit ONE caller's cancellation —
+		// a client disconnect/timeout must not abort the shared single-flight fetch and
+		// fail every joined verifier. A bounded timeout still prevents a hung fetch.
+		// (The background TTL loop keeps passing the source lifetime ctx; only the fetch
+		// is detached here.)
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultJWKSFetchTimeout)
+		defer cancel()
+
+		keys, kids, ferr := s.fetch(fetchCtx)
 		if ferr != nil {
 			s.refreshFail.Add(1)
 			incrJWKSCounter(ctx, metricJWKSRefreshTotal, map[string]string{"result": "fail"})
@@ -394,9 +531,16 @@ func (s *jwksKeySource) fetch(ctx context.Context) ([]*rsa.PublicKey, map[string
 		return nil, nil, fmt.Errorf("jwks endpoint returned status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSResponseBytes))
+	// Read ONE byte past the cap: if the body would exceed maxJWKSResponseBytes we can
+	// then report an explicit size error instead of silently truncating into a
+	// misleading "malformed json" parse failure.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSResponseBytes+1))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read jwks response: %w", err)
+	}
+
+	if len(body) > maxJWKSResponseBytes {
+		return nil, nil, fmt.Errorf("jwks response exceeds %d bytes", maxJWKSResponseBytes)
 	}
 
 	keys, kids, err := parseJWKSKeysAndKIDs(body)
@@ -406,6 +550,12 @@ func (s *jwksKeySource) fetch(ctx context.Context) ([]*rsa.PublicKey, map[string
 
 	if len(keys) == 0 {
 		return nil, nil, errors.New("jwks response contained no RSA public keys")
+	}
+
+	// Bound the key count: verifyToken tries keys until one matches, so an oversized
+	// set multiplies per-token RSA work (a defensive DoS guard).
+	if len(keys) > maxJWKSKeys {
+		return nil, nil, fmt.Errorf("jwks response has %d RSA keys, exceeding the %d-key limit", len(keys), maxJWKSKeys)
 	}
 
 	return keys, kids, nil

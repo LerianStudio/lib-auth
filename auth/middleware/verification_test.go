@@ -559,6 +559,31 @@ func TestExtractClaims_KeySource_ForgedToken_FailsClosed(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.LessOrEqual(t, source.refreshes(), 1,
+		"a forged (bad-signature) token forces at most ONE refresh, never a loop")
+}
+
+// An expired but validly-signed token is a CLAIM failure, not key staleness: the
+// source-path retry logic must NOT force any refresh.
+func TestExtractClaims_KeySource_ExpiredToken_NoRefresh(t *testing.T) {
+	t.Parallel()
+
+	key, pub := pubKeyOf(t)
+	source := &fakeKeySource{keys: []*rsa.PublicKey{pub}}
+
+	auth := (&AuthClient{Enabled: true, Logger: &testLogger{}}).WithKeySource(source)
+
+	claims := normalUserClaims()
+	claims["exp"] = float64(time.Now().Add(-time.Hour).Unix())
+
+	token := signRS256(t, key, claims)
+
+	_, statusCode, err := auth.extractClaims(context.Background(), noopSpan(), token)
+
+	require.Error(t, err)
+	assert.Equal(t, http.StatusUnauthorized, statusCode)
+	assert.Equal(t, 0, source.refreshes(),
+		"an expired validly-signed token is a claim failure, not key staleness: ZERO refreshes")
 }
 
 // WithKeySource is strictly additive: a client with no KeySource keeps the exact
