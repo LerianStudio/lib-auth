@@ -148,6 +148,12 @@ type jwksKeySource struct {
 	forcedCooldown  time.Duration
 	logger          log.Logger
 
+	// allowInsecure mirrors JWKSConfig.AllowInsecureURL. It is retained on the source
+	// so the SAME transport policy validated at construction is re-applied to every
+	// redirect hop in fetch — an https JWKS URL must not be bounced to a plaintext
+	// non-loopback target whose response would then be cached as a trust root (CWE-319).
+	allowInsecure bool
+
 	// warnInsecure is set when the URL is plaintext http against a non-loopback host
 	// with AllowInsecureURL opted in. It drives a loud WARN at construction AND on
 	// each refresh so an accidental prod enablement stays visible/alertable.
@@ -271,6 +277,7 @@ func newJWKSKeySource(cfg JWKSConfig) (*jwksKeySource, error) {
 		forcedCooldown:  cooldown,
 		logger:          logger,
 		warnInsecure:    warnInsecure,
+		allowInsecure:   cfg.AllowInsecureURL,
 		now:             time.Now,
 	}
 
@@ -296,6 +303,13 @@ func validateJWKSURL(raw string, allowInsecure bool) (warn bool, err error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return false, fmt.Errorf("invalid jwks url %q: %w", raw, err)
+	}
+
+	// A scheme-only URL (e.g. "https:///jwks") parses cleanly and passes the scheme
+	// check, but has no host to dial: every fetch would then fail to build a usable
+	// request. Reject it up front so the misconfiguration fails closed at construction.
+	if u.Hostname() == "" {
+		return false, fmt.Errorf("jwks url %q has no host", raw)
 	}
 
 	switch u.Scheme {
@@ -421,9 +435,15 @@ func (s *jwksKeySource) Refresh(ctx context.Context) error {
 		return nil // gated: serve stale, do not hit upstream
 	}
 
-	// Claim the window before fetching so a slow/failing fetch does not let a burst
-	// of sequential requests each start their own upstream call.
-	s.lastForcedNano.Store(now)
+	// Claim the window ATOMICALLY before fetching. The load/check/store sequence was not
+	// atomic: two callers could both read the same prev, both pass the gate, and — when
+	// their single-flight windows did not overlap — both start an upstream fetch inside
+	// one cooldown window. CompareAndSwap makes the claim the single serialization point:
+	// exactly one caller advances prev->now and fetches; a racing caller's CAS fails and
+	// it serves stale (returns nil) instead of starting a second fetch.
+	if !s.lastForcedNano.CompareAndSwap(prev, now) {
+		return nil
+	}
 
 	err := s.refreshNow(ctx)
 
@@ -521,7 +541,23 @@ func (s *jwksKeySource) fetch(ctx context.Context) ([]*rsa.PublicKey, map[string
 		return nil, nil, fmt.Errorf("failed to build jwks request: %w", err)
 	}
 
-	resp, err := s.httpClient.Do(req)
+	// Enforce the transport policy on EVERY redirect hop, not just the initial URL: a
+	// policy-compliant https URL must not be 302'd to a plaintext non-loopback target
+	// whose response would then be cached as verification keys (CWE-319, defeating the
+	// fail-closed https policy). Shallow-copy the client so CheckRedirect is overridden
+	// WITHOUT mutating the caller-injected client; the copy shares the Transport (intended).
+	client := *s.httpClient
+	client.CheckRedirect = func(hopReq *http.Request, _ []*http.Request) error {
+		// Re-run the construction-time policy on the redirect target. A non-nil error
+		// aborts the redirect (the hop is NOT followed); the warn bool is irrelevant here.
+		if _, verr := validateJWKSURL(hopReq.URL.String(), s.allowInsecure); verr != nil {
+			return fmt.Errorf("jwks redirect to a policy-violating target blocked: %w", verr)
+		}
+
+		return nil
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch jwks: %w", err)
 	}

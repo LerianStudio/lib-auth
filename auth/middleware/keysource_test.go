@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -1084,6 +1086,30 @@ func TestNewJWKSKeySource_InvalidScheme_Rejected(t *testing.T) {
 	}
 }
 
+// A scheme-only URL with an EMPTY host parses fine and passes the scheme check, but
+// every refresh then fails to build a usable request. Reject it at construction so the
+// misconfiguration surfaces immediately, not as a silent perpetual refresh failure.
+func TestNewJWKSKeySource_NoHost_Rejected(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"https_no_host", "https:///jwks"},
+		{"http_no_host", "http:///jwks"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := newJWKSKeySource(JWKSConfig{URL: tt.url})
+			require.Error(t, err, "a URL with no host must be rejected at construction")
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // FIX 4: bound the response size (detect truncation) and the key count
 // ---------------------------------------------------------------------------
@@ -1128,4 +1154,184 @@ func TestJWKSKeySource_Fetch_TooManyKeys_Errors(t *testing.T) {
 
 	err = source.Refresh(context.Background())
 	require.Error(t, err, "a JWKS with more than maxJWKSKeys RSA keys must be rejected")
+}
+
+// ---------------------------------------------------------------------------
+// FIX N1: enforce the transport policy on redirect targets (CWE-319)
+// ---------------------------------------------------------------------------
+
+// redirectingRoundTripper serves a 302 from the initial JWKS URL to a plaintext
+// non-loopback attacker URL, and (were the client to follow it) serves ATTACKER JWKS
+// from that target. attackerHits records whether the attacker target was ever fetched,
+// so a test can prove the redirect-policy enforcement blocked the hop rather than
+// relying on the target merely being unreachable.
+type redirectingRoundTripper struct {
+	attackerURL  string
+	attackerBody []byte
+	attackerHits *atomic.Int64
+}
+
+func (rt *redirectingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	newResp := func(status int, hdr http.Header, body []byte) *http.Response {
+		if hdr == nil {
+			hdr = make(http.Header)
+		}
+
+		return &http.Response{
+			StatusCode: status,
+			Header:     hdr,
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Request:    req,
+		}
+	}
+
+	if req.URL.String() == rt.attackerURL {
+		rt.attackerHits.Add(1)
+
+		return newResp(http.StatusOK, nil, rt.attackerBody), nil
+	}
+
+	h := make(http.Header)
+	h.Set("Location", rt.attackerURL)
+
+	return newResp(http.StatusFound, h, nil), nil
+}
+
+// (a) An https (policy-compliant) JWKS URL that 302-redirects to a plaintext
+// non-loopback target must have the SAME fail-closed transport policy enforced on the
+// redirect hop: the hop is blocked, the attacker endpoint is never fetched, and its
+// keys are never cached (CWE-319 — plaintext response cached as a trust root).
+func TestJWKSKeySource_Fetch_RedirectToPlaintextNonLoopback_BlockedAndNotCached(t *testing.T) {
+	t.Parallel()
+
+	_, attackerPub := pubKeyOf(t)
+	attackerBody := jwksJSON(t, "cert-built-in", attackerPub)
+
+	var attackerHits atomic.Int64
+
+	rt := &redirectingRoundTripper{
+		attackerURL:  "http://evil.example.com/jwks",
+		attackerBody: attackerBody,
+		attackerHits: &attackerHits,
+	}
+
+	// Seed a known-good bootstrap key so we can prove the cache is NOT replaced by the
+	// attacker's redirected keys.
+	goodPriv, goodPub := pubKeyOf(t)
+	bootstrapPEM := pubPEMOf(t, goodPriv)
+
+	source, err := newJWKSKeySource(JWKSConfig{
+		URL:          "https://idp.internal/.well-known/jwks",
+		HTTPClient:   &http.Client{Transport: rt},
+		BootstrapPEM: []byte(bootstrapPEM),
+	})
+	require.NoError(t, err)
+
+	err = source.Refresh(context.Background())
+	require.Error(t, err, "a redirect from https to a plaintext non-loopback target must be blocked, not followed")
+	assert.Equal(t, int64(0), attackerHits.Load(), "the attacker endpoint must never be fetched")
+
+	keys := source.Keys(context.Background())
+	require.Len(t, keys, 1, "the cache must still hold only the bootstrap key")
+	assert.Equal(t, goodPub, keys[0], "the attacker's redirected keys must NOT be cached")
+}
+
+// (b) A policy-COMPLIANT redirect hop (loopback http -> loopback http) must still be
+// followed: the redirect enforcement rejects only policy-violating hops.
+func TestJWKSKeySource_Fetch_LoopbackToLoopbackRedirect_Allowed(t *testing.T) {
+	t.Parallel()
+
+	_, pub := pubKeyOf(t)
+	body := jwksJSON(t, "cert-built-in", pub)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/keys", http.StatusFound) // relative -> same loopback host
+	})
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	})
+
+	srv := httptest.NewServer(mux) // http://127.0.0.1:port (loopback)
+	t.Cleanup(srv.Close)
+
+	source, err := newJWKSKeySource(JWKSConfig{URL: srv.URL + "/jwks", HTTPClient: srv.Client()})
+	require.NoError(t, err)
+
+	require.NoError(t, source.Refresh(context.Background()),
+		"a loopback->loopback http redirect is policy-compliant and must be followed")
+	assert.Equal(t, []*rsa.PublicKey{pub}, source.Keys(context.Background()))
+}
+
+// ---------------------------------------------------------------------------
+// FIX N3: the forced-refresh cooldown claim must be atomic
+// ---------------------------------------------------------------------------
+
+// countingBodyRoundTripper serves a fixed JWKS body and counts every fetch. Each call
+// completes IMMEDIATELY and independently, so concurrent forced refreshes do NOT share
+// a single-flight window (single-flight only collapses OVERLAPPING calls). That isolates
+// the cooldown claim: only an atomic claim can bound N concurrent forced refreshes to a
+// single upstream fetch per window.
+type countingBodyRoundTripper struct {
+	hits *atomic.Int64
+	body []byte
+}
+
+func (rt *countingBodyRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.hits.Add(1)
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(rt.body)),
+		Request:    req,
+	}, nil
+}
+
+// N concurrent forced Refresh calls within one cooldown window must collapse to exactly
+// ONE upstream fetch. The load/check/store sequence was not atomic: two callers could
+// both read lastForced, both pass the gate, and both start a fetch when their
+// single-flight windows did not overlap. A CompareAndSwap claim serializes the window so
+// exactly one caller fetches and the rest serve stale (return nil). Deterministic: a
+// fixed clock pins all callers to the same window; the fast transport keeps flights
+// non-overlapping. No sleeps.
+func TestVerify_SourcePath_ConcurrentForcedRefresh_AtMostOneFetchPerWindow(t *testing.T) {
+	t.Parallel()
+
+	_, serverPub := pubKeyOf(t)
+	body := jwksJSON(t, "cert-built-in", serverPub)
+
+	var hits atomic.Int64
+
+	source, err := newJWKSKeySource(JWKSConfig{
+		URL:                   "https://idp.internal/jwks",
+		HTTPClient:            &http.Client{Transport: &countingBodyRoundTripper{hits: &hits, body: body}},
+		ForcedRefreshCooldown: time.Minute,
+	})
+	require.NoError(t, err)
+
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	source.now = clock.Now
+
+	const n = 64
+
+	start := make(chan struct{})
+
+	var wg sync.WaitGroup
+
+	wg.Add(n)
+
+	for range n {
+		go func() {
+			defer wg.Done()
+			<-start // release all at once to maximize the concurrent claim race
+			_ = source.Refresh(context.Background())
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, int64(1), hits.Load(),
+		"N concurrent forced refreshes in one cooldown window must collapse to exactly ONE upstream fetch")
 }
