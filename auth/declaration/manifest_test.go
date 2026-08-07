@@ -2,6 +2,7 @@ package declaration
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -235,4 +236,50 @@ func TestValidate_RejectsBadManifests(t *testing.T) {
 			assert.ErrorAs(t, verr, &me, "validation error must be a *ManifestError")
 		})
 	}
+}
+
+// TestValidate_AggregatesMultipleViolations locks in that Validate does NOT
+// fail-fast on the first bad permission: a single manifest carrying several
+// DISTINCT invalid permissions must surface a violation for EVERY offending
+// permissions[i], all joined into one *ManifestError (strings.Join(..., "; ")).
+// This restores the aggregation coverage lost when the HTTP-verb reject tests
+// were removed. The three permissions are engineered so each triggers exactly
+// one violation (distinct resources avoid composed-name collisions):
+//
+//	permissions[0] — empty resource   (resource must not be empty)
+//	permissions[1] — bad effect       (effect must be "allow" or "deny")
+//	permissions[2] — undeclared role  (references undeclared role "ghost")
+//
+// Service/version/roles are all valid, so the aggregated message contains
+// exactly these three permission violations and nothing else.
+func TestValidate_AggregatesMultipleViolations(t *testing.T) {
+	const raw = `{
+	  "service": "s",
+	  "version": 1,
+	  "roles": [{ "name": "x" }],
+	  "permissions": [
+	    { "resource": "",   "action": "read", "effect": "allow", "roles": ["x"] },
+	    { "resource": "r1", "action": "read", "effect": "maybe", "roles": ["x"] },
+	    { "resource": "r2", "action": "read", "effect": "allow", "roles": ["ghost"] }
+	  ]
+	}`
+
+	m, err := parseManifest([]byte(raw))
+	require.NoError(t, err)
+
+	verr := m.Validate()
+	require.Error(t, verr, "manifest with multiple invalid permissions must be rejected")
+
+	var me *ManifestError
+	require.ErrorAs(t, verr, &me, "validation error must be a *ManifestError")
+
+	// Every offending permissions[i] must be reported, each with its own reason.
+	assert.Contains(t, me.Reason, "permissions[0]: resource must not be empty")
+	assert.Contains(t, me.Reason, `permissions[1]: effect must be "allow" or "deny"`)
+	assert.Contains(t, me.Reason, `permissions[2]: references undeclared role "ghost"`)
+
+	// The aggregation must not fail-fast: exactly one violation per bad index,
+	// joined with "; " — no more, no fewer.
+	violations := strings.Split(me.Reason, "; ")
+	assert.Len(t, violations, 3, "expected exactly one aggregated violation per offending permission")
 }
