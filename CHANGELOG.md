@@ -1,3 +1,18 @@
+## [3.4.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.2...v3.4.0-beta.3) (2026-08-07)
+
+
+### Features
+
+* **middleware:** dynamic JWKS key source for M2M token verification ([9e252e1](https://github.com/LerianStudio/lib-auth/commit/9e252e1dcb5cff02ee028f0de5e7ad9b5d5c3155))
+* **declaration:** remove HTTP-verb action reject from manifest validation ([c4b590d](https://github.com/LerianStudio/lib-auth/commit/c4b590dce3ee77ce93e537986e7f93c69fa1b2d1)), closes [#143](https://github.com/LerianStudio/lib-auth/issues/143)
+
+
+### Bug Fixes
+
+* **middleware:** address JWKS review — https fail-closed, ctx detach, bounds ([25ef0e0](https://github.com/LerianStudio/lib-auth/commit/25ef0e09ea927857961b6713fbe0ac4f612de13f))
+* **middleware:** cap JWKS redirect hops ([163d728](https://github.com/LerianStudio/lib-auth/commit/163d7288ed7577e4eb3b645c41d9c62c59043fff)), closes [#144](https://github.com/LerianStudio/lib-auth/issues/144)
+* **middleware:** JWKS review round 2 — redirect policy, host check, atomic cooldown ([ba9c026](https://github.com/LerianStudio/lib-auth/commit/ba9c02693b3a8c961c8440e23a053e92333ac69f))
+
 ## [3.4.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.1...v3.4.0-beta.2) (2026-08-05)
 
 
