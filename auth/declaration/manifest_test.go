@@ -252,6 +252,40 @@ func TestValidate_RejectsBadManifests(t *testing.T) {
 //
 // Service/version/roles are all valid, so the aggregated message contains
 // exactly these three permission violations and nothing else.
+// TestValidate_RejectsEmptyAction retains the negative coverage for the
+// non-empty-action contract requested in review. The HTTP-verb reject was
+// removed, but validatePermissions STILL rejects an action that is empty — or
+// whitespace-only, since it trims (strings.TrimSpace(p.Action) == "") — with a
+// "action must not be empty" violation. Each fixture keeps service/version/roles
+// and every OTHER permission field valid, so the empty-action check is the ONLY
+// violation triggered and the assertion is unambiguous.
+func TestValidate_RejectsEmptyAction(t *testing.T) {
+	tests := map[string]string{
+		"empty action":           `{"service":"s","version":1,"roles":[{"name":"x"}],"permissions":[{"resource":"r","action":"","effect":"allow","roles":["x"]}]}`,
+		"whitespace-only action": `{"service":"s","version":1,"roles":[{"name":"x"}],"permissions":[{"resource":"r","action":"   ","effect":"allow","roles":["x"]}]}`,
+	}
+
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			m, err := parseManifest([]byte(raw))
+			require.NoError(t, err)
+
+			verr := m.Validate()
+			require.Error(t, verr, "an empty or whitespace-only action must be rejected")
+
+			var me *ManifestError
+			require.ErrorAs(t, verr, &me, "validation error must be a *ManifestError")
+
+			// The offending permissions[0] must carry the action-empty reason.
+			assert.Contains(t, me.Reason, "permissions[0]: action must not be empty")
+
+			// Only the empty-action check fires — no unrelated violation muddies it.
+			violations := strings.Split(me.Reason, "; ")
+			assert.Len(t, violations, 1, "expected exactly the empty-action violation")
+		})
+	}
+}
+
 func TestValidate_AggregatesMultipleViolations(t *testing.T) {
 	const raw = `{
 	  "service": "s",
