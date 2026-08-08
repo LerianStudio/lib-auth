@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/sha256"
 	"hash/fnv"
 	"sync"
 	"time"
@@ -20,10 +21,26 @@ const decisionCacheShards = 16
 const decisionCacheMaxPerShard = 1024
 
 // cacheKey identifies an authorization decision by the inputs that determine it —
-// the exact fields sent to the authz service. It NEVER contains the raw token: two
-// tokens for the same subject must share a decision, and a token must never become
-// a cache key (it would leak into memory keyed by a secret).
+// the exact fields sent to the authz service — PLUS the identity of the bearer token
+// those inputs were derived from. It never holds the raw token, only its digest.
 type cacheKey struct {
+	// tokenDigest binds the entry to the exact token the authz service accepted.
+	//
+	// Without it the cache substitutes for authentication. Local JWT verification is
+	// opt-in (AUTH_JWT_VERIFY_CERT / AUTH_JWT_VERIFY_CERT_PATH / WithKeySource) and
+	// OFF by default; on that path claims come from ParseUnverified, so the authz
+	// round-trip — which carries the raw token — is the only thing that ever checks
+	// the signature. Keying on the derived claims alone means a caller can warm the
+	// cache with a genuine token and then replay the same request with a forged or
+	// payload-edited one: identical sub/resource/action/product/IP, identical key,
+	// cache hit, authz service never consulted. Digesting the token makes a forged
+	// token a cache MISS, so it reaches the verifier and is denied.
+	//
+	// It is a SHA-256 digest, not the token: a bearer secret must not sit in a map
+	// key. The cost is hit rate — two tokens for the same subject no longer share an
+	// entry — which is the correct trade against an authentication bypass.
+	tokenDigest [sha256.Size]byte
+
 	sub      string
 	resource string
 	action   string
@@ -72,7 +89,8 @@ func newDecisionCache(ttl time.Duration) *decisionCache {
 // distinct field boundaries cannot collide (e.g. {"a","b"} vs {"ab",""}).
 func (c *decisionCache) shardFor(k cacheKey) *cacheShard {
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(k.sub + "\x00" + k.resource + "\x00" + k.action + "\x00" + k.product + "\x00" + k.clientIP))
+	_, _ = h.Write(k.tokenDigest[:])
+	_, _ = h.Write([]byte("\x00" + k.sub + "\x00" + k.resource + "\x00" + k.action + "\x00" + k.product + "\x00" + k.clientIP))
 
 	return c.shards[h.Sum32()%decisionCacheShards]
 }
