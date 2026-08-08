@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,9 +73,13 @@ type AuthClient struct {
 	timeout time.Duration
 
 	// cache, when non-nil, memoizes authorization decisions for a short TTL keyed by
-	// (sub, resource, action, product, clientIp) — NEVER the access token. clientIp
-	// is part of the key because decisions are IP-dependent (tenant IP-allowlist), so
-	// a cross-IP cache hit would bypass the allowlist; do NOT drop it from the key.
+	// (sha256(accessToken), sub, resource, action, product, clientIp) — the digest of
+	// the access token, never the token itself. clientIp is part of the key because
+	// decisions are IP-dependent (tenant IP-allowlist), so a cross-IP cache hit would
+	// bypass the allowlist. The token digest is part of the key because local JWT
+	// verification is opt-in and off by default, which makes the authz round-trip the
+	// only signature check: keyed on claims alone, a forged token would be served an
+	// entry warmed by a genuine one. Do NOT drop either from the key.
 	// Enabled by AUTH_CACHE_TTL > 0 (opt-in; nil = no caching, prior behavior). It
 	// trades a bounded revocation-propagation lag (= TTL) for load shedding and outage
 	// resilience.
@@ -576,11 +581,22 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		return false, http.StatusInternalServerError, err
 	}
 
-	// Cache key = exactly the authz request inputs (never the raw token). product is
-	// the value actually forwarded ("" when not forwarded), so the key matches the
-	// decision the authz service made. clientIP is in the key because the decision is
-	// IP-dependent (tenant IP-allowlist): a cross-IP cache hit would bypass it.
-	key := cacheKey{sub: sub, resource: resource, action: action, product: requestBody["product"], clientIP: clientIP}
+	// Cache key = the authz request inputs PLUS a digest of the bearer token they were
+	// derived from (never the raw token). product is the value actually forwarded ("" when
+	// not forwarded), so the key matches the decision the authz service made. clientIP is
+	// in the key because the decision is IP-dependent (tenant IP-allowlist): a cross-IP
+	// cache hit would bypass it. The token digest is in the key because local verification
+	// is off by default, which makes the authz round-trip the only signature check: without
+	// it a forged token with the same claims would hit an entry warmed by a genuine one and
+	// never reach the verifier.
+	key := cacheKey{
+		tokenDigest: sha256.Sum256([]byte(accessToken)),
+		sub:         sub,
+		resource:    resource,
+		action:      action,
+		product:     requestBody["product"],
+		clientIP:    clientIP,
+	}
 
 	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so
 	// the breaker only ever runs on a miss — its open state then denies (never
