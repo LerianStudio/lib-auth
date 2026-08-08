@@ -1,3 +1,10 @@
+## [3.4.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.3...v3.4.0-beta.4) (2026-08-08)
+
+
+### Bug Fixes
+
+* **middleware:** bind decision-cache entries to the bearer token ([#147](https://github.com/LerianStudio/lib-auth/issues/147)) ([c7f8460](https://github.com/LerianStudio/lib-auth/commit/c7f84601e856a78caa22348268cdebe3304b6149)), closes [#146](https://github.com/LerianStudio/lib-auth/issues/146)
+
 ## [3.4.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.2...v3.4.0-beta.3) (2026-08-07)
 
 
