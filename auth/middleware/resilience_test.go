@@ -238,7 +238,7 @@ func TestCheckAuthorization_ForgedTokenMustNotHitCachedAllow(t *testing.T) {
 
 	require.NotEqual(t, genuine, forged, "the two tokens must differ on the wire")
 
-	server, _ := countingAuthServer(t, func(w http.ResponseWriter, r *http.Request, _ int64) {
+	server, hits := countingAuthServer(t, func(w http.ResponseWriter, r *http.Request, _ int64) {
 		// The authz service verifies the signature; only the genuine token passes.
 		writeAuthorized(w, r.Header.Get("Authorization") == genuine)
 	})
@@ -257,6 +257,7 @@ func TestCheckAuthorization_ForgedTokenMustNotHitCachedAllow(t *testing.T) {
 	authorized, _, err = auth.checkAuthorization(context.Background(), "", "res", "read", forged, "")
 	require.NoError(t, err)
 	assert.False(t, authorized, "a forged token must never be served a decision cached for a genuine one")
+	assert.Equal(t, int64(2), hits.Load(), "the forged token must miss the cache and reach authz")
 }
 
 // ---------------------------------------------------------------------------
