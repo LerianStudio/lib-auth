@@ -156,7 +156,11 @@ func (m *M2MAuthenticator) RequireM2M() fiber.Handler {
 			return c.Next()
 		}
 
-		ctx := tracing.ExtractHTTPContext(c.Context(), c)
+		// Inherit the ambient request context rather than extracting inbound trace
+		// context here — same reasoning as AuthClient.Authorize: honoring a
+		// caller-supplied traceparent is the application's decision to make, not
+		// this middleware's.
+		ctx := c.Context()
 
 		_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
