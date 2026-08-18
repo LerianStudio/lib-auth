@@ -1,3 +1,12 @@
+## [3.4.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.4...v3.4.0-beta.5) (2026-08-18)
+
+
+### Bug Fixes
+
+* **middleware:** address review comments on test goroutine safety and README version note ([85e9d71](https://github.com/LerianStudio/lib-auth/commit/85e9d71301d2bcd231fe5a890ef4c62cccddcbbe))
+* **middleware:** inherit the request context instead of extracting inbound trace headers ([#148](https://github.com/LerianStudio/lib-auth/issues/148)) ([0e3da25](https://github.com/LerianStudio/lib-auth/commit/0e3da251fa4356d1850bb9c96e43dd1e51b6816b))
+* **middleware:** inherit the request context instead of extracting inbound trace headers ([9a1a05a](https://github.com/LerianStudio/lib-auth/commit/9a1a05a5a1d1ab4facb2722a87e1bb8ccb89633e))
+
 ## [3.4.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.3...v3.4.0-beta.4) (2026-08-08)
 
 
