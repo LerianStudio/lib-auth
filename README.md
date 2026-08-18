@@ -34,6 +34,12 @@ with it.
 **What you will observe:** auth spans stop joining a caller-supplied
 `traceparent` unless the application itself trusts it.
 
+Note: `lib-observability v2.1.2` is an **application-level** requirement, not a
+requirement of this module — lib-auth itself does not use
+`TrustInboundTraceContext` and keeps its own minimum at `v2.0.0`. Applications
+that want to opt in to honoring inbound trace context must depend on
+`lib-observability >= v2.1.2` and enable the flag themselves.
+
 ## 🚀 How to Use
 
 ### 1. Set the needed environment variables:

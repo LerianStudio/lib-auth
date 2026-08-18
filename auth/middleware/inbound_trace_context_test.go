@@ -93,7 +93,11 @@ func authorizedAccessManager(t *testing.T, traceparent, baggageHeader *string) *
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 
-		require.NoError(t, json.NewEncoder(w).Encode(AuthResponse{Authorized: true}))
+		// The handler runs in a separate goroutine, so it must not call
+		// require (FailNow); report the error non-fatally instead.
+		if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: true}); err != nil {
+			t.Errorf("encoding stub Access Manager response: %v", err)
+		}
 	}))
 }
 
