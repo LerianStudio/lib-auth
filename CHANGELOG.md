@@ -1,3 +1,11 @@
+## Unreleased
+
+### Features
+
+* **declaration:** namespace the RI/D7 env contract under the product-wide `IDP_` prefix (#4232). The four RI-declaration vars consumed by `WireFromEnv` are renamed: `DECLARATION_ENABLED` → `IDP_DECLARATION_ENABLED`, `PLUGIN_IDENTITY_HOST` → `IDP_HOST`, `M2M_CLIENT_ID` → `IDP_M2M_CLIENT_ID`, `M2M_CLIENT_SECRET` → `IDP_M2M_CLIENT_SECRET`. Each old name is honored as a **deprecated alias for ONE release**; canonical wins over the alias and a single WARN (naming both vars, never the value) is logged when only the alias is set. The auth-minter vars `PLUGIN_AUTH_ENABLED` / `PLUGIN_AUTH_HOST` are out of scope and unchanged.
+
+> Note: version numbers below are managed by semantic-release from conventional commits.
+
 ## [3.4.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.3...v3.4.0-beta.4) (2026-08-08)
 
 

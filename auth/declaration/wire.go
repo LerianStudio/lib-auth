@@ -26,27 +26,74 @@ import (
 	"github.com/LerianStudio/lib-observability/v2/log"
 )
 
-// Fixed env contract consumed by WireFromEnv. These names are DELIBERATELY
-// un-prefixed and shared across every plugin — that shared contract is the
-// feature. Do NOT reintroduce a per-plugin prefix here.
+// Fixed env contract consumed by WireFromEnv. The four RI/D7-declaration vars
+// now carry a PRODUCT-WIDE "IDP_" prefix (identity provider) per the platform
+// env-naming standard (#4232). This is NOT the per-plugin prefix an earlier
+// revision of this file forbade: "IDP_" is shared across EVERY plugin, so the
+// shared-contract property — the whole reason WireFromEnv can absorb the boot
+// boilerplate — is fully preserved. A plugin's boot code still passes only its
+// Slug and Manifest; every operational value comes from these fixed names.
+//
+// Backward compatibility: each of the four vars accepts its OLD, un-prefixed
+// name as a DEPRECATED ALIAS, honored for ONE release. When only the alias is
+// set, WireFromEnv resolves its value and logs a single WARN naming both the
+// deprecated and canonical names (never the value). Canonical always wins over
+// the alias. Remove the aliases (and this note) after the alias-window release.
+//
+// The auth-minter vars (PLUGIN_AUTH_ENABLED / PLUGIN_AUTH_HOST) are OUT of
+// scope for #4232 and intentionally keep their existing names.
 const (
 	// envDeclarationEnabled is the master switch. Any value other than "true"
 	// leaves the plugin boot exactly as it was before D7 existed: WireFromEnv
 	// reads/validates NOTHING else and returns a no-op stop.
-	envDeclarationEnabled = "DECLARATION_ENABLED"
+	envDeclarationEnabled = "IDP_DECLARATION_ENABLED"
 	// envIdentityHost is the identity base URL — the PUT target (Config.IdentityAddr).
-	envIdentityHost = "PLUGIN_IDENTITY_HOST"
+	envIdentityHost = "IDP_HOST"
 	// envM2MClientID / envM2MClientSecret are the plugin's M2M credentials. The
 	// secret's VALUE is never logged.
-	envM2MClientID     = "M2M_CLIENT_ID"
-	envM2MClientSecret = "M2M_CLIENT_SECRET" // #nosec G101 -- env var NAME, not a credential value
+	envM2MClientID     = "IDP_M2M_CLIENT_ID"
+	envM2MClientSecret = "IDP_M2M_CLIENT_SECRET" // #nosec G101 -- env var NAME, not a credential value
+
+	// Deprecated aliases — the pre-#4232 un-prefixed names. Honored for ONE
+	// release with a WARN on use; delete after the alias-window release ships.
+	envDeclarationEnabledDeprecated = "DECLARATION_ENABLED"
+	envIdentityHostDeprecated       = "PLUGIN_IDENTITY_HOST"
+	envM2MClientIDDeprecated        = "M2M_CLIENT_ID"
+	envM2MClientSecretDeprecated    = "M2M_CLIENT_SECRET" // #nosec G101 -- env var NAME, not a credential value
+
 	// envAuthEnabled / envAuthHost configure the token minter (the AUTH host,
 	// distinct from the identity host). Passed through faithfully to
 	// middleware.NewAuthClient; the publisher fail-opens if a token cannot be
-	// minted, so auth need NOT be enabled for WireFromEnv to succeed.
+	// minted, so auth need NOT be enabled for WireFromEnv to succeed. These are
+	// OUT of scope for #4232 and keep their names.
 	envAuthEnabled = "PLUGIN_AUTH_ENABLED"
 	envAuthHost    = "PLUGIN_AUTH_HOST"
 )
+
+// lookupWithDeprecatedAlias resolves an env var during the #4232 rename window.
+// It returns the TRIMMED canonical value when non-empty; otherwise, when the
+// TRIMMED deprecated alias is non-empty, it logs a SINGLE warn naming both vars
+// (never the value) and returns the alias value; otherwise it returns "".
+//
+// It is kept local to this package deliberately: the deprecation warning is a
+// one-release migration aid specific to the RI/D7-declaration contract, not a
+// general-purpose utility worth widening lib-commons' surface for.
+func lookupWithDeprecatedAlias(canonical, deprecated string, logger log.Logger) string {
+	if v := strings.TrimSpace(os.Getenv(canonical)); v != "" {
+		return v
+	}
+
+	if v := strings.TrimSpace(os.Getenv(deprecated)); v != "" {
+		if logger != nil {
+			logger.Log(context.Background(), log.LevelWarn,
+				fmt.Sprintf("env %s is deprecated; use %s", deprecated, canonical))
+		}
+
+		return v
+	}
+
+	return ""
+}
 
 // WireInput carries the ONLY per-plugin values; everything else comes from the
 // fixed env contract above.
@@ -84,15 +131,18 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 	noop := func() {}
 
 	// Default-off: when the flag is not exactly "true", validate nothing and
-	// leave the plugin boot untouched.
-	if os.Getenv(envDeclarationEnabled) != "true" {
+	// leave the plugin boot untouched. The flag honors its deprecated alias for
+	// the #4232 rename window (canonical IDP_DECLARATION_ENABLED wins).
+	if lookupWithDeprecatedAlias(envDeclarationEnabled, envDeclarationEnabledDeprecated, in.Logger) != "true" {
 		return noop, nil
 	}
 
-	// Trim every string env value (absorbs the old normalizeDeclarationConfig).
-	identityHost := strings.TrimSpace(os.Getenv(envIdentityHost))
-	clientID := strings.TrimSpace(os.Getenv(envM2MClientID))
-	clientSecret := strings.TrimSpace(os.Getenv(envM2MClientSecret))
+	// Resolve every value through the canonical-wins / deprecated-alias helper
+	// (which also trims — absorbing the old normalizeDeclarationConfig). Only the
+	// four RI/D7 vars carry the IDP_ prefix + alias; the auth-minter vars do not.
+	identityHost := lookupWithDeprecatedAlias(envIdentityHost, envIdentityHostDeprecated, in.Logger)
+	clientID := lookupWithDeprecatedAlias(envM2MClientID, envM2MClientIDDeprecated, in.Logger)
+	clientSecret := lookupWithDeprecatedAlias(envM2MClientSecret, envM2MClientSecretDeprecated, in.Logger)
 	authHost := strings.TrimSpace(os.Getenv(envAuthHost))
 	authEnabled := os.Getenv(envAuthEnabled) == "true"
 
