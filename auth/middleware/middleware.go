@@ -352,7 +352,21 @@ func (auth *AuthClient) mustRefuse() bool {
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
 	return func(c fiber.Ctx) error {
-		ctx := tracing.ExtractHTTPContext(c.Context(), c)
+		// Inherit the ambient request context instead of extracting inbound trace
+		// context here. Whether a caller-supplied traceparent is honored is the
+		// APPLICATION's decision — a caller that can set the header can otherwise
+		// choose this service's trace ID and force its sampling decision, which is
+		// why lib-observability gates it behind
+		// tracing.TelemetryConfig.TrustInboundTraceContext (default false) from
+		// v2.1.2 on. lib-auth cannot see that setting, so extracting on its own
+		// overrides the deployment's choice: the app's server span stays a local
+		// root while this span re-parents onto the caller's trace, detaching auth
+		// from the request it is authorizing. Self-extraction also REPLACES the
+		// context's baggage with the inbound header — propagation.Baggage.Extract
+		// does not merge — discarding baggage the application seeded. Inheriting is
+		// correct under both postures: an app that does trust the inbound trace has
+		// already parented its server span to it, so this span joins for free.
+		ctx := c.Context()
 
 		_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
