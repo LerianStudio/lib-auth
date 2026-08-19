@@ -82,9 +82,12 @@ func TestWireFromEnv_MissingRequired(t *testing.T) {
 		blankVar string
 		wantName string
 	}{
-		"missing identity host": {"PLUGIN_IDENTITY_HOST", "PLUGIN_IDENTITY_HOST"},
-		"missing client id":     {"M2M_CLIENT_ID", "M2M_CLIENT_ID"},
-		"missing client secret": {"M2M_CLIENT_SECRET", "M2M_CLIENT_SECRET"},
+		// setWireEnv seeds the deprecated aliases; blanking the alias leaves the
+		// (unset) canonical value empty too, so validation fires and names the
+		// canonical IDP_ var — the post-#4232 error contract.
+		"missing identity host": {"PLUGIN_IDENTITY_HOST", "IDP_HOST"},
+		"missing client id":     {"M2M_CLIENT_ID", "IDP_M2M_CLIENT_ID"},
+		"missing client secret": {"M2M_CLIENT_SECRET", "IDP_M2M_CLIENT_SECRET"},
 	}
 
 	for name, tc := range cases {
@@ -238,4 +241,192 @@ func TestWireFromEnv_HappyPath_IdentityUnreachable(t *testing.T) {
 	require.NotNil(t, stop)
 
 	assert.NotPanics(t, func() { stop() })
+}
+
+// recordingLogger is a minimal liblog.Logger spy that records the messages
+// emitted at LevelWarn, so a test can assert the deprecated-alias warning fires
+// exactly once and never carries a secret value.
+type recordingLogger struct {
+	mu    sync.Mutex
+	warns []string
+}
+
+func (l *recordingLogger) Log(_ context.Context, level liblog.Level, msg string, _ ...liblog.Field) {
+	if level != liblog.LevelWarn {
+		return
+	}
+
+	l.mu.Lock()
+	l.warns = append(l.warns, msg)
+	l.mu.Unlock()
+}
+
+func (l *recordingLogger) With(_ ...liblog.Field) liblog.Logger { return l }
+func (l *recordingLogger) WithGroup(_ string) liblog.Logger     { return l }
+func (l *recordingLogger) Enabled(_ liblog.Level) bool          { return true }
+func (l *recordingLogger) Sync(_ context.Context) error         { return nil }
+
+func (l *recordingLogger) warnCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return len(l.warns)
+}
+
+// TestLookupWithDeprecatedAlias exercises the canonical-wins / deprecated-fallback
+// resolver directly: canonical set (regardless of the alias) wins silently; only
+// the alias set returns its TRIMMED value and warns exactly once (naming both
+// vars, never a value); neither set returns "".
+func TestLookupWithDeprecatedAlias(t *testing.T) {
+	const (
+		canonicalKey  = "IDP_TEST_CANONICAL"
+		deprecatedKey = "TEST_DEPRECATED"
+	)
+
+	cases := map[string]struct {
+		canonical  string
+		deprecated string
+		want       string
+		wantWarns  int
+	}{
+		"canonical wins over alias":  {canonical: "  canon  ", deprecated: "legacy", want: "canon", wantWarns: 0},
+		"canonical only":             {canonical: "canon", deprecated: "", want: "canon", wantWarns: 0},
+		"alias only warns once":      {canonical: "", deprecated: "  legacy  ", want: "legacy", wantWarns: 1},
+		"canonical blank falls back": {canonical: "   ", deprecated: "legacy", want: "legacy", wantWarns: 1},
+		"neither set":                {canonical: "", deprecated: "", want: "", wantWarns: 0},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(canonicalKey, tc.canonical)
+			t.Setenv(deprecatedKey, tc.deprecated)
+
+			rec := &recordingLogger{}
+			got := lookupWithDeprecatedAlias(canonicalKey, deprecatedKey, rec)
+
+			assert.Equal(t, tc.want, got, "resolved value")
+			assert.Equal(t, tc.wantWarns, rec.warnCount(), "warn count")
+
+			for _, msg := range rec.warns {
+				assert.Contains(t, msg, deprecatedKey, "warn must name the deprecated var")
+				assert.Contains(t, msg, canonicalKey, "warn must name the canonical var")
+				assert.NotContains(t, msg, "legacy", "warn must NEVER log the value")
+			}
+		})
+	}
+}
+
+// TestLookupWithDeprecatedAlias_NilLogger asserts the resolver tolerates a nil
+// logger on the deprecated-alias path (it must resolve the value, not nil-panic).
+func TestLookupWithDeprecatedAlias_NilLogger(t *testing.T) {
+	t.Setenv("IDP_TEST_CANONICAL", "")
+	t.Setenv("TEST_DEPRECATED", "legacy")
+
+	var got string
+	assert.NotPanics(t, func() {
+		got = lookupWithDeprecatedAlias("IDP_TEST_CANONICAL", "TEST_DEPRECATED", nil)
+	})
+	assert.Equal(t, "legacy", got)
+}
+
+// setWireEnvCanonical seeds ONLY the canonical IDP_ contract (no deprecated
+// aliases), proving WireFromEnv reads the new names.
+func setWireEnvCanonical(t *testing.T, identityHost, authHost string, authEnabled bool) {
+	t.Helper()
+
+	t.Setenv("IDP_DECLARATION_ENABLED", "true")
+	t.Setenv("IDP_HOST", identityHost)
+	t.Setenv("IDP_M2M_CLIENT_ID", testClientID)
+	t.Setenv("IDP_M2M_CLIENT_SECRET", testClientSecret)
+	t.Setenv("PLUGIN_AUTH_HOST", authHost)
+
+	if authEnabled {
+		t.Setenv("PLUGIN_AUTH_ENABLED", "true")
+	} else {
+		t.Setenv("PLUGIN_AUTH_ENABLED", "false")
+	}
+}
+
+// TestWireFromEnv_CanonicalNames asserts the canonical IDP_ contract drives the
+// full wiring end-to-end (a background PUT is attempted against identity).
+func TestWireFromEnv_CanonicalNames(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(identity.Close)
+
+	setWireEnvCanonical(t, identity.URL, auth.URL, true)
+
+	stop, err := WireFromEnv(context.Background(), wireInput())
+	require.NoError(t, err)
+	require.NotNil(t, stop)
+	t.Cleanup(stop)
+
+	select {
+	case <-identity.puts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a background declaration PUT from the canonical IDP_ contract")
+	}
+}
+
+// TestWireFromEnv_CanonicalWinsOverDeprecated asserts that when BOTH the canonical
+// and the deprecated identity host are set, the canonical IDP_HOST wins: the PUT
+// lands on the canonical identity server, and the deprecated one is never hit.
+func TestWireFromEnv_CanonicalWinsOverDeprecated(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	canonical := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(canonical.Close)
+
+	deprecated := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(deprecated.Close)
+
+	setWireEnvCanonical(t, canonical.URL, auth.URL, true)
+	// Also set the deprecated identity host to a DIFFERENT server.
+	t.Setenv("PLUGIN_IDENTITY_HOST", deprecated.URL)
+
+	stop, err := WireFromEnv(context.Background(), wireInput())
+	require.NoError(t, err)
+	require.NotNil(t, stop)
+	t.Cleanup(stop)
+
+	select {
+	case <-canonical.puts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the PUT on the CANONICAL identity host")
+	}
+
+	select {
+	case <-deprecated.puts:
+		t.Fatal("the deprecated identity host must NOT be used when canonical is set")
+	case <-time.After(200 * time.Millisecond):
+		// expected: no PUT on the deprecated server.
+	}
+}
+
+// TestWireFromEnv_DeprecatedAliasesStillWork asserts the one-release compat window:
+// with ONLY the deprecated aliases set (no IDP_ names), WireFromEnv still wires up
+// and attempts a background PUT.
+func TestWireFromEnv_DeprecatedAliasesStillWork(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(identity.Close)
+
+	// Deprecated names only (this is exactly what setWireEnv seeds).
+	setWireEnv(t, identity.URL, auth.URL, true)
+
+	stop, err := WireFromEnv(context.Background(), wireInput())
+	require.NoError(t, err)
+	require.NotNil(t, stop)
+	t.Cleanup(stop)
+
+	select {
+	case <-identity.puts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a background declaration PUT from the deprecated-alias contract")
+	}
 }
