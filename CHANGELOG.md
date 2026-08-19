@@ -1,3 +1,10 @@
+## [3.4.0-beta.6](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.5...v3.4.0-beta.6) (2026-08-19)
+
+
+### Features
+
+* **declaration:** namespace RI/D7 env contract under IDP_ prefix ([#4232](https://github.com/LerianStudio/lib-auth/issues/4232)) ([3e1cdf7](https://github.com/LerianStudio/lib-auth/commit/3e1cdf772a6820bcaada0d099b326de2690f21d4))
+
 ## [3.4.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.4...v3.4.0-beta.5) (2026-08-18)
 
 
