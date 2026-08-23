@@ -14,9 +14,10 @@ import (
 
 // Minimum trusted-proxy prefix lengths. Trusting a maximally-permissive range
 // (0.0.0.0/0, ::/0) makes EVERY hop a trusted proxy, so the walk below discards
-// the whole chain and no caller IP is ever attributable — every IP-policy
-// request then denies. That can only be a misconfiguration, so such a range is
-// dropped at construction (loudly) instead of silently disabling IP policy. The
+// the whole chain and no caller IP is ever attributable — IP policy can then
+// never be applied to a real caller again. That can only be a misconfiguration,
+// so such a range is dropped at construction (loudly) instead of silently
+// disabling IP policy. The
 // thresholds allow realistic proxy subnets (a /8 corp range, a /48 IPv6 site)
 // while rejecting the catch-all end of the spectrum. Mirrors
 // plugin-access-manager's pkg/nettrust.
@@ -31,6 +32,13 @@ const (
 	// that block; the bits past it are the IPv4 prefix length.
 	v4MappedPrefixBits = 96
 )
+
+// exampleIPv4Entry is the entry diagnostics point at when they have no address
+// of the operator's own to build a correction from. It is a constant rather
+// than a literal repeated per message so there is one thing for a test to run
+// through acceptTrustedProxy — a hardcoded example is exactly the kind of
+// suggestion that goes stale silently when a floor moves.
+const exampleIPv4Entry = "10.0.0.0/8"
 
 // trustedProxiesEnv is the platform-wide variable naming the proxy CIDRs whose
 // forwarded hop may be believed. The SAME name is already read by
@@ -53,11 +61,12 @@ const forwardedHeader = fiber.HeaderXForwardedFor
 //
 // It NEVER fails the boot: there is no Fatal, no panic and no error return
 // anywhere on this path. Absent, empty or entirely-unusable configuration
-// leaves the service running with IP policy inert, which the access manager
-// already absorbs. What it does instead is make that degradation observable —
-// ONE log line, at construction, naming both the cause and the consequence, so
-// an operator learns it from the boot log rather than from a 403. It is not
-// logged per request: the value is read once here and cached on the client.
+// leaves the service running and forwarding no address, which the authorization
+// service handles under its own policy rather than erroring. What this function
+// does instead is make that degradation observable — ONE log line, at
+// construction, naming both the cause and the consequence, so an operator learns
+// it from the boot log rather than from a surprise verdict in production. It is
+// not logged per request: the value is read once here and cached on the client.
 func loadTrustedProxies(logger log.Logger) []netip.Prefix {
 	raw := os.Getenv(trustedProxiesEnv)
 
@@ -74,7 +83,7 @@ func loadTrustedProxies(logger log.Logger) []netip.Prefix {
 	}
 
 	logErrorf(context.Background(), logger,
-		"%s; client IP will not be forwarded and the per-tenant IP allowlist will not enforce", cause)
+		"%s; client IP will not be forwarded and the per-tenant IP allowlist has nothing to match the caller against", cause)
 
 	return nil
 }
@@ -106,32 +115,14 @@ func parseTrustedProxies(raw string, logger log.Logger) []netip.Prefix {
 			continue
 		}
 
-		prefix, err := netip.ParsePrefix(entry)
-		if err != nil {
-			logErrorf(context.Background(), logger,
-				"invalid %s entry %q, dropped (%s): %v", trustedProxiesEnv, entry, describeParseFailure(entry), err)
-
-			continue
-		}
-
-		prefix, ok := rebaseMappedPrefix(prefix)
+		prefix, ok := acceptTrustedProxy(entry)
 		if !ok {
-			logErrorf(context.Background(), logger,
-				"invalid %s entry %q, dropped (an IPv4-mapped address only denotes an IPv4 range from /%d onwards; write the range in IPv4 form, e.g. 10.0.0.0/8)",
-				trustedProxiesEnv, entry, v4MappedPrefixBits)
+			logRejectedEntry(logger, entry)
 
 			continue
 		}
 
-		if minBits := minPrefixBits(prefix); prefix.Bits() < minBits {
-			logErrorf(context.Background(), logger,
-				"%s entry %q is too broad (it covers %s, and a trusted-proxy range must be at least /%d), dropped: trusting it would discard every hop and leave no attributable caller IP",
-				trustedProxiesEnv, entry, prefix.Masked(), minBits)
-
-			continue
-		}
-
-		prefixes = append(prefixes, prefix.Masked())
+		prefixes = append(prefixes, prefix)
 	}
 
 	if len(prefixes) == 0 {
@@ -139,6 +130,79 @@ func parseTrustedProxies(raw string, logger log.Logger) []netip.Prefix {
 	}
 
 	return prefixes
+}
+
+// acceptTrustedProxy is THE acceptance path: everything an entry must survive to
+// become a trusted prefix — parsing, IPv4-mapped rebasing and the breadth floor
+// — and nothing else. It returns the prefix in the exact form the list stores.
+//
+// It is a separate function from the loop above for one reason: a diagnostic
+// that suggests a correction has to put that suggestion through the SAME
+// checks the operator's retyped entry would face, and it cannot do so by
+// calling parseTrustedProxies (which logs, and whose logging is what would need
+// checking). Everything acceptance-related lives here, so "what the parser
+// accepts" and "what a suggestion is checked against" cannot drift apart —
+// there is only one of them.
+//
+// It logs nothing and explains nothing. That silence is what makes it safe to
+// call from inside a diagnostic: validating a suggestion can never itself
+// produce a suggestion needing validation.
+func acceptTrustedProxy(entry string) (netip.Prefix, bool) {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(entry))
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+
+	prefix, ok := rebaseMappedPrefix(prefix)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+
+	if prefix.Bits() < minPrefixBits(prefix.Addr()) {
+		return netip.Prefix{}, false
+	}
+
+	return prefix.Masked(), true
+}
+
+// logRejectedEntry emits the one ERROR line for an entry acceptTrustedProxy
+// refused, naming the rule that refused it. It re-walks the same checks in the
+// same order purely to explain them — the decision was already made — which is
+// the same shape describeParseFailure uses against netip's own parser.
+//
+// The final branch names the breadth floor, so it asserts the floor is what
+// actually fired rather than assuming it. If acceptTrustedProxy ever grows a
+// fourth rule, an entry refused by that rule degrades to a vague line instead
+// of being told, confidently, to fix a width that was never the problem.
+func logRejectedEntry(logger log.Logger, entry string) {
+	ctx := context.Background()
+
+	prefix, err := netip.ParsePrefix(entry)
+	if err != nil {
+		logErrorf(ctx, logger,
+			"invalid %s entry %q, dropped (%s): %v", trustedProxiesEnv, entry, describeParseFailure(entry), err)
+
+		return
+	}
+
+	rebased, ok := rebaseMappedPrefix(prefix)
+	if !ok {
+		logErrorf(ctx, logger,
+			"invalid %s entry %q, dropped (an IPv4-mapped address only denotes an IPv4 range from /%d onwards; write the range in IPv4 form, e.g. %s)",
+			trustedProxiesEnv, entry, v4MappedPrefixBits, exampleIPv4Entry)
+
+		return
+	}
+
+	if minBits := minPrefixBits(rebased.Addr()); rebased.Bits() < minBits {
+		logErrorf(ctx, logger,
+			"%s entry %q is too broad (it covers %s, and a trusted-proxy range must be at least /%d), dropped: trusting it would discard every hop and leave no attributable caller IP",
+			trustedProxiesEnv, entry, rebased.Masked(), minBits)
+
+		return
+	}
+
+	logErrorf(ctx, logger, "invalid %s entry %q, dropped", trustedProxiesEnv, entry)
 }
 
 // describeParseFailure names the rule that rejected entry, phrased as the fix it
@@ -161,11 +225,12 @@ func describeParseFailure(entry string) string {
 
 		switch {
 		case err != nil:
-			return "it is not an IP address at all; write an address and a prefix length, e.g. 10.0.0.0/8"
+			return "it is not an IP address at all; write an address and a prefix length, e.g. " + exampleIPv4Entry
 		case addr.Zone() != "":
 			return describeBareZone(addr)
 		default:
-			return fmt.Sprintf("a bare address is not a range; add a prefix length, e.g. %s/%d", addr, addr.BitLen())
+			return "a bare address is not a range; " +
+				suggestEntry("add a prefix length, e.g. %s", addr, addr.BitLen())
 		}
 	}
 
@@ -213,21 +278,87 @@ func readPrefixLength(bits string) (int, bool) {
 	return length, true
 }
 
+// suggestEntry is the ONE place a diagnostic turns an address and a prefix
+// length into an entry it tells the operator to write. offer is the clause the
+// entry is rendered into and must carry exactly one %s.
+//
+// It emits the entry only if acceptTrustedProxy accepts it — the same path the
+// retyped entry would take in parseTrustedProxies, so a suggestion is checked
+// against the rules that will actually judge it rather than against the one
+// rule the message happens to be about. Every previous round of this defect had
+// the same shape: a message fixed the rule in front of it and printed a value
+// the NEXT rule drops, sending the operator from one rejection to another.
+//
+// When the entry is refused, refuseSuggestion replaces the whole offer: naming
+// a value the library will not take is worse than naming none, and the caller's
+// lead-in prose ("keeping the length you gave") would be a lie about a length
+// that cannot be kept.
+//
+// Nothing on this path logs, and nothing on it re-enters the diagnostics, so a
+// suggestion can never need a suggestion of its own.
+func suggestEntry(offer string, addr netip.Addr, bits int) string {
+	entry := fmt.Sprintf("%s/%d", addr, bits)
+	if _, ok := acceptTrustedProxy(entry); ok {
+		return fmt.Sprintf(offer, entry)
+	}
+
+	return refuseSuggestion(addr, bits)
+}
+
+// refuseSuggestion explains why the entry the operator's own address and length
+// would form is not one the library takes, and names one that is.
+//
+// It says which rule refuses it, in the rule's own terms — the breadth floor
+// that applies AFTER any IPv4-mapped rebasing, because that is the floor that
+// governs the entry even when the length written is an IPv6 one (a mapped /100
+// is an IPv4 /4). It deliberately does NOT print the refused entry: the whole
+// point of the check above is that this value must not reach the operator as
+// something to type.
+//
+// The example is built from the operator's own address masked to that floor,
+// so it is the closest accepted range to what they asked for rather than a
+// literal from somewhere else. It is put through acceptTrustedProxy too — it
+// cannot fail by construction, and checking anyway is what keeps "no diagnostic
+// prints a refused entry" true without depending on that reasoning staying
+// true.
+func refuseSuggestion(addr netip.Addr, bits int) string {
+	base := addr.Unmap().WithZone("")
+	floor := minPrefixBits(base)
+
+	reason := fmt.Sprintf("a length of /%d is below the minimum for a trusted-proxy range (/%d)", bits, floor)
+
+	switch {
+	case addr.Is4In6() && bits < v4MappedPrefixBits:
+		reason = fmt.Sprintf("a length of /%d denotes no IPv4 range at all (on an IPv4-mapped address a prefix only denotes one from /%d onwards)",
+			bits, v4MappedPrefixBits)
+	case addr.Is4In6():
+		reason = fmt.Sprintf("a length of /%d denotes an IPv4 /%d, which is below the minimum for a trusted-proxy range (/%d)",
+			bits, bits-v4MappedPrefixBits, floor)
+	}
+
+	example := netip.PrefixFrom(base, floor).Masked()
+	if _, ok := acceptTrustedProxy(example.String()); !ok {
+		return reason + "; write the range on the unzoned address with an accepted length"
+	}
+
+	return fmt.Sprintf("%s; write the range on the unzoned address with an accepted length (%s)", reason, example)
+}
+
 // describeBareZone reports a zone on an entry that carried no prefix length at
 // all (fe80::1%eth0), which a prefix may never carry: a zone names one host's
 // link, so it cannot describe a range of proxies.
 //
-// The correction it prints has to PARSE. Naming the unzoned address alone does
-// not: dropping the zone leaves fe80::1, and an operator who types what the line
-// told them to type lands on the next rejection ("no '/'"). So the suggestion
-// carries a length, and the length is the address's own bit count — what a
-// single address means as a range, and the only length that can be supplied here
-// without inventing a wider one than was asked for.
+// The correction it prints has to PARSE, and then survive every other rule. Two
+// things it could plausibly print do not: the unzoned address alone lands on
+// "no '/'", and a length the library refuses lands on the breadth floor. So the
+// entry goes through suggestEntry, which supplies the address's own bit count —
+// what a single address means as a range, and the only length that can be
+// supplied here without inventing a wider one than was asked for.
 func describeBareZone(addr netip.Addr) string {
 	unzoned := addr.WithZone("")
 
-	return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range; write the range on the unzoned address, with a prefix length (%s/%d)",
-		addr.Zone(), unzoned, unzoned.BitLen())
+	return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range; %s", addr.Zone(),
+		suggestEntry("write the range on the unzoned address, with a prefix length (%s)", unzoned, unzoned.BitLen()))
 }
 
 // describeZonedPrefix reports a zone sitting in the address half of a prefix the
@@ -243,17 +374,24 @@ func describeBareZone(addr netip.Addr) string {
 // defect this whole path exists to avoid. When that happens the line says the
 // length is unusable too, and falls back to the address's own bit count so the
 // suggestion still parses.
+//
+// "Usable" here means readable and in range for the family; whether the length
+// is one the library will TAKE is a wider question, and not one this function
+// answers. A readable, in-range /0 is preserved and handed to suggestEntry,
+// which refuses it against the breadth floor and says so. Keeping that
+// judgement in one place is the point: this function knows about zones.
 func describeZonedPrefix(addr netip.Addr, bits string) string {
 	unzoned := addr.WithZone("")
 
 	length, readable := readPrefixLength(bits)
 	if !readable || length > unzoned.BitLen() {
-		return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range, and the prefix length after the '/' (%q) is not usable either; write the range on the unzoned address (%s/%d)",
-			addr.Zone(), bits, unzoned, unzoned.BitLen())
+		return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range, and the prefix length after the '/' (%q) is not usable either; %s",
+			addr.Zone(), bits,
+			suggestEntry("write the range on the unzoned address (%s)", unzoned, unzoned.BitLen()))
 	}
 
-	return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range; write the range on the unzoned address, keeping the length you gave (%s/%d)",
-		addr.Zone(), unzoned, length)
+	return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range; %s", addr.Zone(),
+		suggestEntry("write the range on the unzoned address, keeping the length you gave (%s)", unzoned, length))
 }
 
 // addrFamily returns 4 or 6 for use in operator-facing prose. An IPv4-mapped
@@ -303,11 +441,13 @@ func rebaseMappedPrefix(p netip.Prefix) (netip.Prefix, bool) {
 	return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-v4MappedPrefixBits), true
 }
 
-// minPrefixBits returns the narrowest prefix length accepted for the address
-// family of p. It is applied to the rebased prefix, so a range written in
-// IPv4-mapped form is measured against the IPv4 floor that governs it.
-func minPrefixBits(p netip.Prefix) int {
-	if p.Addr().Is4() {
+// minPrefixBits returns the narrowest prefix length accepted for addr's family.
+// It is asked about the REBASED address, so a range written in IPv4-mapped form
+// is measured against the IPv4 floor that governs it — and refuseSuggestion asks
+// the same function, so the floor a diagnostic names is the floor that refused
+// the entry rather than a second copy of the rule.
+func minPrefixBits(addr netip.Addr) int {
+	if addr.Is4() {
 		return minIPv4PrefixBits
 	}
 
@@ -328,8 +468,14 @@ func minPrefixBits(p netip.Prefix) int {
 // is a deliberate product decision, not an oversight: falling back to the socket
 // peer would forward the ingress address, and a tenant that happens to have the
 // ingress CIDR in its allow list would get a FALSE ALLOW for every caller on
-// earth. An empty value never matches by accident — the auth service treats an
-// absent clientIp as deny-missing-ip.
+// earth. An empty value can never match an allow list by accident.
+//
+// What it CANNOT do is decide the request. Omitting the field hands that to the
+// authorization service, whose policy for a caller it cannot place is
+// conditional — neither a guaranteed allow nor a guaranteed deny. This library
+// deliberately does not restate those conditions: they belong to a service that
+// can change them without a release here, and a copy of them would go stale
+// silently. Read an empty result as "no address to match on", nothing more.
 func (auth *AuthClient) resolveClientIP(c fiber.Ctx) string {
 	if len(auth.trustedProxies) == 0 {
 		return ""

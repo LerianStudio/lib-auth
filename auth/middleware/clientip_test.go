@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -56,8 +57,8 @@ func prefixStrings(prefixes []netip.Prefix) []string {
 // fatal — NewAuthClient has no error return) and a bare address is REJECTED
 // rather than silently widened to a /32 or /128. Overly broad ranges are also
 // rejected: trusting them makes every hop trusted, which resolves to an empty
-// client IP and denies every IP-policy request — a config that can only be a
-// mistake.
+// client IP and leaves IP policy with nothing to match any caller against — a
+// config that can only be a mistake.
 func TestParseTrustedProxies(t *testing.T) {
 	t.Parallel()
 
@@ -344,6 +345,39 @@ func TestParseTrustedProxies_DroppedEntriesNameTheirReason(t *testing.T) {
 			// rebasing the parser then applies to it (/104 becomes the IPv4 /8).
 			// A plain IPv4 address can never carry a zone — netip stops at the '.'
 			// before it ever sees the '%' — so this is the whole of the v4 story.
+			// Keeping the operator's length is only right while the parser would
+			// take it. /0 is readable and in range for the family, so the zone path
+			// used to preserve it and print fe80::1/0 — an entry the breadth floor
+			// then drops for a reason the line never mentioned. The line now names
+			// the floor that refuses it and offers the nearest range that passes.
+			name:           "zone_with_a_length_below_the_breadth_floor_is_not_offered_back",
+			raw:            "fe80::1%eth0/0",
+			want:           `an IPv6 zone ("eth0") cannot appear in a range; a length of /0 is below the minimum for a trusted-proxy range (/48); write the range on the unzoned address with an accepted length (fe80::/48)`,
+			notWant:        "fe80::1/0",
+			wantCorrection: "fe80::/48",
+		},
+		{
+			// Same defect on a mapped address, where the floor that refuses the
+			// length is NOT the one the length is written in: /100 is an IPv6
+			// length, but after rebasing it is an IPv4 /4 and the IPv4 floor is what
+			// drops it. The line has to name /8, not /48, or it sends the operator
+			// to widen a length that was already too wide.
+			name:           "v4_mapped_zone_below_the_ipv4_floor_names_the_ipv4_floor",
+			raw:            "::ffff:10.0.0.1%eth0/100",
+			want:           `an IPv6 zone ("eth0") cannot appear in a range; a length of /100 denotes an IPv4 /4, which is below the minimum for a trusted-proxy range (/8); write the range on the unzoned address with an accepted length (10.0.0.0/8)`,
+			notWant:        "::ffff:10.0.0.1/100",
+			wantCorrection: "10.0.0.0/8",
+		},
+		{
+			// A mapped address whose length reaches past the mapped block denotes no
+			// IPv4 range at all, so "too broad" would be the wrong rule to name.
+			name:           "v4_mapped_zone_shorter_than_the_mapping_names_the_mapping",
+			raw:            "::ffff:10.0.0.1%eth0/95",
+			want:           `a length of /95 denotes no IPv4 range at all (on an IPv4-mapped address a prefix only denotes one from /96 onwards); write the range on the unzoned address with an accepted length (10.0.0.0/8)`,
+			notWant:        "below the minimum",
+			wantCorrection: "10.0.0.0/8",
+		},
+		{
 			name:           "v4_mapped_zone_keeps_its_128_bit_length",
 			raw:            "::ffff:1.2.3.4%eth0/104",
 			want:           `an IPv6 zone ("eth0") cannot appear in a range; write the range on the unzoned address, keeping the length you gave (::ffff:1.2.3.4/104)`,
@@ -393,17 +427,208 @@ func TestParseTrustedProxies_DroppedEntriesNameTheirReason(t *testing.T) {
 	}
 }
 
+// entryShapedToken matches text shaped like an address followed by a prefix
+// length — the shape of something an operator can paste into TRUSTED_PROXIES.
+// It requires at least one address character IMMEDIATELY before the '/', so the
+// bare widths diagnostics quote ("at least /48", "the maximum is /32", "from
+// /96 onwards") are not mistaken for entries.
+var entryShapedToken = regexp.MustCompile(`[0-9A-Fa-f:.]+/[0-9]+`)
+
+// echoesTheEntry reports whether token is a diagnostic quoting the operator's
+// own entry back at them rather than telling them to write something. Three
+// forms count as an echo: any part of the entry as written (which covers the
+// %q of the entry and netip's error, which embeds it), the range the entry
+// denotes, and the range it denotes after IPv4-mapped rebasing — the too-broad
+// line names that one so the operator sees the width they actually asked for.
+//
+// Everything else printed in entry shape is the library telling the operator
+// what to write, and has to be something the library will take.
+func echoesTheEntry(entry, token string) bool {
+	if strings.Contains(entry, token) {
+		return true
+	}
+
+	prefix, err := netip.ParsePrefix(entry)
+	if err != nil {
+		return false
+	}
+
+	if token == prefix.Masked().String() {
+		return true
+	}
+
+	rebased, ok := rebaseMappedPrefix(prefix)
+
+	return ok && token == rebased.Masked().String()
+}
+
+// TestSuggestEntry_NeverOffersWhatTheParserRefuses pins the property at the
+// choke point itself, independently of any input that reaches it: for EVERY
+// address and EVERY length suggestEntry can be handed, the text it returns
+// either names an entry acceptTrustedProxy accepts, or names no entry at all.
+//
+// This is the structural half of the guarantee. A table of malformed inputs can
+// only prove the rows somebody thought to write — which is exactly how a
+// suggested /0 and a suggested mapped /100 got through three rounds of fixes.
+// Enumerating the whole (address, length) domain removes the need to have
+// thought of them.
+func TestSuggestEntry_NeverOffersWhatTheParserRefuses(t *testing.T) {
+	t.Parallel()
+
+	addresses := []string{
+		"10.0.0.1", "0.0.0.0", "255.255.255.255", "203.0.113.7",
+		"fe80::1", "::", "::1", "2001:db8::", "2001:db8::1",
+		"::ffff:10.0.0.1", "::ffff:0.0.0.0", "::ffff:255.255.255.255",
+	}
+
+	offered := 0
+
+	for _, address := range addresses {
+		addr := netip.MustParseAddr(address)
+
+		for bits := 0; bits <= addr.BitLen(); bits++ {
+			message := suggestEntry("write this instead (%s)", addr, bits)
+
+			for _, token := range entryShapedToken.FindAllString(message, -1) {
+				offered++
+
+				_, ok := acceptTrustedProxy(token)
+				assert.True(t, ok,
+					"suggestEntry(%s, /%d) offers %q, which the parser refuses: %s", address, bits, token, message)
+			}
+		}
+	}
+
+	// Every one of the 1164 (address, length) pairs above names some entry —
+	// either the one asked for, or the accepted range refuseSuggestion falls
+	// back to — so a change that silently stopped suggesting anything cannot
+	// pass this test by leaving nothing to check. A floor rather than an
+	// equality: adding an address to the list must not turn the test red.
+	assert.GreaterOrEqual(t, offered, 1164,
+		"every (address, length) pair must still name an entry to write; suggesting nothing is not a fix")
+}
+
+// TestParseTrustedProxies_NoDiagnosticSuggestsARejectedEntry is the guarantee
+// the choke point cannot give on its own: it reads the EMITTED TEXT, so it
+// holds for a diagnostic that never calls suggestEntry — one that hardcodes an
+// example, or formats its own correction. A future message that tells the
+// operator to write something the parser refuses turns this red regardless of
+// how it was built, as long as some input in the corpus reaches it.
+//
+// The corpus is generated rather than listed — every address form crossed with
+// every zone form crossed with every prefix-length form — because a listed
+// corpus can only contain inputs somebody already knew were interesting, which
+// is the failure mode this test exists to end.
+//
+// It also pins the other direction: an entry the parser ACCEPTS must produce no
+// diagnostic at all. A message about an entry that was kept is as misleading as
+// a correction that is refused.
+func TestParseTrustedProxies_NoDiagnosticSuggestsARejectedEntry(t *testing.T) {
+	t.Parallel()
+
+	offered := map[string]bool{}
+
+	for _, entry := range trustedProxyEntryCorpus() {
+		logger := &recordingLogger{}
+		accepted := parseTrustedProxies(entry, logger)
+
+		logger.mu.Lock()
+		messages := append([]string(nil), logger.messages...)
+		logger.mu.Unlock()
+
+		if len(accepted) > 0 {
+			assert.Empty(t, messages, "entry %q was accepted, so nothing should be complained about", entry)
+
+			continue
+		}
+
+		for _, message := range messages {
+			for _, token := range entryShapedToken.FindAllString(message, -1) {
+				if echoesTheEntry(entry, token) {
+					continue
+				}
+
+				offered[token] = true
+
+				_, ok := acceptTrustedProxy(token)
+				assert.True(t, ok,
+					"the diagnostic for %q tells the operator to write %q, which the parser then refuses:\n%s",
+					entry, token, message)
+			}
+		}
+	}
+
+	// Naming the suggestions the corpus must have reached, rather than counting
+	// them: a count can be satisfied by one branch firing repeatedly, and every
+	// round of this defect was one branch nobody had exercised. Each entry below
+	// is produced by a different diagnostic, so losing any of them means the
+	// scan above went quiet about a path instead of passing on it.
+	for _, reached := range []string{
+		exampleIPv4Entry,      // the address-less example (unparseable token, unrebasable mapping)
+		"10.0.0.1/32",         // bare IPv4 address told to add a length
+		"2001:db8::1/128",     // same rule, IPv6, length taken from the address
+		"fe80::1/128",         // bare zoned address given a length that parses
+		"fe80::1/64",          // zoned prefix whose length is kept
+		"fe80::/48",           // zoned prefix whose length is refused and replaced
+		"::ffff:10.0.0.1/104", // mapped zoned prefix whose length is kept
+	} {
+		assert.True(t, offered[reached],
+			"the corpus never reached the diagnostic that suggests %q, so the scan above proves nothing about it", reached)
+	}
+}
+
+// trustedProxyEntryCorpus crosses address forms with zone forms with
+// prefix-length forms. Every combination is fed through parseTrustedProxies:
+// most are rejected, a few are accepted, and the point is that no row was
+// chosen for being interesting.
+func trustedProxyEntryCorpus() []string {
+	addresses := []string{
+		"10.0.0.1", "10.0.0.0", "10.1.2.3", "0.0.0.0", "203.0.113.7", "255.255.255.255",
+		"fe80::1", "2001:db8::", "2001:db8::1", "::", "::1",
+		"::ffff:10.0.0.1", "::ffff:10.0.0.0", "::ffff:0.0.0.0", "::ffff:203.0.113.7",
+		"::fffe:0:0", "not-an-ip", "10.0.0.300", "1.2.3.4:80", "10.0.0", "",
+	}
+	zones := []string{"", "%eth0", "%1", "%"}
+	lengths := []string{
+		"", "/0", "/1", "/4", "/7", "/8", "/9", "/24", "/32", "/33", "/47", "/48",
+		"/64", "/95", "/96", "/100", "/103", "/104", "/128", "/129", "/999",
+		"/-1", "/08", "/eight", "/", "/ 8",
+	}
+
+	corpus := make([]string, 0, len(addresses)*len(zones)*len(lengths))
+
+	for _, address := range addresses {
+		for _, zone := range zones {
+			for _, length := range lengths {
+				corpus = append(corpus, address+zone+length)
+			}
+		}
+	}
+
+	return corpus
+}
+
+// TestExampleIPv4Entry_IsAccepted pins the one suggestion that is a literal
+// rather than something derived from the operator's own entry. Nothing computes
+// it, so nothing else would notice if a floor moved past it.
+func TestExampleIPv4Entry_IsAccepted(t *testing.T) {
+	t.Parallel()
+
+	_, ok := acceptTrustedProxy(exampleIPv4Entry)
+	assert.True(t, ok, "the example diagnostics point at must be an entry the parser takes")
+}
+
 // TestLoadTrustedProxies_UnsetYieldsNoTrust pins the product decision (Roberto,
 // 2026-08-22): with TRUSTED_PROXIES unset there is NO trusted-proxy list, so the
-// client IP resolves to empty and IP policy denies. It must NOT fall back to the
-// socket peer: the peer is the ingress address, and an operator who happens to
-// have registered the ingress CIDR in a tenant allow list would get a FALSE
-// ALLOW. Empty never matches by accident.
+// client IP resolves to empty and no address is forwarded. It must NOT fall back
+// to the socket peer: the peer is the ingress address, and an operator who
+// happens to have registered the ingress CIDR in a tenant allow list would get a
+// FALSE ALLOW. Empty never matches an allow list by accident.
 func TestLoadTrustedProxies_UnsetYieldsNoTrust(t *testing.T) {
 	t.Setenv("TRUSTED_PROXIES", "")
 
 	assert.Empty(t, loadTrustedProxies(&testLogger{}),
-		"TRUSTED_PROXIES unset must yield no trusted proxies (client IP empty -> deny), never a socket-peer fallback")
+		"TRUSTED_PROXIES unset must yield no trusted proxies (client IP empty, nothing forwarded), never a socket-peer fallback")
 }
 
 // TestLoadTrustedProxies_ReadsEnv proves the platform-wide variable name is the
@@ -437,9 +662,9 @@ func (l *recordingLogger) WithGroup(_ string) log.Logger  { return l }
 func (l *recordingLogger) Enabled(_ log.Level) bool       { return true }
 func (l *recordingLogger) Sync(_ context.Context) error   { return nil }
 
-// degradedLines returns the messages announcing that IP policy is inert. The
-// phrase is the consequence half of the line, which is the part an operator
-// greps for.
+// degradedLines returns the messages announcing that no client IP will be
+// forwarded. The phrase is the consequence half of the line, which is the part
+// an operator greps for.
 func (l *recordingLogger) degradedLines() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -447,7 +672,7 @@ func (l *recordingLogger) degradedLines() []string {
 	var found []string
 
 	for _, msg := range l.messages {
-		if strings.Contains(msg, "IP allowlist will not enforce") {
+		if strings.Contains(msg, "IP allowlist has nothing to match") {
 			found = append(found, msg)
 		}
 	}
@@ -910,7 +1135,8 @@ func TestAuthorize_ClientIP_MalformedForwardedTokenOmitsField(t *testing.T) {
 // TestAuthorize_ClientIP_OmittedWhenTrustedProxiesUnset pins the unset->empty
 // product decision at the wire level: no TRUSTED_PROXIES, no clientIp field —
 // even though a forwarded header is present and Fiber would happily return it.
-// The auth service treats an absent clientIp as deny-missing-ip.
+// What the authorization service then does with a request carrying no address is
+// its own policy, and not something this library asserts.
 func TestAuthorize_ClientIP_OmittedWhenTrustedProxiesUnset(t *testing.T) {
 	t.Parallel()
 
