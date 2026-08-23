@@ -470,12 +470,15 @@ func minPrefixBits(addr netip.Addr) int {
 // ingress CIDR in its allow list would get a FALSE ALLOW for every caller on
 // earth. An empty value can never match an allow list by accident.
 //
-// What it CANNOT do is decide the request. Omitting the field hands that to the
-// authorization service, whose policy for a caller it cannot place is
-// conditional — neither a guaranteed allow nor a guaranteed deny. This library
-// deliberately does not restate those conditions: they belong to a service that
-// can change them without a release here, and a copy of them would go stale
-// silently. Read an empty result as "no address to match on", nothing more.
+// What it CANNOT do is decide the request, and it must not be read as harmless.
+// Omitting the field hands the decision to the authorization service, whose
+// policy for an addressless request is conditional: as of 2026-08-23, a tenant
+// with an active allowlist DENIES unless that service recognises the caller as
+// one of the platform's own. An empty result is therefore a real outcome, not a
+// no-op — see the README's client-IP section, and that service's own
+// IP-allowlist operations documentation, which is the authority. This comment is
+// a copy with a date on it precisely because the rule lives elsewhere and has
+// already moved twice.
 func (auth *AuthClient) resolveClientIP(c fiber.Ctx) string {
 	if len(auth.trustedProxies) == 0 {
 		return ""

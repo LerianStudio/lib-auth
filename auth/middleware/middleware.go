@@ -366,11 +366,12 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 		// With TRUSTED_PROXIES unset the result is EMPTY and no IP is forwarded: an
 		// empty value is omitted from the request body (see checkAuthorization), so
 		// the authorization service decides with no address to match the caller
-		// against. Its policy for that case is conditional — omission is neither a
-		// guaranteed allow nor a guaranteed deny — and this library does not restate
-		// the conditions, which are the other service's to change. Forwarding
-		// nothing is still deliberate: falling back to the socket peer would forward
-		// the ingress address and could produce a false ALLOW.
+		// against. That is not a quiet pass — as of 2026-08-23 a tenant with an
+		// active allowlist DENIES an addressless request unless the caller is one
+		// the service recognises as internal to the platform. The rule is that
+		// service's, and the README's client-IP section carries the dated copy.
+		// Forwarding nothing is still deliberate: falling back to the socket peer
+		// would forward the ingress address and could produce a false ALLOW.
 		clientIP := auth.resolveClientIP(c)
 
 		if authorized, statusCode, err := auth.checkAuthorization(ctx, product, resource, action, accessToken, clientIP); err != nil {
