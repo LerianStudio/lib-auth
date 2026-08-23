@@ -2,8 +2,10 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/LerianStudio/lib-observability/v2/log"
@@ -101,7 +103,7 @@ func parseTrustedProxies(raw string, logger log.Logger) []netip.Prefix {
 		prefix, err := netip.ParsePrefix(entry)
 		if err != nil {
 			logErrorf(context.Background(), logger,
-				"invalid %s entry %q, dropped (a bare address is not a CIDR): %v", trustedProxiesEnv, entry, err)
+				"invalid %s entry %q, dropped (%s): %v", trustedProxiesEnv, entry, describeParseFailure(entry), err)
 
 			continue
 		}
@@ -131,6 +133,79 @@ func parseTrustedProxies(raw string, logger log.Logger) []netip.Prefix {
 	}
 
 	return prefixes
+}
+
+// describeParseFailure names the rule that rejected entry, phrased as the fix it
+// implies. netip.ParsePrefix reports five distinct failures behind one opaque
+// error type, and one of them ("no '/'") covers two entries an operator has to
+// fix in opposite ways: 10.0.0.1 is an address missing its length, while
+// not-an-ip is not an address at all. A single message for all of them tells the
+// operator to add a mask to an entry that already carries one, or to a token
+// that could never carry one.
+//
+// It re-walks the parser's own decisions in the parser's own order, so the
+// branch reached here is the branch that fired there. The final fallback is
+// therefore unreachable in practice and kept only so a future parser change
+// degrades to a vague message rather than a wrong one; the parser's error is
+// appended to the log line either way.
+func describeParseFailure(entry string) string {
+	slash := strings.LastIndexByte(entry, '/')
+	if slash < 0 {
+		addr, err := netip.ParseAddr(entry)
+
+		switch {
+		case err != nil:
+			return "it is not an IP address at all; write an address and a prefix length, e.g. 10.0.0.0/8"
+		case addr.Zone() != "":
+			return describeZone(addr)
+		default:
+			return fmt.Sprintf("a bare address is not a range; add a prefix length, e.g. %s/%d", addr, addr.BitLen())
+		}
+	}
+
+	addr, err := netip.ParseAddr(entry[:slash])
+	if err != nil {
+		return fmt.Sprintf("the address before the '/' (%q) is not an IP address", entry[:slash])
+	}
+
+	if addr.Zone() != "" {
+		return describeZone(addr)
+	}
+
+	// The parser accepts only a plain decimal count of bits: no sign, no leading
+	// zero, no empty string. Anything else never reaches its range check, so it
+	// must not be reported as a range problem.
+	bits := entry[slash+1:]
+
+	length, err := strconv.Atoi(bits)
+	if err != nil || bits == "" || (len(bits) > 1 && (bits[0] < '1' || bits[0] > '9')) {
+		return fmt.Sprintf("the prefix length after the '/' (%q) is not a plain number of bits", bits)
+	}
+
+	if length > addr.BitLen() {
+		return fmt.Sprintf("a prefix length of /%d is out of range for an IPv%d address (the maximum is /%d)",
+			length, addrFamily(addr), addr.BitLen())
+	}
+
+	return "it is not a CIDR range"
+}
+
+// describeZone reports an IPv6 zone, which a prefix may never carry: a zone
+// names one host's link, so it cannot describe a range of proxies.
+func describeZone(addr netip.Addr) string {
+	return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range; write the range on the unzoned address (%s)",
+		addr.Zone(), addr.WithZone(""))
+}
+
+// addrFamily returns 4 or 6 for use in operator-facing prose. An IPv4-mapped
+// address reports 6 on purpose: 128 bits are what its prefix length is measured
+// against, so saying otherwise would contradict the maximum quoted beside it.
+func addrFamily(addr netip.Addr) int {
+	if addr.Is4() {
+		return 4
+	}
+
+	return 6
 }
 
 // rebaseMappedPrefix rewrites a trusted-proxy prefix written in IPv4-mapped

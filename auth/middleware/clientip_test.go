@@ -174,11 +174,19 @@ func prefixStringsOrNil(prefixes []netip.Prefix) []string {
 }
 
 // TestParseTrustedProxies_DroppedEntriesNameTheirReason pins WHICH rule dropped
-// an entry, not merely that it was dropped. The two rules point an operator in
-// opposite directions: "too broad" says the range covers too much, while a
-// v4-mapped address carrying a prefix shorter than the mapping denotes no IPv4
-// range at all and has to be rewritten. Reporting the first for the second sends
-// the operator to narrow a prefix that is not the problem.
+// an entry, not merely that it was dropped. The rules point an operator in
+// different directions: "too broad" says the range covers too much, a v4-mapped
+// address carrying a prefix shorter than the mapping denotes no IPv4 range at
+// all and has to be rewritten, and an entry the parser rejects is wrong in one
+// of several ways that share nothing but the outcome. Reporting one rule's
+// wording for another rule's entry sends the operator to fix what is not broken
+// — to add a mask to 10.0.0.0/99, which already has one.
+//
+// Every case therefore asserts on wording only its own cause produces, and the
+// wording asserted is this library's, never a substring the parser's own error
+// would supply: collapsing these messages into one shared string has to turn the
+// whole table red, or it is checking that a message exists rather than that it
+// is the right one.
 //
 // It is also what keeps the /96 boundary honest. Rebasing a shorter prefix
 // underflows into an invalid prefix, which the length check then discards on its
@@ -205,6 +213,82 @@ func TestParseTrustedProxies_DroppedEntriesNameTheirReason(t *testing.T) {
 			name: "rebased_range_is_reported_in_its_ipv4_form",
 			raw:  "::ffff:10.0.0.0/100",
 			want: "too broad (it covers 0.0.0.0/4, and a trusted-proxy range must be at least /8)",
+		},
+		{
+			// The one entry the missing-length wording is actually about. The
+			// suggestion is the operator's own address with the length that makes it
+			// a range, so the fix can be copied out of the log.
+			name: "bare_ipv4_address_is_told_to_add_a_length",
+			raw:  "10.0.0.1",
+			want: "a bare address is not a range; add a prefix length, e.g. 10.0.0.1/32",
+		},
+		{
+			// Same rule, other family: the suggested length has to follow the
+			// address, not a hardcoded /32.
+			name:    "bare_ipv6_address_is_told_to_add_a_128",
+			raw:     "2001:db8::1",
+			want:    "add a prefix length, e.g. 2001:db8::1/128",
+			notWant: "/32",
+		},
+		{
+			// Shares the parser's "no '/'" with the bare address above and nothing
+			// else: there is no mask to add to a token that is not an address.
+			name:    "token_that_is_not_an_address_is_not_told_to_add_a_length",
+			raw:     "not-an-ip",
+			want:    "it is not an IP address at all",
+			notWant: "add a prefix length",
+		},
+		{
+			// A length IS present, so the entry cannot be missing one; what is wrong
+			// is the half in front of the slash, and the line quotes that half.
+			name:    "unparseable_address_half_is_named_as_the_address",
+			raw:     "not-an-ip/24",
+			want:    `the address before the '/' ("not-an-ip") is not an IP address`,
+			notWant: "add a prefix length",
+		},
+		{
+			name:    "out_of_range_octet_is_named_as_the_address",
+			raw:     "10.0.0.300/24",
+			want:    `the address before the '/' ("10.0.0.300") is not an IP address`,
+			notWant: "add a prefix length",
+		},
+		{
+			// The finding this test was extended for: an operator who wrote /99 was
+			// told to add a mask that is already there.
+			name:    "prefix_length_past_the_family_maximum_names_the_maximum",
+			raw:     "10.0.0.0/99",
+			want:    "a prefix length of /99 is out of range for an IPv4 address (the maximum is /32)",
+			notWant: "add a prefix length",
+		},
+		{
+			name:    "ipv6_prefix_length_past_the_family_maximum_names_the_ipv6_maximum",
+			raw:     "2001:db8::/129",
+			want:    "out of range for an IPv6 address (the maximum is /128)",
+			notWant: "/32",
+		},
+		{
+			// The parser never range-checks a length it cannot read, so this must not
+			// be reported as a range problem either.
+			name:    "unreadable_prefix_length_is_not_reported_as_a_range_problem",
+			raw:     "10.0.0.0/eight",
+			want:    `the prefix length after the '/' ("eight") is not a plain number of bits`,
+			notWant: "out of range",
+		},
+		{
+			// A leading zero is rejected by the parser even though the digits read as
+			// a length a human would accept, so the line has to say the length is
+			// unreadable rather than out of range.
+			name:    "leading_zero_prefix_length_is_reported_as_unreadable",
+			raw:     "10.0.0.0/08",
+			want:    `("08") is not a plain number of bits`,
+			notWant: "out of range",
+		},
+		{
+			// A zone names one host's link. Nothing about it is a length problem.
+			name:    "ipv6_zone_is_named_as_the_zone",
+			raw:     "fe80::1%eth0/64",
+			want:    `an IPv6 zone ("eth0") cannot appear in a range; write the range on the unzoned address (fe80::1)`,
+			notWant: "add a prefix length",
 		},
 	}
 
