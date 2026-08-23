@@ -23,6 +23,11 @@ const (
 	minIPv4PrefixBits = 8
 	// minIPv6PrefixBits rejects IPv6 prefixes broader than /48 (i.e. /0-/47).
 	minIPv6PrefixBits = 48
+	// v4MappedPrefixBits is the length of the IPv4-mapped IPv6 block,
+	// ::ffff:0:0/96. A prefix written on a mapped address denotes an IPv4 range
+	// only if it is at least this long, i.e. only if the whole prefix lies inside
+	// that block; the bits past it are the IPv4 prefix length.
+	v4MappedPrefixBits = 96
 )
 
 // trustedProxiesEnv is the platform-wide variable naming the proxy CIDRs whose
@@ -76,7 +81,9 @@ func loadTrustedProxies(logger log.Logger) []netip.Prefix {
 // A bare address ("10.0.0.1") is rejected, not silently widened to a host
 // prefix: an operator who meant a range must say so. Entries are stored masked
 // so an unmasked prefix ("10.1.2.3/8") matches the same set as its canonical
-// form.
+// form, and stored in the same address form the hop walk compares against — see
+// rebaseMappedPrefix for why a range written in IPv4-mapped IPv6 form is
+// rewritten rather than kept as written.
 func parseTrustedProxies(raw string, logger log.Logger) []netip.Prefix {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -99,10 +106,19 @@ func parseTrustedProxies(raw string, logger log.Logger) []netip.Prefix {
 			continue
 		}
 
+		prefix, ok := rebaseMappedPrefix(prefix)
+		if !ok {
+			logErrorf(context.Background(), logger,
+				"invalid %s entry %q, dropped (an IPv4-mapped address only denotes an IPv4 range from /%d onwards; write the range in IPv4 form, e.g. 10.0.0.0/8)",
+				trustedProxiesEnv, entry, v4MappedPrefixBits)
+
+			continue
+		}
+
 		if minBits := minPrefixBits(prefix); prefix.Bits() < minBits {
 			logErrorf(context.Background(), logger,
-				"%s entry %q is too broad (/%d), dropped: trusting it would discard every hop and leave no attributable caller IP; use a prefix of at least /%d",
-				trustedProxiesEnv, entry, prefix.Bits(), minBits)
+				"%s entry %q is too broad (it covers %s, and a trusted-proxy range must be at least /%d), dropped: trusting it would discard every hop and leave no attributable caller IP",
+				trustedProxiesEnv, entry, prefix.Masked(), minBits)
 
 			continue
 		}
@@ -117,8 +133,45 @@ func parseTrustedProxies(raw string, logger log.Logger) []netip.Prefix {
 	return prefixes
 }
 
+// rebaseMappedPrefix rewrites a trusted-proxy prefix written in IPv4-mapped
+// IPv6 form (::ffff:10.0.0.0/104) into the plain IPv4 prefix it denotes
+// (10.0.0.0/8), and reports whether the entry is usable at all.
+//
+// The list has to be held in the same address form the walk compares against.
+// firstUntrustedHop unmaps every hop, and no IPv6 prefix can contain an
+// unmapped IPv4 address, so an entry left in the mapped form would parse, pass
+// every check, be stored — and match nothing. That is worse than a rejected
+// entry: the proxy is then never recognised as one, the walk stops at it, and
+// the proxy's own address is handed on as the caller. The library normalises
+// hops, so it normalises the list the same way.
+//
+// netip has no single call for this. Addr().Unmap() yields the IPv4 address but
+// Bits() still counts the 96 bits of the mapping, so the length is rebased
+// explicitly, and only for a prefix that lies entirely inside the mapped block.
+// Below that boundary the prefix spans addresses outside the mapping and
+// denotes no IPv4 range at all (::ffff:10.0.0.0/95 masks to ::fffe:0:0/95);
+// there is nothing to rebase it to, so it is reported unusable and the caller
+// drops it rather than storing something inert.
+//
+// Rebasing happens BEFORE the minimum-length check on purpose, so the floor is
+// applied to the IPv4 length that actually governs matching and rebasing can
+// never widen what the list trusts: /104 becomes /8 and is accepted, /100
+// becomes /4 and is rejected exactly as a plainly-written 10.0.0.0/4 would be.
+func rebaseMappedPrefix(p netip.Prefix) (netip.Prefix, bool) {
+	if !p.Addr().Is4In6() {
+		return p, true
+	}
+
+	if p.Bits() < v4MappedPrefixBits {
+		return netip.Prefix{}, false
+	}
+
+	return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-v4MappedPrefixBits), true
+}
+
 // minPrefixBits returns the narrowest prefix length accepted for the address
-// family of p.
+// family of p. It is applied to the rebased prefix, so a range written in
+// IPv4-mapped form is measured against the IPv4 floor that governs it.
 func minPrefixBits(p netip.Prefix) int {
 	if p.Addr().Is4() {
 		return minIPv4PrefixBits

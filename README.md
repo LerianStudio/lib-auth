@@ -89,11 +89,14 @@ AUTH_RETRY_MAX=0
 # flowker — NOT to be confused with tracer's unrelated TRUSTED_PROXY_CIDRS.
 #
 # Entries must be CIDRs: a bare address ("10.0.0.1") is rejected, and so is an
-# overly broad range (IPv4 wider than /8, IPv6 wider than /48). An unusable entry
-# is logged at ERROR and dropped; the valid entries still apply. Nothing here
-# ever fails the boot: a missing or entirely unusable value logs ONE ERROR line
-# at startup naming cause and consequence, and the service starts with IP policy
-# inert.
+# overly broad range (IPv4 wider than /8, IPv6 wider than /48). An IPv4 range
+# written in IPv4-mapped IPv6 form ("::ffff:10.0.0.0/104") is rebased to the
+# IPv4 range it denotes ("10.0.0.0/8") and measured against the IPv4 limit; if
+# it cannot be rebased it is rejected, never stored in a form that would match
+# nothing. An unusable entry is logged at ERROR and dropped; the valid entries
+# still apply. Nothing here ever fails the boot: a missing or entirely unusable
+# value logs ONE ERROR line at startup naming cause and consequence, and the
+# service starts with IP policy inert.
 #
 # LEAVING IT UNSET DISABLES IP-BASED AUTHORIZATION. With no trusted proxies the
 # derived caller IP is empty, clientIp is omitted from the authorize call, and
@@ -147,7 +150,7 @@ The `Authorize` function:
 
 * Receives the `sub` (user), `resource` (resource), and `action` (desired action).
 * Sends a POST request to the authorization service.
-* On the Fiber path, forwards the caller's client IP (`c.IP()`) as the optional `clientIp` field (see [Client IP forwarding](#-client-ip-forwarding)).
+* On the Fiber path, derives the caller's client IP from `TRUSTED_PROXIES` and the socket peer — not from `c.IP()` — and sends it as the optional `clientIp` field, omitting it when no caller IP is attributable (see [Client IP forwarding](#-client-ip-forwarding)).
 * Checks if the response indicates that the user is authorized.
 * Allows the normal application flow or returns a 403 (Forbidden) error.
 
@@ -173,8 +176,8 @@ The `clientIp` field is optional. On the Fiber path the middleware derives it fr
 On the Fiber path, `Authorize` sends `clientIp` to `POST /v1/authorize`, enabling the access manager to enforce a per-tenant IP allowlist downstream.
 
 * **The library derives the IP itself — it does NOT call `c.IP()`.** Fiber v3 only walks the `X-Forwarded-For` chain right-to-left when the consuming service sets *all four* of `TrustProxy`, `TrustProxyConfig{Proxies}`, `ProxyHeader` and `EnableIPValidation` on the `fiber.App` it built. Miss the last one and `c.IP()` returns the **raw header** — a value the caller supplies about itself. This library cannot enforce a config it does not own, so it stops depending on it: it reads its own `TRUSTED_PROXIES` list and derives the caller IP from the forwarded header plus the real socket peer.
-* **Set `TRUSTED_PROXIES`.** Comma-separated CIDRs of every proxy/ingress in front of the service, e.g. `TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. A bare address is rejected outright — it is *not* silently widened to a `/32` or `/128`, so write the prefix you mean. So is any range broader than `/8` (IPv4) or `/48` (IPv6), which includes the catch-alls `0.0.0.0/0` and `::/0`. An unusable entry is logged at ERROR and dropped; startup never fails on it, and if *every* entry is unusable the result is identical to leaving the variable unset (no trusted proxies, IP policy inert).
-* **Write IPv4 ranges in IPv4 form.** An IPv4 range expressed as v4-mapped IPv6 — `::ffff:10.0.0.0/104` — is accepted by validation but **matches nothing**: hops are unmapped to their IPv4 form before comparison, and an IPv6 prefix never contains an IPv4 address. Nothing warns; the proxy is simply never recognised and gets returned as the caller. Write `10.0.0.0/8`. (Only the *list* has this constraint — v4-mapped hops arriving on the wire are handled correctly, see below.)
+* **Set `TRUSTED_PROXIES`.** Comma-separated CIDRs of every proxy/ingress in front of the service, e.g. `TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. A bare address is rejected outright — it is *not* silently widened to a `/32` or `/128`, so write the prefix you mean. So is any range broader than `/8` (IPv4) or `/48` (IPv6) — measured on the range as stored (see the next bullet) — which includes the catch-alls `0.0.0.0/0` and `::/0`. An unusable entry is logged at ERROR and dropped; startup never fails on it, and if *every* entry is unusable the result is identical to leaving the variable unset (no trusted proxies, IP policy inert).
+* **An IPv4 range written in IPv4-mapped IPv6 form is rebased to IPv4.** `::ffff:10.0.0.0/104` is stored as `10.0.0.0/8` and matches exactly what that entry matches, because hops are unmapped before comparison and the list is normalised the same way. The rebased length is what the minimum-length check is applied to, so writing a range in mapped form can never get it past a check its IPv4 form would fail: `::ffff:10.0.0.0/100` is a `/4` and is rejected. A mapped address carrying a prefix shorter than `/96` (`::ffff:10.0.0.0/95`) reaches past the mapped block, denotes no IPv4 range, and is rejected too. Plain `10.0.0.0/8` remains the clearest way to write it.
 * **Unset `TRUSTED_PROXIES` means every IP-policy request is DENIED.** No trusted proxies ⇒ no derivable caller IP ⇒ `clientIp` is omitted ⇒ the auth service applies `deny-missing-ip`. There is deliberately **no fallback to the socket peer**: the peer is the ingress address, so a tenant with the ingress CIDR in its allowlist would see a *false allow* for every caller on earth. An empty value can never match by accident.
 * **A missing or unusable value never fails the boot.** The service starts normally with IP policy inert — there is no `Fatal`, no `panic` and no error returned to your bootstrap. The degradation is announced instead: **one ERROR line at construction** (not per request) naming the cause and the consequence, e.g.
 

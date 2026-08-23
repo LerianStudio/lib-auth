@@ -24,18 +24,15 @@ import (
 // role the ingress subnet plays in production.
 const testPeerCIDR = "0.0.0.0/32"
 
-// mustPrefixes parses CIDRs for a test fixture, failing the test on a typo.
+// mustPrefixes builds a trusted-proxy list the way production builds it — by
+// running the CIDRs through parseTrustedProxies — so no test can be green
+// against a list held in a form the parser would never actually store. It fails
+// if any entry is dropped, which keeps a fixture typo loud.
 func mustPrefixes(t *testing.T, cidrs ...string) []netip.Prefix {
 	t.Helper()
 
-	prefixes := make([]netip.Prefix, 0, len(cidrs))
-
-	for _, cidr := range cidrs {
-		p, err := netip.ParsePrefix(cidr)
-		require.NoError(t, err, "test fixture CIDR %q must parse", cidr)
-
-		prefixes = append(prefixes, p.Masked())
-	}
+	prefixes := parseTrustedProxies(strings.Join(cidrs, ","), &testLogger{})
+	require.Len(t, prefixes, len(cidrs), "every fixture CIDR must survive parsing: %v", cidrs)
 
 	return prefixes
 }
@@ -98,6 +95,63 @@ func TestParseTrustedProxies(t *testing.T) {
 		{name: "ipv6_too_broad_is_rejected", raw: "2001:db8::/47", want: nil},
 		{name: "ipv6_cidr_is_accepted", raw: "2001:db8::/48", want: []string{"2001:db8::/48"}},
 		{name: "single_host_cidr_is_accepted", raw: "203.0.113.7/32", want: []string{"203.0.113.7/32"}},
+		{
+			// An IPv4 range written in IPv4-mapped IPv6 form is rebased to the plain
+			// IPv4 prefix it denotes, so it is stored in the form the hop walk
+			// compares against instead of a form that can never match.
+			name: "v4_mapped_range_is_rebased_to_ipv4",
+			raw:  "::ffff:10.0.0.0/104",
+			want: []string{"10.0.0.0/8"},
+		},
+		{
+			name: "v4_mapped_range_is_rebased_and_masked",
+			raw:  "::ffff:10.1.2.3/104",
+			want: []string{"10.0.0.0/8"},
+		},
+		{
+			name: "v4_mapped_host_is_rebased_to_a_32",
+			raw:  "::ffff:203.0.113.7/128",
+			want: []string{"203.0.113.7/32"},
+		},
+		{
+			// The rebased length is what the floor is applied to, so rebasing can
+			// never smuggle a range past a check the IPv4 form would have failed.
+			// /104 is exactly the /8 floor and is kept; /103 is a /7 and is not.
+			name: "v4_mapped_range_at_the_ipv4_floor_is_accepted",
+			raw:  "::ffff:10.0.0.0/104,::ffff:10.0.0.0/103",
+			want: []string{"10.0.0.0/8"},
+		},
+		{
+			name: "v4_mapped_range_broader_than_the_ipv4_floor_is_rejected",
+			raw:  "::ffff:10.0.0.0/100",
+			want: nil,
+		},
+		{
+			// ::ffff:0:0/96 is every IPv4 address there is — the catch-all 0.0.0.0/0
+			// wearing a different hat.
+			name: "v4_mapped_catch_all_is_rejected",
+			raw:  "::ffff:0:0/96",
+			want: nil,
+		},
+		{
+			// Below /96 the prefix runs past the start of the mapped block, so it
+			// denotes no IPv4 range at all and cannot be rebased. Kept as written it
+			// would be stored and match nothing, so it is dropped instead.
+			name: "v4_mapped_address_with_a_prefix_shorter_than_the_mapping_is_rejected",
+			raw:  "::ffff:10.0.0.0/95",
+			want: nil,
+		},
+		{
+			name: "v4_mapped_address_with_an_ipv6_sized_prefix_is_rejected",
+			raw:  "::ffff:10.0.0.0/48",
+			want: nil,
+		},
+		{
+			// A genuine IPv6 range is untouched by any of the above.
+			name: "ipv6_range_near_the_mapped_block_is_kept_as_ipv6",
+			raw:  "::fffe:0:0/96",
+			want: []string{"::fffe:0:0/96"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -117,6 +171,62 @@ func prefixStringsOrNil(prefixes []netip.Prefix) []string {
 	}
 
 	return prefixStrings(prefixes)
+}
+
+// TestParseTrustedProxies_DroppedEntriesNameTheirReason pins WHICH rule dropped
+// an entry, not merely that it was dropped. The two rules point an operator in
+// opposite directions: "too broad" says the range covers too much, while a
+// v4-mapped address carrying a prefix shorter than the mapping denotes no IPv4
+// range at all and has to be rewritten. Reporting the first for the second sends
+// the operator to narrow a prefix that is not the problem.
+//
+// It is also what keeps the /96 boundary honest. Rebasing a shorter prefix
+// underflows into an invalid prefix, which the length check then discards on its
+// own — the entry disappears either way and only the message shows that the
+// arithmetic ran on something it does not apply to.
+func TestParseTrustedProxies_DroppedEntriesNameTheirReason(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		notWant string
+	}{
+		{
+			name:    "prefix_shorter_than_the_mapping_is_not_reported_as_too_broad",
+			raw:     "::ffff:10.0.0.0/95",
+			want:    "only denotes an IPv4 range from /96 onwards",
+			notWant: "too broad",
+		},
+		{
+			// The too-broad line names the range in the form that governs matching,
+			// so an operator reading it sees the /4 they actually asked for.
+			name: "rebased_range_is_reported_in_its_ipv4_form",
+			raw:  "::ffff:10.0.0.0/100",
+			want: "too broad (it covers 0.0.0.0/4, and a trusted-proxy range must be at least /8)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger := &recordingLogger{}
+			require.Empty(t, parseTrustedProxies(tt.raw, logger))
+
+			logger.mu.Lock()
+			defer logger.mu.Unlock()
+
+			require.Len(t, logger.messages, 1, "one dropped entry, one line")
+			assert.Equal(t, log.LevelError, logger.levels[0])
+			assert.Contains(t, logger.messages[0], tt.want)
+
+			if tt.notWant != "" {
+				assert.NotContains(t, logger.messages[0], tt.notWant)
+			}
+		})
+	}
 }
 
 // TestLoadTrustedProxies_UnsetYieldsNoTrust pins the product decision (Roberto,
@@ -212,6 +322,22 @@ func TestLoadTrustedProxies_DegradationIsObservable(t *testing.T) {
 		require.Len(t, lines, 1, "the degradation must be announced exactly once, however many entries were dropped")
 		assert.Contains(t, lines[0], "no usable CIDR",
 			"a value that was set but unusable must be distinguishable from one that was never set")
+	})
+
+	t.Run("v4_mapped_entry_that_cannot_be_trusted_is_announced_not_stored", func(t *testing.T) {
+		// The failure this guards against is silence: an entry that looks valid,
+		// is stored, and matches nothing leaves the proxy unrecognised and its own
+		// address forwarded as the caller. Whatever cannot be rebased into a
+		// usable IPv4 range is dropped loudly instead.
+		t.Setenv("TRUSTED_PROXIES", "::ffff:10.0.0.0/100,::ffff:10.0.0.0/95")
+
+		logger := &recordingLogger{}
+		require.Empty(t, loadTrustedProxies(logger),
+			"neither entry can be trusted as written, so nothing may be stored")
+
+		lines := logger.degradedLines()
+		require.Len(t, lines, 1, "the degradation must be announced exactly once")
+		assert.Contains(t, lines[0], "no usable CIDR")
 	})
 
 	t.Run("valid_config_is_silent", func(t *testing.T) {
@@ -344,16 +470,34 @@ func TestFirstUntrustedHop(t *testing.T) {
 			want:    "",
 		},
 		{
-			// An IPv4 range written in v4-mapped-v6 form is INERT: hops are unmapped
-			// to their v4 form before matching, and a v6 prefix never contains a v4
-			// address. The entry parses and survives validation, so nothing warns —
-			// the proxy is simply never recognised and gets returned as the client.
-			// Documented in the README; pinned here so the doc has a measurement
-			// behind it.
-			name:    "v4_range_written_in_v6_mapped_form_matches_nothing",
+			// An IPv4 range written in v4-mapped-v6 form is rebased to the plain
+			// IPv4 prefix it denotes when the list is parsed, so it matches exactly
+			// what 10.0.0.0/8 matches. Held in the mapped form it would match
+			// nothing — hops are unmapped before comparison and no IPv6 prefix
+			// contains an IPv4 address — and the unrecognised proxy would itself be
+			// returned as the caller, which is the wrong answer rather than no
+			// answer. This case is the guard against that regression.
+			name:    "v4_range_written_in_v6_mapped_form_matches_v4_hops",
 			hops:    []string{"203.0.113.7", "10.0.0.1"},
 			trusted: []string{"::ffff:10.0.0.0/104"},
-			want:    "10.0.0.1",
+			want:    "203.0.113.7",
+		},
+		{
+			// The same list, with only the proxy in the chain: every hop is trusted,
+			// so no caller is attributable. Proves the rebased entry really matches
+			// the proxy rather than the walk merely stopping one hop earlier.
+			name:    "v4_range_in_v6_mapped_form_trusts_the_proxy_itself",
+			hops:    []string{"10.0.0.1"},
+			trusted: []string{"::ffff:10.0.0.0/104"},
+			want:    "",
+		},
+		{
+			// A single host written in mapped form rebases to a /32 and matches only
+			// itself: the hop beside it is still the caller.
+			name:    "v4_host_written_in_v6_mapped_form_matches_only_that_host",
+			hops:    []string{"203.0.113.7", "10.0.0.1"},
+			trusted: []string{"::ffff:10.0.0.1/128"},
+			want:    "203.0.113.7",
 		},
 	}
 
