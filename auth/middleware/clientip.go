@@ -163,7 +163,7 @@ func describeParseFailure(entry string) string {
 		case err != nil:
 			return "it is not an IP address at all; write an address and a prefix length, e.g. 10.0.0.0/8"
 		case addr.Zone() != "":
-			return describeZone(addr)
+			return describeBareZone(addr)
 		default:
 			return fmt.Sprintf("a bare address is not a range; add a prefix length, e.g. %s/%d", addr, addr.BitLen())
 		}
@@ -175,20 +175,17 @@ func describeParseFailure(entry string) string {
 	}
 
 	if addr.Zone() != "" {
-		return describeZone(addr)
+		return describeZonedPrefix(addr, entry[slash+1:])
 	}
 
-	// The parser accepts only a plain decimal count of bits: no sign, no leading
-	// zero, no empty string. Anything else never reaches its range check, so it
-	// must not be reported as a range problem.
 	bits := entry[slash+1:]
 
-	length, err := strconv.Atoi(bits)
-	if err != nil || bits == "" || (len(bits) > 1 && (bits[0] < '1' || bits[0] > '9')) {
-		return fmt.Sprintf("the prefix length after the '/' (%q) is not a plain number of bits", bits)
-	}
+	length, readable := readPrefixLength(bits)
 
-	if length > addr.BitLen() {
+	switch {
+	case !readable:
+		return fmt.Sprintf("the prefix length after the '/' (%q) is not a plain number of bits", bits)
+	case length > addr.BitLen():
 		return fmt.Sprintf("a prefix length of /%d is out of range for an IPv%d address (the maximum is /%d)",
 			length, addrFamily(addr), addr.BitLen())
 	}
@@ -196,11 +193,67 @@ func describeParseFailure(entry string) string {
 	return "it is not a CIDR range"
 }
 
-// describeZone reports an IPv6 zone, which a prefix may never carry: a zone
-// names one host's link, so it cannot describe a range of proxies.
-func describeZone(addr netip.Addr) string {
-	return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range; write the range on the unzoned address (%s)",
-		addr.Zone(), addr.WithZone(""))
+// readPrefixLength returns the bit count written after the '/', and whether the
+// parser can read it at all: it accepts only a plain decimal count — no sign, no
+// leading zero, no empty string. Anything else never reaches its range check, so
+// it must not be reported as a range problem. Whether a readable count FITS the
+// address is a separate question, left to the caller, because the two failures
+// send an operator in different directions.
+//
+// It is shared with the zoned-address path, which has to answer the same
+// question about the same text to decide whether the length is worth preserving
+// in the correction it prints. Two copies of this rule would let the message and
+// the parser disagree about what a length is.
+func readPrefixLength(bits string) (int, bool) {
+	length, err := strconv.Atoi(bits)
+	if err != nil || bits == "" || (len(bits) > 1 && (bits[0] < '1' || bits[0] > '9')) {
+		return 0, false
+	}
+
+	return length, true
+}
+
+// describeBareZone reports a zone on an entry that carried no prefix length at
+// all (fe80::1%eth0), which a prefix may never carry: a zone names one host's
+// link, so it cannot describe a range of proxies.
+//
+// The correction it prints has to PARSE. Naming the unzoned address alone does
+// not: dropping the zone leaves fe80::1, and an operator who types what the line
+// told them to type lands on the next rejection ("no '/'"). So the suggestion
+// carries a length, and the length is the address's own bit count — what a
+// single address means as a range, and the only length that can be supplied here
+// without inventing a wider one than was asked for.
+func describeBareZone(addr netip.Addr) string {
+	unzoned := addr.WithZone("")
+
+	return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range; write the range on the unzoned address, with a prefix length (%s/%d)",
+		addr.Zone(), unzoned, unzoned.BitLen())
+}
+
+// describeZonedPrefix reports a zone sitting in the address half of a prefix the
+// operator did write a length for (fe80::1%eth0/64), and PRESERVES that length in
+// the correction. They said how wide they wanted the range; answering with the
+// address's own bit count would silently narrow it to one host, and answering
+// with anything else would invent a width.
+//
+// A length is only preserved if the parser could use it. The zone is rejected
+// BEFORE the length is ever read — netip reports the zone for fe80::1%eth0/999
+// just as it does for /64 — so an unusable length reaches here unexamined, and
+// echoing it back would print a correction that fails to parse, which is the
+// defect this whole path exists to avoid. When that happens the line says the
+// length is unusable too, and falls back to the address's own bit count so the
+// suggestion still parses.
+func describeZonedPrefix(addr netip.Addr, bits string) string {
+	unzoned := addr.WithZone("")
+
+	length, readable := readPrefixLength(bits)
+	if !readable || length > unzoned.BitLen() {
+		return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range, and the prefix length after the '/' (%q) is not usable either; write the range on the unzoned address (%s/%d)",
+			addr.Zone(), bits, unzoned, unzoned.BitLen())
+	}
+
+	return fmt.Sprintf("an IPv6 zone (%q) cannot appear in a range; write the range on the unzoned address, keeping the length you gave (%s/%d)",
+		addr.Zone(), unzoned, length)
 }
 
 // addrFamily returns 4 or 6 for use in operator-facing prose. An IPv4-mapped

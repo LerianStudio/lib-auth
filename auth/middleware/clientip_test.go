@@ -192,6 +192,13 @@ func prefixStringsOrNil(prefixes []netip.Prefix) []string {
 // underflows into an invalid prefix, which the length check then discards on its
 // own — the entry disappears either way and only the message shows that the
 // arithmetic ran on something it does not apply to.
+//
+// Where a case names a correction (wantCorrection), the correction is fed back
+// through parseTrustedProxies itself and must come out as a trusted prefix. A
+// message that names a fix the parser then rejects sends the operator from one
+// rejection to the next, which is no better than saying nothing; asserting the
+// wording alone cannot catch that, because the wording is exactly what looks
+// right. Round-tripping it closes the class rather than the instance.
 func TestParseTrustedProxies_DroppedEntriesNameTheirReason(t *testing.T) {
 	t.Parallel()
 
@@ -200,6 +207,9 @@ func TestParseTrustedProxies_DroppedEntriesNameTheirReason(t *testing.T) {
 		raw     string
 		want    string
 		notWant string
+		// wantCorrection is the entry the message tells the operator to write.
+		// It is asserted verbatim, then parsed back.
+		wantCorrection string
 	}{
 		{
 			name:    "prefix_shorter_than_the_mapping_is_not_reported_as_too_broad",
@@ -285,10 +295,60 @@ func TestParseTrustedProxies_DroppedEntriesNameTheirReason(t *testing.T) {
 		},
 		{
 			// A zone names one host's link. Nothing about it is a length problem.
-			name:    "ipv6_zone_is_named_as_the_zone",
-			raw:     "fe80::1%eth0/64",
-			want:    `an IPv6 zone ("eth0") cannot appear in a range; write the range on the unzoned address (fe80::1)`,
-			notWant: "add a prefix length",
+			// The operator said how wide they wanted the range, so the correction
+			// keeps that width: suggesting the address's own /128 instead would
+			// quietly hand them a narrower range than the one they asked for.
+			name:           "zone_in_a_written_prefix_keeps_the_operator_s_length",
+			raw:            "fe80::1%eth0/64",
+			want:           `an IPv6 zone ("eth0") cannot appear in a range; write the range on the unzoned address, keeping the length you gave (fe80::1/64)`,
+			notWant:        "/128",
+			wantCorrection: "fe80::1/64",
+		},
+		{
+			// No length was written, so there is none to keep and one has to be
+			// supplied. Naming the bare unzoned address is what the message used to
+			// do, and it does not parse — the operator typed fe80::1 and got "no
+			// '/'". A single address IS its own /128 range, which is the only length
+			// that can be supplied here without widening what was asked for.
+			name:           "bare_zoned_address_is_given_a_length_that_parses",
+			raw:            "fe80::1%eth0",
+			want:           `an IPv6 zone ("eth0") cannot appear in a range; write the range on the unzoned address, with a prefix length (fe80::1/128)`,
+			notWant:        "keeping the length you gave",
+			wantCorrection: "fe80::1/128",
+		},
+		{
+			// netip rejects the zone BEFORE it reads the length, so a zoned entry
+			// arrives here with its length unexamined. Echoing /999 back would print
+			// a correction that fails to parse, so the line says the length is
+			// unusable too and falls back to a length that works.
+			name:           "zone_with_an_out_of_range_length_does_not_echo_that_length",
+			raw:            "fe80::1%eth0/999",
+			want:           `an IPv6 zone ("eth0") cannot appear in a range, and the prefix length after the '/' ("999") is not usable either; write the range on the unzoned address (fe80::1/128)`,
+			notWant:        "fe80::1/999",
+			wantCorrection: "fe80::1/128",
+		},
+		{
+			// Same fallback for a length that is not a number at all. It must not
+			// borrow the unreadable-length wording used when no zone is involved:
+			// that line is about an entry whose only problem is the length.
+			name:           "zone_with_an_unreadable_length_does_not_echo_that_length",
+			raw:            "fe80::1%eth0/eight",
+			want:           `and the prefix length after the '/' ("eight") is not usable either; write the range on the unzoned address (fe80::1/128)`,
+			notWant:        "is not a plain number of bits",
+			wantCorrection: "fe80::1/128",
+		},
+		{
+			// The only zoned address that is not plain IPv6: a v4-mapped one. Its
+			// length is still measured in 128 bits, so the correction is built from
+			// the address's own BitLen rather than a constant, and it survives the
+			// rebasing the parser then applies to it (/104 becomes the IPv4 /8).
+			// A plain IPv4 address can never carry a zone — netip stops at the '.'
+			// before it ever sees the '%' — so this is the whole of the v4 story.
+			name:           "v4_mapped_zone_keeps_its_128_bit_length",
+			raw:            "::ffff:1.2.3.4%eth0/104",
+			want:           `an IPv6 zone ("eth0") cannot appear in a range; write the range on the unzoned address, keeping the length you gave (::ffff:1.2.3.4/104)`,
+			notWant:        "/128",
+			wantCorrection: "::ffff:1.2.3.4/104",
 		},
 	}
 
@@ -309,6 +369,26 @@ func TestParseTrustedProxies_DroppedEntriesNameTheirReason(t *testing.T) {
 			if tt.notWant != "" {
 				assert.NotContains(t, logger.messages[0], tt.notWant)
 			}
+
+			if tt.wantCorrection == "" {
+				return
+			}
+
+			assert.Contains(t, logger.messages[0], "("+tt.wantCorrection+")",
+				"the message must name the correction verbatim, parenthesised, so it can be copied out of the log")
+
+			// The correction goes back through the SAME entry point the rejected
+			// entry went through, and must survive all of it — parsing, rebasing
+			// and the breadth floor — with no second complaint. Checking only that
+			// it parses would still let the line hand the operator a range the next
+			// rule drops.
+			retry := &recordingLogger{}
+			assert.Len(t, parseTrustedProxies(tt.wantCorrection, retry), 1,
+				"the suggested correction must be accepted as written")
+
+			retry.mu.Lock()
+			defer retry.mu.Unlock()
+			assert.Empty(t, retry.messages, "the suggested correction must not itself be complained about")
 		})
 	}
 }
