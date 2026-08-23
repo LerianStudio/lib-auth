@@ -611,16 +611,51 @@ func TestFirstUntrustedHop(t *testing.T) {
 // unparsed. Every test below runs on this app on purpose: lib-auth must reach
 // the right answer regardless of what the consuming service configured.
 func misconfiguredProxyApp(auth *AuthClient) *fiber.App {
-	app := fiber.New(fiber.Config{
+	return clientIPApp(auth, misconfiguredProxyConfig())
+}
+
+// misconfiguredProxyConfig returns that partial config as a fresh value, so a
+// test can vary ONE field of it and hold everything else still.
+func misconfiguredProxyConfig() fiber.Config {
+	return fiber.Config{
 		TrustProxy:       true,
 		TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"0.0.0.0"}},
 		ProxyHeader:      fiber.HeaderXForwardedFor,
-	})
+	}
+}
+
+// clientIPApp mounts Authorize on an app built from cfg.
+func clientIPApp(auth *AuthClient, cfg fiber.Config) *fiber.App {
+	app := fiber.New(cfg)
 	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
 		return c.SendString("reached handler")
 	})
 
 	return app
+}
+
+// clientIPThrough drives one request carrying xffValues (one X-Forwarded-For
+// header line each) through an app built from cfg, and returns the body the
+// authorize call carried. Everything except cfg is fixed, so a difference
+// between two calls can only come from the app configuration.
+func clientIPThrough(t *testing.T, cfg fiber.Config, trusted []netip.Prefix, xffValues ...string) map[string]string {
+	t.Helper()
+
+	var capturedBody map[string]string
+
+	server := bodyCapturingAuthServer(t, &capturedBody)
+
+	auth := &AuthClient{
+		Address:        server.URL,
+		Enabled:        true,
+		Logger:         &testLogger{},
+		trustedProxies: trusted,
+	}
+
+	resp := getThroughApp(t, clientIPApp(auth, cfg), xffValues...)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	return capturedBody
 }
 
 // bodyCapturingAuthServer records the authorize request body and always allows.
@@ -651,11 +686,23 @@ func clientIPTestToken() string {
 func getWithForwardedFor(t *testing.T, app *fiber.App, xff string) *http.Response {
 	t.Helper()
 
+	if xff == "" {
+		return getThroughApp(t, app)
+	}
+
+	return getThroughApp(t, app, xff)
+}
+
+// getThroughApp issues the request with ONE X-Forwarded-For header line per
+// value, which is how a chain split across several lines reaches the server.
+func getThroughApp(t *testing.T, app *fiber.App, xffValues ...string) *http.Response {
+	t.Helper()
+
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	req.Header.Set("Authorization", "Bearer "+clientIPTestToken())
 
-	if xff != "" {
-		req.Header.Set(fiber.HeaderXForwardedFor, xff)
+	for _, value := range xffValues {
+		req.Header.Add(fiber.HeaderXForwardedFor, value)
 	}
 
 	resp, err := app.Test(req)
@@ -826,4 +873,118 @@ func TestAuthorize_ClientIP_EmptyKeysCacheAsEmpty(t *testing.T) {
 
 	assert.Equal(t, int64(1), hits.Load(),
 		"both requests derive an empty client IP, so they share the cache key and the authz service is queried once")
+}
+
+// TestAuthorize_ClientIP_IndependentOfEnableIPValidation is the assertion the
+// whole derivation exists for: the SAME chain, the same trusted list and the
+// same peer must attribute the same caller no matter how the embedding service
+// configured Fiber.
+//
+// The chain carries an unreadable hop between two readable ones. Reading it
+// through c.IPs() with EnableIPValidation set makes Fiber drop that hop before
+// lib-auth sees the chain, which closes the hole in it and lets the walk reach
+// the leftmost value — text the caller wrote about itself. With the flag unset
+// the same request stops at the hole and attributes nobody. One flag in the
+// consuming service, two different answers.
+func TestAuthorize_ClientIP_IndependentOfEnableIPValidation(t *testing.T) {
+	t.Parallel()
+
+	const chain = "203.0.113.7, garbage, 10.1.2.3"
+
+	trusted := mustPrefixes(t, testPeerCIDR, "10.0.0.0/8")
+
+	validationOff := misconfiguredProxyConfig()
+
+	validationOn := misconfiguredProxyConfig()
+	validationOn.EnableIPValidation = true
+
+	bodies := map[string]map[string]string{
+		"EnableIPValidation unset": clientIPThrough(t, validationOff, trusted, chain),
+		"EnableIPValidation set":   clientIPThrough(t, validationOn, trusted, chain),
+	}
+
+	assert.Equal(t, bodies["EnableIPValidation unset"]["clientIp"], bodies["EnableIPValidation set"]["clientIp"],
+		"the attributed caller must not move with the embedding service's Fiber configuration")
+
+	for name, body := range bodies {
+		assert.NotContains(t, body, "clientIp",
+			"%s: an unreadable hop must stop the walk, so no caller is attributable", name)
+		assert.NotEqual(t, "203.0.113.7", body["clientIp"],
+			"%s: the hop behind the unreadable one must never be credited as the caller", name)
+	}
+}
+
+// TestAuthorize_ClientIP_IndependentOfProxyHeader holds the same line for the
+// other setting that decides which header Fiber would read. lib-auth names the
+// header itself, so a service that never set ProxyHeader — and whose c.IP()
+// therefore returns the socket peer — still gets the same caller attributed.
+func TestAuthorize_ClientIP_IndependentOfProxyHeader(t *testing.T) {
+	t.Parallel()
+
+	const chain = "203.0.113.7, 10.1.2.3"
+
+	trusted := mustPrefixes(t, testPeerCIDR, "10.0.0.0/8")
+
+	headerSet := misconfiguredProxyConfig()
+
+	headerUnset := misconfiguredProxyConfig()
+	headerUnset.ProxyHeader = ""
+
+	withHeader := clientIPThrough(t, headerSet, trusted, chain)
+	withoutHeader := clientIPThrough(t, headerUnset, trusted, chain)
+
+	assert.Equal(t, withHeader["clientIp"], withoutHeader["clientIp"],
+		"the attributed caller must not move with ProxyHeader")
+	assert.Equal(t, "203.0.113.7", withHeader["clientIp"],
+		"the first untrusted hop from the right is the client, either way")
+}
+
+// TestAuthorize_ClientIP_ChainSplitAcrossHeaderLines pins how a chain delivered
+// as several X-Forwarded-For lines is read. Repeated field lines mean one
+// comma-joined value in order, so the LAST value on the LAST line is the hop
+// nearest to us and anchors the walk. Reading only the first line would throw
+// away the trustworthy right-hand end of the chain and stop the walk further
+// left, on text the caller supplied.
+func TestAuthorize_ClientIP_ChainSplitAcrossHeaderLines(t *testing.T) {
+	t.Parallel()
+
+	trusted := mustPrefixes(t, testPeerCIDR, "10.0.0.0/8")
+
+	t.Run("a later line continues the chain to the right", func(t *testing.T) {
+		t.Parallel()
+
+		body := clientIPThrough(t, misconfiguredProxyConfig(), trusted, "203.0.113.7", "198.51.100.9")
+
+		assert.Equal(t, "198.51.100.9", body["clientIp"],
+			"the rightmost hop across all lines is the nearest one, so it is the caller here")
+		assert.NotEqual(t, "203.0.113.7", body["clientIp"],
+			"reading only the first line would credit the hop the caller wrote about itself")
+	})
+
+	t.Run("an unreadable hop on a later line still stops the walk", func(t *testing.T) {
+		t.Parallel()
+
+		body := clientIPThrough(t, misconfiguredProxyConfig(), trusted, "203.0.113.7", "garbage")
+
+		assert.NotContains(t, body, "clientIp",
+			"a hop that cannot be shown to be a proxy stops the walk wherever it was written")
+	})
+}
+
+// TestAuthorize_ClientIP_EmptyForwardedPositionStopsTheWalk pins the tokenising
+// decision: an empty comma position is kept as a hop rather than skipped. It is
+// a position this library cannot vouch for, and the walk only ever reaches one
+// when everything to its right is a trusted proxy — that is, when it stands
+// exactly where the caller would have been named.
+func TestAuthorize_ClientIP_EmptyForwardedPositionStopsTheWalk(t *testing.T) {
+	t.Parallel()
+
+	trusted := mustPrefixes(t, testPeerCIDR, "10.0.0.0/8")
+
+	body := clientIPThrough(t, misconfiguredProxyConfig(), trusted, "203.0.113.7, 10.1.2.3,")
+
+	assert.NotContains(t, body, "clientIp",
+		"an empty position is an unreadable hop: it stops the walk instead of being closed over")
+	assert.NotEqual(t, "203.0.113.7", body["clientIp"],
+		"skipping the empty position would splice the chain and credit the caller's own text")
 }

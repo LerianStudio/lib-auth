@@ -40,6 +40,12 @@ const (
 // trail — an unrelated variable).
 const trustedProxiesEnv = "TRUSTED_PROXIES"
 
+// forwardedHeader is the hop-by-hop chain this library reads. It is fixed here
+// rather than taken from the consuming service's Fiber ProxyHeader, for the same
+// reason the chain is tokenised here: what this library attributes must not move
+// with the embedding service's configuration.
+const forwardedHeader = fiber.HeaderXForwardedFor
+
 // loadTrustedProxies reads the trusted-proxy CIDR allowlist from the
 // environment at construction. An unset or empty value yields NO trusted
 // proxies, which makes every resolved client IP empty — see resolveClientIP for
@@ -262,7 +268,8 @@ func minPrefixBits(p netip.Prefix) int {
 // walks the forwarded chain right-to-left when TrustProxy, TrustProxyConfig,
 // ProxyHeader AND EnableIPValidation are all set. Miss the last one and c.IP()
 // returns the raw header — a value the caller supplies about itself. So this
-// library derives the IP from its own TRUSTED_PROXIES list instead.
+// library derives the IP from its own TRUSTED_PROXIES list instead, over a chain
+// it reads and splits itself (see forwardedHops).
 //
 // With no trusted proxies configured it returns "" and NO IP is forwarded. That
 // is a deliberate product decision, not an oversight: falling back to the socket
@@ -289,13 +296,58 @@ func (auth *AuthClient) resolveClientIP(c fiber.Ctx) string {
 		return ""
 	}
 
-	forwarded := c.IPs()
+	forwarded := forwardedHops(c)
 
 	hops := make([]string, 0, len(forwarded)+1)
 	hops = append(hops, forwarded...)
 	hops = append(hops, peer.String())
 
 	return firstUntrustedHop(hops, auth.trustedProxies)
+}
+
+// forwardedHops reads the forwarded chain off the request and splits it here,
+// deliberately in place of c.IPs().
+//
+// c.IPs() reads the same header, but filters it through the embedding service's
+// app config first: with EnableIPValidation set, Fiber DROPS every token it does
+// not recognise as an address before this library ever sees the chain. Dropping
+// a token splices the chain — the hops on either side of the hole become
+// adjacent — so the guard in firstUntrustedHop, whose whole job is to stop at a
+// hop that cannot be shown to be a proxy, never fires, and the walk carries on
+// left past the point where it had to stop. The same request would then attribute
+// a different caller depending only on a flag set by whoever embeds the library.
+// So the derivation reads the bytes.
+//
+// Every comma-separated position is one hop, surrounding whitespace trimmed,
+// EMPTY POSITIONS KEPT. An empty position is a hop this library cannot vouch for,
+// and the guard is entitled to treat it like any other unreadable one; skipping
+// it would splice the chain in exactly the way described above. Keeping it costs
+// nothing where it cannot matter: the walk only ever reaches an empty position
+// when every hop to its right is a trusted proxy, i.e. when that position is
+// where the caller would have been named.
+//
+// All X-Forwarded-For lines are read and concatenated in order, not just the
+// first. Repeated field lines are equivalent to one comma-joined value
+// (RFC 9110 §5.2), and a proxy appending its own line rather than extending the
+// existing one is ordinary behaviour. Reading only the first — what a single
+// header peek returns — would drop the rightmost, most trustworthy hops and let
+// the walk stop somewhere further left, crediting caller-supplied text in place
+// of a hop that a trusted proxy actually wrote.
+func forwardedHops(c fiber.Ctx) []string {
+	values := c.Request().Header.PeekAll(forwardedHeader)
+	if len(values) == 0 {
+		return nil
+	}
+
+	hops := make([]string, 0, len(values))
+
+	for _, value := range values {
+		for _, token := range strings.Split(string(value), ",") {
+			hops = append(hops, strings.TrimSpace(token))
+		}
+	}
+
+	return hops
 }
 
 // firstUntrustedHop walks hops from right (closest to us, most trustworthy) to
