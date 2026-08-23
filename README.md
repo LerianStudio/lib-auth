@@ -81,6 +81,43 @@ AUTH_BREAKER_ENABLED=false
 # AUTH_RETRY_MAX retries only TRANSIENT failures (network/timeout/5xx) up to N
 # times within AUTH_TIMEOUT; authoritative 401/403 are never retried. 0 disables.
 AUTH_RETRY_MAX=0
+
+# TRUSTED_PROXIES is the comma-separated list of proxy CIDRs whose forwarded hop
+# (X-Forwarded-For) may be believed. It is what the library uses to derive the
+# caller IP it sends as clientIp, so the per-tenant IP allowlist depends on it.
+# Same variable name (and value) already used by plugin-access-manager and
+# flowker — NOT to be confused with tracer's unrelated TRUSTED_PROXY_CIDRS.
+#
+# Entries must be CIDRs: a bare address ("10.0.0.1") is rejected, and so is an
+# overly broad range (IPv4 wider than /8, IPv6 wider than /48). An IPv4 range
+# written in IPv4-mapped IPv6 form ("::ffff:10.0.0.0/104") is rebased to the
+# IPv4 range it denotes ("10.0.0.0/8") and measured against the IPv4 limit; if
+# it cannot be rebased it is rejected, never stored in a form that would match
+# nothing. An unusable entry is logged at ERROR and dropped; the valid entries
+# still apply. Nothing here ever fails the boot: a missing or entirely unusable
+# value logs ONE ERROR line at startup naming cause and consequence, and the
+# service starts with no address to forward.
+#
+# LEAVING IT UNSET CAN LOCK YOUR CALLERS OUT. With no trusted proxies the derived
+# caller IP is empty and clientIp is omitted from the authorize call. What the
+# authorization service does with a request that carries no address is ITS
+# policy, not this library's, and as of 2026-08-23 that policy is conditional:
+# for a tenant with an IP allowlist active on the surface being called, an
+# omitted address is accepted only from a caller the authorization service
+# recognises as one of the platform's own services, and DENIED otherwise. It
+# recognises them by the calling service's own network address, against a range
+# list configured on that service (PLATFORM_INTERNAL_CIDRS — its variable, not
+# one this library reads); with that unset nothing is recognised, so every
+# addressless request to such a tenant is denied. Tenants with no active
+# allowlist are unaffected either way. Verify the current rule in the
+# authorization service's own IP-allowlist operations documentation, which is
+# the authority — it can change there without a release here.
+#
+# There is no fallback to the socket peer, deliberately: that would forward the
+# ingress address, which — for a tenant that happens to have the ingress CIDR
+# registered — would allow EVERY caller. Set it on any deployment that uses
+# tenant IP allowlists.
+TRUSTED_PROXIES=10.0.0.0/8,<ingress-cidr>
 ```
 
 ### 2. Create a new instance of the middleware:
@@ -125,7 +162,7 @@ The `Authorize` function:
 
 * Receives the `sub` (user), `resource` (resource), and `action` (desired action).
 * Sends a POST request to the authorization service.
-* On the Fiber path, forwards the caller's client IP (`c.IP()`) as the optional `clientIp` field (see [Client IP forwarding](#-client-ip-forwarding)).
+* On the Fiber path, derives the caller's client IP from `TRUSTED_PROXIES` and the socket peer — not from Fiber's `c.IP()` or `c.IPs()` — and sends it as the optional `clientIp` field, omitting it when no caller IP is attributable (see [Client IP forwarding](#-client-ip-forwarding)).
 * Checks if the response indicates that the user is authorized.
 * Allows the normal application flow or returns a 403 (Forbidden) error.
 
@@ -144,20 +181,41 @@ Authorization: Bearer your_token_here
 }
 ```
 
-The `clientIp` field is optional. On the Fiber path it is set automatically to `c.IP()`; the authorization service uses it to enforce the per-tenant IP allowlist.
+The `clientIp` field is optional *in the schema* — the request is well-formed without it — but omitting it is not free: the authorization service uses it to enforce the per-tenant IP allowlist, and for a protected tenant an omitted address can be denied. On the Fiber path the middleware derives it from `TRUSTED_PROXIES` (see below) and omits it only when no caller IP can be attributed; see [Client IP forwarding](#-client-ip-forwarding) for what follows from that.
 
 ## 🌐 Client IP forwarding
 
-On the Fiber path, `Authorize` automatically sends `clientIp = c.IP()` to `POST /v1/authorize`, enabling the access manager to enforce a per-tenant IP allowlist downstream.
+On the Fiber path, `Authorize` sends `clientIp` to `POST /v1/authorize`, enabling the access manager to enforce a per-tenant IP allowlist downstream.
 
-* **No code change needed.** The public `Authorize(sub, resource, action)` signature is unchanged. Consuming services get this behavior by upgrading the library — bump the version, nothing else.
-* **Configure trusted proxies (Fiber v3).** For `c.IP()` to report the real client IP behind a proxy or ingress, the consuming service must configure Fiber v3's trusted-proxy settings on its `fiber.New(fiber.Config{...})`:
-  * `TrustProxy: true` — enable proxy-header trust (Fiber v3 renamed the v2 `EnableTrustedProxyCheck`).
-  * `TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"10.0.0.0/8", "<ingress-cidr>"}}` — the exact set of upstream proxy IPs/CIDRs allowed to set the forwarded header. Never leave this empty while trusting the header, or any caller can spoof its IP.
-  * `ProxyHeader: fiber.HeaderXForwardedFor` — the header `c.IP()` reads the client IP from.
-  * `EnableIPValidation: true` — validates that the value is a well-formed IP, so `c.IP()` cannot return a spoofable raw `X-Forwarded-For` string.
+* **The library derives the IP itself — it does NOT call `c.IP()`.** Fiber v3 only walks the `X-Forwarded-For` chain right-to-left when the consuming service sets *all four* of `TrustProxy`, `TrustProxyConfig{Proxies}`, `ProxyHeader` and `EnableIPValidation` on the `fiber.App` it built. Miss the last one and `c.IP()` returns the **raw header** — a value the caller supplies about itself. This library cannot enforce a config it does not own, so it stops depending on it: it reads its own `TRUSTED_PROXIES` list and derives the caller IP from the forwarded header plus the real socket peer.
+* **Set `TRUSTED_PROXIES`.** Comma-separated CIDRs of every proxy/ingress in front of the service, e.g. `TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. A bare address is rejected outright — it is *not* silently widened to a `/32` or `/128`, so write the prefix you mean. So is any range broader than `/8` (IPv4) or `/48` (IPv6) — measured on the range as stored (see the next bullet) — which includes the catch-alls `0.0.0.0/0` and `::/0`. An unusable entry is logged at ERROR and dropped; startup never fails on it, and if *every* entry is unusable the result is identical to leaving the variable unset (no trusted proxies, no address forwarded).
+* **An IPv4 range written in IPv4-mapped IPv6 form is rebased to IPv4.** `::ffff:10.0.0.0/104` is stored as `10.0.0.0/8` and matches exactly what that entry matches, because hops are unmapped before comparison and the list is normalised the same way. The rebased length is what the minimum-length check is applied to, so writing a range in mapped form can never get it past a check its IPv4 form would fail: `::ffff:10.0.0.0/100` is a `/4` and is rejected. A mapped address carrying a prefix shorter than `/96` (`::ffff:10.0.0.0/95`) reaches past the mapped block, denotes no IPv4 range, and is rejected too. Plain `10.0.0.0/8` remains the clearest way to write it.
+* **Unset `TRUSTED_PROXIES` can lock your callers out.** No trusted proxies ⇒ no derivable caller IP ⇒ `clientIp` is omitted from the authorize call. Omitting the field is all this library does; what follows is the authorization service's decision, and **as of 2026-08-23** that decision is conditional:
 
-  Without this, `c.IP()` is the socket peer (the proxy), not the caller; misconfigured (trusting the header without pinning `Proxies`), it is attacker-controlled. Example:
+  | tenant | omitted `clientIp` |
+  | --- | --- |
+  | no IP allowlist active on the surface called | unaffected — the allowlist is not evaluated |
+  | allowlist active, caller recognised as one of the platform's own services | **allowed** — the platform could not determine the address, and that must not lock the tenant out |
+  | allowlist active, caller not recognised | **denied** |
+
+  Recognition is by the *calling service's* own network address against a range list configured on the authorization service (`PLATFORM_INTERNAL_CIDRS` — **its** variable, not one this library reads). With that unset nothing is recognised, so every addressless request to a protected tenant is denied. That is the case an operator is most likely to hit. The two "allowlist active" rows describe a healthy authorization service: it fails open on its own dependency failures, which is its concern, not a behaviour to design against.
+
+  **This table is a copy, and the copy is not the authority.** The rule belongs to the authorization service and can change there without a release here — it has already gone stale twice in this file, in both directions. Before acting on it, confirm it in that service's own IP-allowlist operations documentation. What does *not* go stale is the sentence above it: this library omits the field when no address is derivable, and takes no position on what that means.
+
+  There is deliberately **no fallback to the socket peer**: the peer is the ingress address, so a tenant with the ingress CIDR in its allowlist would see a *false allow* for every caller on earth. Set the variable on any deployment where tenants use IP allowlists.
+* **A missing or unusable value never fails the boot.** The service starts normally, forwarding no address — there is no `Fatal`, no `panic` and no error returned to your bootstrap. The degradation is announced instead: **one ERROR line at construction** (not per request) naming the cause and the consequence, e.g.
+
+  ```text
+  TRUSTED_PROXIES is not set; client IP will not be forwarded and the per-tenant IP allowlist has nothing to match the caller against
+  ```
+
+  A value that was set but left no usable CIDR logs the same consequence with a distinct cause (`has no usable CIDR`), preceded by one ERROR per dropped entry. **Alert on that line.** It is emitted once, at construction, and is the only warning before the conditional outcome above starts applying to every request this service authorizes.
+* **How the IP is chosen.** The hop list is every `X-Forwarded-For` line on the request followed by the real socket peer. It is walked **right to left** (nearest hop first), skipping every hop inside a trusted CIDR; the first hop that is not a trusted proxy is the caller. If every hop is trusted (fully-internal traffic), or a hop cannot be read as a bare IP, no caller is attributable: the result is empty and `clientIp` is omitted — which, for a tenant with an active allowlist, is the conditional outcome described in the bullet above, not a quiet pass. IPv4-mapped IPv6 hops (`::ffff:203.0.113.7`) are normalised, so they match IPv4 CIDRs and reach the allowlist in the form it stores.
+
+* **The chain is read off the request, not through `c.IPs()`.** `c.IPs()` reads the same header but filters it through the consuming service's app config first: with `EnableIPValidation` set, Fiber drops every token it does not recognise as an address before this library sees the chain. Dropping a token closes the gap it left, so the walk no longer stops there and carries on further left — onto text the caller wrote about itself. The same request would attribute a different caller depending only on a flag in the embedding service. So the library reads the header bytes and splits them itself: one hop per comma position, surrounding whitespace trimmed, **empty positions kept** (an empty position is a hop that cannot be vouched for, so it stops the walk like any other unreadable one). Repeated `X-Forwarded-For` lines are read and concatenated in order, as [RFC 9110 §5.2](https://www.rfc-editor.org/rfc/rfc9110#section-5.2) defines them — reading only the first line would discard the trustworthy right-hand end of the chain and stop the walk further left.
+* **A hop carrying a port does not parse.** `1.2.3.4:80` is not a bare IP, so it stops the walk and no caller IP is attributed for that request. Standard `X-Forwarded-For` carries no port and nginx/ALB do not add one, but **IIS and some proxies do** — if one of those sits in front of the service, strip the port at the proxy, or every affected request reaches the authorization service addressless and takes the conditional outcome above.
+* **No code change needed.** The public `Authorize(product, resource, action)` signature is unchanged. Consuming services get this behavior by upgrading the library and setting the environment variable.
+* **Your Fiber trusted-proxy config still matters for everything else.** `c.IP()`, request logging and rate limiting in your own service continue to read it, so keep configuring all four knobs; the authorization path simply no longer depends on you getting it right:
 
   ```go
   f := fiber.New(fiber.Config{
@@ -167,8 +225,8 @@ On the Fiber path, `Authorize` automatically sends `clientIp = c.IP()` to `POST 
       EnableIPValidation: true,
   })
   ```
-* **gRPC is not IP-enforced yet.** The gRPC interceptors do not forward a client IP in this version, so gRPC-authorized calls skip IP allowlist enforcement. Peer/metadata IP extraction is a planned follow-up.
-* **Cache is IP-scoped.** When `AUTH_CACHE_TTL > 0`, the decision cache key includes `clientIp`, so a decision cached for one IP is never reused for another. IP-dependent decisions stay correct under caching.
+* **gRPC forwards no client IP yet.** The gRPC interceptors send no `clientIp` in this version, so every gRPC-authorized call reaches the authorization service addressless — the same position as an unset `TRUSTED_PROXIES`, and subject to the same conditional outcome, including the deny. Peer/metadata IP extraction is a planned follow-up.
+* **Cache is IP-scoped.** When `AUTH_CACHE_TTL > 0`, the decision cache key includes `clientIp`, so a decision cached for one IP is never reused for another. IP-dependent decisions stay correct under caching. When no IP is derivable the key holds an empty string, exactly as the gRPC path has always done.
 
 ## 📡 Expected Authorization Service Response
 
@@ -213,7 +271,7 @@ Notes:
 - Keys in `MethodPolicies` must be full method names in the form `/package.Service/Method`.
 - When `SubResolver` returns an empty string, the subject is derived from token claims.
  - If you already use multiple interceptors, prefer `grpc.ChainUnaryInterceptor(...)` and include the auth interceptor alongside telemetry/logging.
- - The interceptors do not forward a client IP in this version, so gRPC-authorized calls are not IP-allowlist enforced yet. See [Client IP forwarding](#-client-ip-forwarding).
+ - The interceptors do not forward a client IP in this version, so a gRPC-authorized call carries no address for the per-tenant IP allowlist to match, and takes whatever outcome the authorization service gives an addressless request. See [Client IP forwarding](#-client-ip-forwarding).
 
 ## 🚧 Error Handling
 

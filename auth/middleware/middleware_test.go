@@ -819,17 +819,19 @@ func TestAuthorize_FailClosed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestAuthorize_ForwardsClientIP drives a request through the Fiber Authorize
-// middleware and asserts the caller IP resolved by c.IP() is forwarded to the
-// authorize endpoint as an OPTIONAL "clientIp" body field: present (== resolved
-// IP) when an IP is available, and ABSENT when the resolved IP is empty so the
-// wire body stays byte-identical to today for every deployed access-manager.
+// middleware and asserts the caller IP derived by the middleware is forwarded to
+// the authorize endpoint as an OPTIONAL "clientIp" body field: present (== the
+// derived IP) when one is available, and ABSENT when it is empty so the wire
+// body stays byte-identical to today for every deployed access-manager. The
+// derivation itself (and its trusted-proxy inputs) is covered in clientip_test.go.
 func TestAuthorize_ForwardsClientIP(t *testing.T) {
 	t.Parallel()
 
-	// newApp builds a Fiber app whose c.IP() reads the X-Forwarded-For header.
-	// The in-memory test connection reports 0.0.0.0 as its remote address, so it
-	// is added to the trusted-proxy allowlist; this lets a test drive a known
-	// client IP (or an empty one, by omitting the header) deterministically.
+	// newApp builds a Fiber app carrying the trusted-proxy config a correctly
+	// configured service sets. The middleware no longer reads it — it derives the
+	// caller IP from its own TRUSTED_PROXIES list (testPeerCIDR below, matching the
+	// in-memory test connection's 0.0.0.0 peer) — but keeping it here shows the two
+	// agree when the service IS configured.
 	newApp := func(auth *AuthClient) *fiber.App {
 		app := fiber.New(fiber.Config{
 			TrustProxy:       true,
@@ -874,7 +876,7 @@ func TestAuthorize_ForwardsClientIP(t *testing.T) {
 		server := newCapturingServer(t, &capturedBody)
 		defer server.Close()
 
-		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, trustedProxies: mustPrefixes(t, testPeerCIDR)}
 
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -896,11 +898,11 @@ func TestAuthorize_ForwardsClientIP(t *testing.T) {
 		server := newCapturingServer(t, &capturedBody)
 		defer server.Close()
 
-		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, trustedProxies: mustPrefixes(t, testPeerCIDR)}
 
 		// No X-Forwarded-For header: the only hop is the test connection's
-		// 0.0.0.0, which newApp lists as a trusted proxy, so the walk skips it
-		// and no untrusted address remains -> c.IP() resolves to "" -> key
+		// 0.0.0.0, which the client lists as a trusted proxy, so the walk skips it
+		// and no untrusted address remains -> the derived IP is "" -> key
 		// omitted. This is not a harness quirk: it mirrors fully-internal
 		// traffic, where every hop is a trusted proxy and no caller IP can be
 		// attributed, which is exactly what the empty-value guard exists for.
@@ -930,9 +932,9 @@ func TestAuthorize_DecisionCache_ScopedByClientIP(t *testing.T) {
 		blockedIP = "198.51.100.9"
 	)
 
-	// newApp builds a Fiber app whose c.IP() reads X-Forwarded-For (the in-memory
-	// test connection reports 0.0.0.0, added to the trusted-proxy allowlist), so a
-	// test can drive a known client IP deterministically.
+	// newApp builds a Fiber app fronted by a trusted proxy (the in-memory test
+	// connection's 0.0.0.0 peer, listed in the client's TRUSTED_PROXIES fixture),
+	// so a test can drive a known client IP through X-Forwarded-For.
 	newApp := func(auth *AuthClient) *fiber.App {
 		app := fiber.New(fiber.Config{
 			TrustProxy:       true,
@@ -981,7 +983,7 @@ func TestAuthorize_DecisionCache_ScopedByClientIP(t *testing.T) {
 		t.Parallel()
 
 		server, hits := ipAllowlistServer(t)
-		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, cache: newDecisionCache(time.Minute)}
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, cache: newDecisionCache(time.Minute), trustedProxies: mustPrefixes(t, testPeerCIDR)}
 		app := newApp(auth)
 
 		// Request 1 from the ALLOWED IP: authorized and cached.
@@ -1000,7 +1002,7 @@ func TestAuthorize_DecisionCache_ScopedByClientIP(t *testing.T) {
 		t.Parallel()
 
 		server, hits := ipAllowlistServer(t)
-		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, cache: newDecisionCache(time.Minute)}
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, cache: newDecisionCache(time.Minute), trustedProxies: mustPrefixes(t, testPeerCIDR)}
 		app := newApp(auth)
 
 		// Two identical requests from the SAME allowed IP: the second is served from
@@ -1043,7 +1045,7 @@ func TestAuthorize_DoesNotTraceClientIP(t *testing.T) {
 	}))
 	defer server.Close()
 
-	auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+	auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, trustedProxies: mustPrefixes(t, testPeerCIDR)}
 
 	app := fiber.New(fiber.Config{
 		TrustProxy:       true,
