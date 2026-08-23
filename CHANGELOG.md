@@ -1,3 +1,15 @@
+## [3.4.0](https://github.com/LerianStudio/lib-auth/compare/v3.3.0...v3.4.0) (2026-08-23)
+
+
+### Bug Fixes
+
+* **middleware:** derive the client IP inside the library ([5e7b1bb](https://github.com/LerianStudio/lib-auth/commit/5e7b1bbc3d9bdd654eeba3de50a5fe1bb881b4c9))
+* **middleware:** name the rule that rejected a trusted-proxy entry ([792f1f3](https://github.com/LerianStudio/lib-auth/commit/792f1f3bf61e9d2f4392a3c412f05d2f4e8d10fd))
+* **middleware:** read the forwarded chain from the request, not c.IPs() ([b32e95b](https://github.com/LerianStudio/lib-auth/commit/b32e95befcd1f23312cf23ad22a34e1c8b66d814))
+* **middleware:** rebase v4-mapped trusted-proxy ranges to IPv4 ([1fc3e0f](https://github.com/LerianStudio/lib-auth/commit/1fc3e0f5cc26e04ec9afc507d74661df3c632892))
+* **middleware:** suggest a zoned-address correction that parses ([16d09c5](https://github.com/LerianStudio/lib-auth/commit/16d09c5d0ee63b55a1dc4a027a9bf2a71f1ea8a0))
+* **middleware:** validate a suggested correction before printing it ([efea2c6](https://github.com/LerianStudio/lib-auth/commit/efea2c6f9556d203bfb3146502f7e0e6260a1983))
+
 ## [3.3.0](https://github.com/LerianStudio/lib-auth/compare/v3.2.0...v3.3.0) (2026-07-29)
 
 
