@@ -343,6 +343,18 @@ func TestFirstUntrustedHop(t *testing.T) {
 			trusted: []string{"10.0.0.0/8"},
 			want:    "",
 		},
+		{
+			// An IPv4 range written in v4-mapped-v6 form is INERT: hops are unmapped
+			// to their v4 form before matching, and a v6 prefix never contains a v4
+			// address. The entry parses and survives validation, so nothing warns —
+			// the proxy is simply never recognised and gets returned as the client.
+			// Documented in the README; pinned here so the doc has a measurement
+			// behind it.
+			name:    "v4_range_written_in_v6_mapped_form_matches_nothing",
+			hops:    []string{"203.0.113.7", "10.0.0.1"},
+			trusted: []string{"::ffff:10.0.0.0/104"},
+			want:    "10.0.0.1",
+		},
 	}
 
 	for _, tt := range tests {
@@ -503,6 +515,41 @@ func TestAuthorize_ClientIP_AllHopsTrustedOmitsField(t *testing.T) {
 
 	_, has := capturedBody["clientIp"]
 	assert.False(t, has, "clientIp must be omitted when every hop is a trusted proxy")
+}
+
+// TestAuthorize_ClientIP_MalformedForwardedTokenOmitsField drives a malformed
+// X-Forwarded-For token through Fiber's REAL c.IPs() at the Authorize level. The
+// unit table feeds firstUntrustedHop a hop list directly and so assumes garbage
+// can reach the derivation; this proves Fiber actually hands it over (with
+// EnableIPValidation off, extractIPsFromHeader appends every comma-separated
+// token unvalidated) and that the parse guard in clientip.go is load-bearing
+// rather than dead code.
+//
+// Chain: 203.0.113.7, garbage, 10.1.2.3 + the 0.0.0.0 peer. Walking right to
+// left the peer and 10.1.2.3 are trusted, then "garbage" cannot be shown to be a
+// trusted proxy — so the walk stops and no caller IP is attributed, rather than
+// crediting the 203.0.113.7 sitting behind it.
+func TestAuthorize_ClientIP_MalformedForwardedTokenOmitsField(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody map[string]string
+
+	server := bodyCapturingAuthServer(t, &capturedBody)
+
+	auth := &AuthClient{
+		Address:        server.URL,
+		Enabled:        true,
+		Logger:         &testLogger{},
+		trustedProxies: mustPrefixes(t, testPeerCIDR, "10.0.0.0/8"),
+	}
+
+	resp := getWithForwardedFor(t, misconfiguredProxyApp(auth), "203.0.113.7, garbage, 10.1.2.3")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	assert.NotContains(t, capturedBody, "clientIp",
+		"an unparseable hop must stop the walk: no caller IP is attributable, so the field is omitted")
+	assert.NotEqual(t, "203.0.113.7", capturedBody["clientIp"],
+		"the hop behind the unparseable one must never be credited as the caller")
 }
 
 // TestAuthorize_ClientIP_OmittedWhenTrustedProxiesUnset pins the unset->empty
