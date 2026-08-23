@@ -81,6 +81,28 @@ AUTH_BREAKER_ENABLED=false
 # AUTH_RETRY_MAX retries only TRANSIENT failures (network/timeout/5xx) up to N
 # times within AUTH_TIMEOUT; authoritative 401/403 are never retried. 0 disables.
 AUTH_RETRY_MAX=0
+
+# TRUSTED_PROXIES is the comma-separated list of proxy CIDRs whose forwarded hop
+# (X-Forwarded-For) may be believed. It is what the library uses to derive the
+# caller IP it sends as clientIp, so the per-tenant IP allowlist depends on it.
+# Same variable name (and value) already used by plugin-access-manager and
+# flowker — NOT to be confused with tracer's unrelated TRUSTED_PROXY_CIDRS.
+#
+# Entries must be CIDRs: a bare address ("10.0.0.1") is rejected, and so is an
+# overly broad range (IPv4 wider than /8, IPv6 wider than /48). An unusable entry
+# is logged at ERROR and dropped; the valid entries still apply. Nothing here
+# ever fails the boot: a missing or entirely unusable value logs ONE ERROR line
+# at startup naming cause and consequence, and the service starts with IP policy
+# inert.
+#
+# LEAVING IT UNSET DISABLES IP-BASED AUTHORIZATION. With no trusted proxies the
+# derived caller IP is empty, clientIp is omitted from the authorize call, and
+# the auth service denies any request under an active IP allowlist
+# (deny-missing-ip). This is deliberate: falling back to the socket peer would
+# forward the ingress address, which — for a tenant that happens to have the
+# ingress CIDR registered — would allow EVERY caller. Set it on any deployment
+# that uses tenant IP allowlists.
+TRUSTED_PROXIES=10.0.0.0/8,<ingress-cidr>
 ```
 
 ### 2. Create a new instance of the middleware:
@@ -144,20 +166,25 @@ Authorization: Bearer your_token_here
 }
 ```
 
-The `clientIp` field is optional. On the Fiber path it is set automatically to `c.IP()`; the authorization service uses it to enforce the per-tenant IP allowlist.
+The `clientIp` field is optional. On the Fiber path the middleware derives it from `TRUSTED_PROXIES` (see below) and omits it when no caller IP can be attributed; the authorization service uses it to enforce the per-tenant IP allowlist.
 
 ## 🌐 Client IP forwarding
 
-On the Fiber path, `Authorize` automatically sends `clientIp = c.IP()` to `POST /v1/authorize`, enabling the access manager to enforce a per-tenant IP allowlist downstream.
+On the Fiber path, `Authorize` sends `clientIp` to `POST /v1/authorize`, enabling the access manager to enforce a per-tenant IP allowlist downstream.
 
-* **No code change needed.** The public `Authorize(sub, resource, action)` signature is unchanged. Consuming services get this behavior by upgrading the library — bump the version, nothing else.
-* **Configure trusted proxies (Fiber v3).** For `c.IP()` to report the real client IP behind a proxy or ingress, the consuming service must configure Fiber v3's trusted-proxy settings on its `fiber.New(fiber.Config{...})`:
-  * `TrustProxy: true` — enable proxy-header trust (Fiber v3 renamed the v2 `EnableTrustedProxyCheck`).
-  * `TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"10.0.0.0/8", "<ingress-cidr>"}}` — the exact set of upstream proxy IPs/CIDRs allowed to set the forwarded header. Never leave this empty while trusting the header, or any caller can spoof its IP.
-  * `ProxyHeader: fiber.HeaderXForwardedFor` — the header `c.IP()` reads the client IP from.
-  * `EnableIPValidation: true` — validates that the value is a well-formed IP, so `c.IP()` cannot return a spoofable raw `X-Forwarded-For` string.
+* **The library derives the IP itself — it does NOT call `c.IP()`.** Fiber v3 only walks the `X-Forwarded-For` chain right-to-left when the consuming service sets *all four* of `TrustProxy`, `TrustProxyConfig{Proxies}`, `ProxyHeader` and `EnableIPValidation` on the `fiber.App` it built. Miss the last one and `c.IP()` returns the **raw header** — a value the caller supplies about itself. This library cannot enforce a config it does not own, so it stops depending on it: it reads its own `TRUSTED_PROXIES` list and derives the caller IP from the forwarded header plus the real socket peer.
+* **Set `TRUSTED_PROXIES`.** Comma-separated CIDRs of every proxy/ingress in front of the service, e.g. `TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. A bare address is rejected (use `/32`, `/128`), as is an IPv4 range wider than `/8` or an IPv6 range wider than `/48`. An unusable entry is logged at ERROR and dropped — startup never fails on it.
+* **Unset `TRUSTED_PROXIES` means every IP-policy request is DENIED.** No trusted proxies ⇒ no derivable caller IP ⇒ `clientIp` is omitted ⇒ the auth service applies `deny-missing-ip`. There is deliberately **no fallback to the socket peer**: the peer is the ingress address, so a tenant with the ingress CIDR in its allowlist would see a *false allow* for every caller on earth. An empty value can never match by accident.
+* **A missing or unusable value never fails the boot.** The service starts normally with IP policy inert — there is no `Fatal`, no `panic` and no error returned to your bootstrap. The degradation is announced instead: **one ERROR line at construction** (not per request) naming the cause and the consequence, e.g.
 
-  Without this, `c.IP()` is the socket peer (the proxy), not the caller; misconfigured (trusting the header without pinning `Proxies`), it is attacker-controlled. Example:
+  ```text
+  TRUSTED_PROXIES is not set; client IP will not be forwarded and the per-tenant IP allowlist will not enforce
+  ```
+
+  A value that was set but left no usable CIDR logs the same consequence with a distinct cause (`has no usable CIDR`), preceded by one ERROR per dropped entry. Alert on that line rather than waiting for a 403.
+* **How the IP is chosen.** The hop list is `X-Forwarded-For` followed by the real socket peer. It is walked **right to left** (nearest hop first), skipping every hop inside a trusted CIDR; the first hop that is not a trusted proxy is the caller. If every hop is trusted (fully-internal traffic), or a hop is not a parseable bare IP, the result is empty — fail closed. IPv4-mapped IPv6 hops (`::ffff:203.0.113.7`) are normalised, so they match IPv4 CIDRs and reach the allowlist in the form it stores.
+* **No code change needed.** The public `Authorize(product, resource, action)` signature is unchanged. Consuming services get this behavior by upgrading the library and setting the environment variable.
+* **Your Fiber trusted-proxy config still matters for everything else.** `c.IP()`, request logging and rate limiting in your own service continue to read it, so keep configuring all four knobs; the authorization path simply no longer depends on you getting it right:
 
   ```go
   f := fiber.New(fiber.Config{
@@ -168,7 +195,7 @@ On the Fiber path, `Authorize` automatically sends `clientIp = c.IP()` to `POST 
   })
   ```
 * **gRPC is not IP-enforced yet.** The gRPC interceptors do not forward a client IP in this version, so gRPC-authorized calls skip IP allowlist enforcement. Peer/metadata IP extraction is a planned follow-up.
-* **Cache is IP-scoped.** When `AUTH_CACHE_TTL > 0`, the decision cache key includes `clientIp`, so a decision cached for one IP is never reused for another. IP-dependent decisions stay correct under caching.
+* **Cache is IP-scoped.** When `AUTH_CACHE_TTL > 0`, the decision cache key includes `clientIp`, so a decision cached for one IP is never reused for another. IP-dependent decisions stay correct under caching. When no IP is derivable the key holds an empty string, exactly as the gRPC path has always done.
 
 ## 📡 Expected Authorization Service Response
 

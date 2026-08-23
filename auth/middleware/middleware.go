@@ -10,6 +10,7 @@ import (
 	"io"
 	stdlog "log"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -101,6 +102,10 @@ type AuthClient struct {
 	// verifyIssuer, when non-empty, pins the accepted token "iss" claim during local
 	// verification. Read once from AUTH_JWT_ISSUER; inert when verifyKeys is empty.
 	verifyIssuer string
+
+	// trustedProxies is the CIDR allowlist of proxies whose forwarded hop may be
+	// believed. Read once from TRUSTED_PROXIES at construction.
+	trustedProxies []netip.Prefix
 }
 
 type AuthResponse struct {
@@ -253,6 +258,7 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		retryMax:            parseRetryMax(),
 		verifyKeys:          verifyKeys,
 		verifyIssuer:        verifyIssuer,
+		trustedProxies:      loadTrustedProxies(l),
 	}
 
 	if !enabled || address == "" {
@@ -349,11 +355,20 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 			return c.Status(http.StatusUnauthorized).SendString("Missing Token")
 		}
 
-		// Capture the caller IP resolved by Fiber (honoring the configured trusted
-		// proxy / ProxyHeader chain) and forward it so the auth service can apply
-		// IP-based policy. It is optional end-to-end: an empty value is omitted from
-		// the request body (see checkAuthorization).
-		clientIP := c.IP()
+		// Derive the caller IP HERE, from this library's own TRUSTED_PROXIES list —
+		// never from c.IP(). c.IP() honours the trusted-proxy chain only when the
+		// consuming service set all four of TrustProxy, TrustProxyConfig{Proxies},
+		// ProxyHeader and EnableIPValidation on the fiber.App it built; miss the last
+		// one and it hands back the raw forwarded header, i.e. a value the caller
+		// supplies about itself. lib-auth cannot enforce that config, so it stops
+		// depending on it (see resolveClientIP).
+		//
+		// With TRUSTED_PROXIES unset the result is EMPTY and no IP is forwarded: an
+		// empty value is omitted from the request body (see checkAuthorization) and
+		// the auth service treats an absent clientIp as deny-missing-ip. That is
+		// deliberate — falling back to the socket peer would forward the ingress
+		// address and could produce a false ALLOW.
+		clientIP := auth.resolveClientIP(c)
 
 		if authorized, statusCode, err := auth.checkAuthorization(ctx, product, resource, action, accessToken, clientIP); err != nil {
 			var commonsErr commons.Response

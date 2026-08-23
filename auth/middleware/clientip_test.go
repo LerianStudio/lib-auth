@@ -1,0 +1,554 @@
+package middleware
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/gofiber/fiber/v3"
+	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// testPeerCIDR is the in-memory Fiber test connection's peer address (0.0.0.0)
+// as a host CIDR. Listing it as a trusted proxy is what lets a test drive a
+// known client IP through the forwarded header deterministically — the same
+// role the ingress subnet plays in production.
+const testPeerCIDR = "0.0.0.0/32"
+
+// mustPrefixes parses CIDRs for a test fixture, failing the test on a typo.
+func mustPrefixes(t *testing.T, cidrs ...string) []netip.Prefix {
+	t.Helper()
+
+	prefixes := make([]netip.Prefix, 0, len(cidrs))
+
+	for _, cidr := range cidrs {
+		p, err := netip.ParsePrefix(cidr)
+		require.NoError(t, err, "test fixture CIDR %q must parse", cidr)
+
+		prefixes = append(prefixes, p.Masked())
+	}
+
+	return prefixes
+}
+
+// prefixStrings renders prefixes for comparison in table assertions.
+func prefixStrings(prefixes []netip.Prefix) []string {
+	out := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
+		out = append(out, p.String())
+	}
+
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// parseTrustedProxies (unit)
+// ---------------------------------------------------------------------------
+
+// TestParseTrustedProxies pins the TRUSTED_PROXIES parsing contract: a
+// comma-separated CIDR list, where a malformed entry is DROPPED (logged, never
+// fatal — NewAuthClient has no error return) and a bare address is REJECTED
+// rather than silently widened to a /32 or /128. Overly broad ranges are also
+// rejected: trusting them makes every hop trusted, which resolves to an empty
+// client IP and denies every IP-policy request — a config that can only be a
+// mistake.
+func TestParseTrustedProxies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{name: "empty", raw: "", want: nil},
+		{name: "whitespace_only", raw: "   \t ", want: nil},
+		{name: "single_cidr", raw: "10.0.0.0/8", want: []string{"10.0.0.0/8"}},
+		{
+			name: "multiple_with_spaces_and_empty_tokens",
+			raw:  " 10.0.0.0/8 , ,192.168.0.0/16 ",
+			want: []string{"10.0.0.0/8", "192.168.0.0/16"},
+		},
+		{
+			name: "malformed_entry_is_dropped_valid_kept",
+			raw:  "not-an-ip,10.0.0.0/8,10.0.0.0/99",
+			want: []string{"10.0.0.0/8"},
+		},
+		{
+			name: "bare_address_is_rejected",
+			raw:  "10.0.0.1,192.168.0.0/16",
+			want: []string{"192.168.0.0/16"},
+		},
+		{
+			name: "unmasked_prefix_is_normalised",
+			raw:  "10.1.2.3/8",
+			want: []string{"10.0.0.0/8"},
+		},
+		{name: "ipv4_catch_all_is_rejected", raw: "0.0.0.0/0", want: nil},
+		{name: "ipv4_too_broad_is_rejected", raw: "10.0.0.0/7", want: nil},
+		{name: "ipv6_catch_all_is_rejected", raw: "::/0", want: nil},
+		{name: "ipv6_too_broad_is_rejected", raw: "2001:db8::/47", want: nil},
+		{name: "ipv6_cidr_is_accepted", raw: "2001:db8::/48", want: []string{"2001:db8::/48"}},
+		{name: "single_host_cidr_is_accepted", raw: "203.0.113.7/32", want: []string{"203.0.113.7/32"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := parseTrustedProxies(tt.raw, &testLogger{})
+			assert.Equal(t, tt.want, prefixStringsOrNil(got))
+		})
+	}
+}
+
+// prefixStringsOrNil keeps the table's `want: nil` cases comparable.
+func prefixStringsOrNil(prefixes []netip.Prefix) []string {
+	if len(prefixes) == 0 {
+		return nil
+	}
+
+	return prefixStrings(prefixes)
+}
+
+// TestLoadTrustedProxies_UnsetYieldsNoTrust pins the product decision (Roberto,
+// 2026-08-22): with TRUSTED_PROXIES unset there is NO trusted-proxy list, so the
+// client IP resolves to empty and IP policy denies. It must NOT fall back to the
+// socket peer: the peer is the ingress address, and an operator who happens to
+// have registered the ingress CIDR in a tenant allow list would get a FALSE
+// ALLOW. Empty never matches by accident.
+func TestLoadTrustedProxies_UnsetYieldsNoTrust(t *testing.T) {
+	t.Setenv("TRUSTED_PROXIES", "")
+
+	assert.Empty(t, loadTrustedProxies(&testLogger{}),
+		"TRUSTED_PROXIES unset must yield no trusted proxies (client IP empty -> deny), never a socket-peer fallback")
+}
+
+// TestLoadTrustedProxies_ReadsEnv proves the platform-wide variable name is the
+// one read (TRUSTED_PROXIES — the same name plugin-access-manager and flowker
+// already consume and gitops already provisions).
+func TestLoadTrustedProxies_ReadsEnv(t *testing.T) {
+	t.Setenv("TRUSTED_PROXIES", "10.0.0.0/8, 192.168.0.0/16")
+
+	assert.Equal(t, []string{"10.0.0.0/8", "192.168.0.0/16"},
+		prefixStrings(loadTrustedProxies(&testLogger{})))
+}
+
+// recordingLogger captures emitted messages so a test can assert on what an
+// operator would actually see in the boot log.
+type recordingLogger struct {
+	mu       sync.Mutex
+	messages []string
+	levels   []log.Level
+}
+
+func (l *recordingLogger) Log(_ context.Context, level log.Level, msg string, _ ...log.Field) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.messages = append(l.messages, msg)
+	l.levels = append(l.levels, level)
+}
+
+func (l *recordingLogger) With(_ ...log.Field) log.Logger { return l }
+func (l *recordingLogger) WithGroup(_ string) log.Logger  { return l }
+func (l *recordingLogger) Enabled(_ log.Level) bool       { return true }
+func (l *recordingLogger) Sync(_ context.Context) error   { return nil }
+
+// degradedLines returns the messages announcing that IP policy is inert. The
+// phrase is the consequence half of the line, which is the part an operator
+// greps for.
+func (l *recordingLogger) degradedLines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var found []string
+
+	for _, msg := range l.messages {
+		if strings.Contains(msg, "IP allowlist will not enforce") {
+			found = append(found, msg)
+		}
+	}
+
+	return found
+}
+
+// TestLoadTrustedProxies_DegradationIsObservable pins the boot-time contract for
+// missing or unusable configuration: the service comes up (this path has no
+// Fatal, no panic, no error return — a misconfigured deployment must not fail to
+// boot), but the operator gets EXACTLY ONE log line naming both the cause and
+// the consequence. Silence here is the failure mode: IP policy stops enforcing
+// and the only other signal is a 403 in production.
+func TestLoadTrustedProxies_DegradationIsObservable(t *testing.T) {
+	t.Run("unset_logs_cause_and_consequence_once", func(t *testing.T) {
+		t.Setenv("TRUSTED_PROXIES", "")
+
+		logger := &recordingLogger{}
+		require.Empty(t, loadTrustedProxies(logger))
+
+		lines := logger.degradedLines()
+		require.Len(t, lines, 1, "the degradation must be announced exactly once, at construction")
+		assert.Contains(t, lines[0], "TRUSTED_PROXIES is not set", "the line must name the cause")
+		assert.Contains(t, lines[0], "client IP will not be forwarded", "the line must name the consequence")
+		assert.Equal(t, log.LevelError, logger.levels[len(logger.levels)-1],
+			"a silently-disabled security control is logged at the level this library already uses for degraded config")
+	})
+
+	t.Run("all_entries_unusable_logs_a_distinct_cause_once", func(t *testing.T) {
+		t.Setenv("TRUSTED_PROXIES", "not-an-ip,10.0.0.1")
+
+		logger := &recordingLogger{}
+		require.Empty(t, loadTrustedProxies(logger))
+
+		lines := logger.degradedLines()
+		require.Len(t, lines, 1, "the degradation must be announced exactly once, however many entries were dropped")
+		assert.Contains(t, lines[0], "no usable CIDR",
+			"a value that was set but unusable must be distinguishable from one that was never set")
+	})
+
+	t.Run("valid_config_is_silent", func(t *testing.T) {
+		t.Setenv("TRUSTED_PROXIES", "10.0.0.0/8")
+
+		logger := &recordingLogger{}
+		require.Len(t, loadTrustedProxies(logger), 1)
+
+		assert.Empty(t, logger.degradedLines(), "a working configuration must not warn")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// firstUntrustedHop (unit)
+// ---------------------------------------------------------------------------
+
+// TestFirstUntrustedHop covers the derivation itself: walk the hop list (the
+// forwarded header, then the real socket peer) from RIGHT to LEFT, discard hops
+// inside the trusted CIDRs, and return the first untrusted one.
+func TestFirstUntrustedHop(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		hops    []string
+		trusted []string
+		want    string
+	}{
+		{
+			// The whole point of the hotfix: with no trusted-proxy list nothing is
+			// derivable, so the caller gets no IP at all.
+			name:    "no_trusted_proxies_yields_empty",
+			hops:    []string{"203.0.113.7", "10.0.0.1"},
+			trusted: nil,
+			want:    "",
+		},
+		{
+			// The spoof: the peer is NOT a trusted proxy, so the request did not
+			// arrive through our ingress and its forwarded header is worthless. The
+			// attacker-chosen value must NOT win; the socket peer does.
+			name:    "untrusted_peer_beats_spoofed_header",
+			hops:    []string{"1.2.3.4", "198.51.100.9"},
+			trusted: []string{"10.0.0.0/8"},
+			want:    "198.51.100.9",
+		},
+		{
+			name:    "trusted_peer_yields_last_forwarded_hop",
+			hops:    []string{"203.0.113.7", "10.0.0.1"},
+			trusted: []string{"10.0.0.0/8"},
+			want:    "203.0.113.7",
+		},
+		{
+			name:    "multiple_trusted_hops_are_skipped_right_to_left",
+			hops:    []string{"1.2.3.4", "203.0.113.7", "10.0.0.5", "10.0.0.1"},
+			trusted: []string{"10.0.0.0/8"},
+			want:    "203.0.113.7",
+		},
+		{
+			name:    "all_hops_trusted_yields_empty",
+			hops:    []string{"10.0.0.9", "10.0.0.5", "10.0.0.1"},
+			trusted: []string{"10.0.0.0/8"},
+			want:    "",
+		},
+		{
+			// An unparseable hop cannot be shown to be a trusted proxy, so nothing
+			// to its left may be credited: stop and yield empty (fail closed)
+			// instead of returning a bogus "IP" or reaching further into
+			// attacker-controlled territory.
+			name:    "unparseable_hop_stops_the_walk",
+			hops:    []string{"203.0.113.7", "unknown", "10.0.0.1"},
+			trusted: []string{"10.0.0.0/8"},
+			want:    "",
+		},
+		{
+			name:    "hop_with_port_is_not_accepted",
+			hops:    []string{"203.0.113.7:44321", "10.0.0.1"},
+			trusted: []string{"10.0.0.0/8"},
+			want:    "",
+		},
+		{
+			// A v4-mapped v6 peer must still match an IPv4 trusted CIDR, otherwise
+			// an operator's 10.0.0.0/8 silently stops matching behind a
+			// dual-stack listener and the derivation returns the proxy itself.
+			name:    "v4_mapped_v6_hop_matches_ipv4_cidr",
+			hops:    []string{"203.0.113.7", "::ffff:10.0.0.1"},
+			trusted: []string{"10.0.0.0/8"},
+			want:    "203.0.113.7",
+		},
+		{
+			// ...and the returned value is normalised to its IPv4 form, so the
+			// auth service compares the same string the allow list stores.
+			name:    "v4_mapped_v6_client_is_normalised",
+			hops:    []string{"::ffff:203.0.113.7", "10.0.0.1"},
+			trusted: []string{"10.0.0.0/8"},
+			want:    "203.0.113.7",
+		},
+		{
+			name:    "ipv6_hop_matches_ipv6_cidr",
+			hops:    []string{"2001:db8:1::9", "2001:db8::1"},
+			trusted: []string{"2001:db8::/48"},
+			want:    "2001:db8:1::9",
+		},
+		{
+			// netip.Prefix.Contains rejects any zoned address outright, so a
+			// link-local proxy hop would never match its own CIDR unless the zone is
+			// stripped first.
+			name:    "zoned_ipv6_hop_is_de_zoned_before_matching",
+			hops:    []string{"203.0.113.7", "2001:db8::1%eth0"},
+			trusted: []string{"2001:db8::/48"},
+			want:    "203.0.113.7",
+		},
+		{
+			// A zone on an IPv4 literal is not a valid address; it stops the walk
+			// like any other unparseable hop rather than being silently repaired.
+			name:    "zoned_ipv4_hop_stops_the_walk",
+			hops:    []string{"203.0.113.7", "10.0.0.1%eth0"},
+			trusted: []string{"10.0.0.0/8"},
+			want:    "",
+		},
+		{
+			name:    "surrounding_whitespace_is_tolerated",
+			hops:    []string{" 203.0.113.7 ", " 10.0.0.1 "},
+			trusted: []string{"10.0.0.0/8"},
+			want:    "203.0.113.7",
+		},
+		{
+			name:    "empty_hop_list_yields_empty",
+			hops:    nil,
+			trusted: []string{"10.0.0.0/8"},
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var trusted []netip.Prefix
+			if len(tt.trusted) > 0 {
+				trusted = mustPrefixes(t, tt.trusted...)
+			}
+
+			assert.Equal(t, tt.want, firstUntrustedHop(tt.hops, trusted))
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Authorize - client IP derived by lib-auth, not by Fiber
+// ---------------------------------------------------------------------------
+
+// misconfiguredProxyApp builds a Fiber app with the PARTIAL trusted-proxy
+// config that is the actual hole: TrustProxy + Proxies + ProxyHeader are set,
+// EnableIPValidation is FORGOTTEN. Fiber v3 only walks the chain right-to-left
+// when all four are present; with validation off, extractIPFromHeader returns
+// the RAW X-Forwarded-For header verbatim (req.go:636), attacker-controlled and
+// unparsed. Every test below runs on this app on purpose: lib-auth must reach
+// the right answer regardless of what the consuming service configured.
+func misconfiguredProxyApp(auth *AuthClient) *fiber.App {
+	app := fiber.New(fiber.Config{
+		TrustProxy:       true,
+		TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"0.0.0.0"}},
+		ProxyHeader:      fiber.HeaderXForwardedFor,
+	})
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+		return c.SendString("reached handler")
+	})
+
+	return app
+}
+
+// bodyCapturingAuthServer records the authorize request body and always allows.
+func bodyCapturingAuthServer(t *testing.T, captured *map[string]string) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(captured); err != nil {
+			t.Errorf("mock server: failed to decode request body: %v", err)
+		}
+
+		writeAuthorized(w, true)
+	}))
+
+	t.Cleanup(server.Close)
+
+	return server
+}
+
+func clientIPTestToken() string {
+	return createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+}
+
+func getWithForwardedFor(t *testing.T, app *fiber.App, xff string) *http.Response {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+clientIPTestToken())
+
+	if xff != "" {
+		req.Header.Set(fiber.HeaderXForwardedFor, xff)
+	}
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+
+	return resp
+}
+
+// TestAuthorize_ClientIP_SpoofedHeaderIsIgnoredWhenPeerUntrusted is the pentest
+// case (Taura, 2026-08-19). The socket peer (the in-memory test connection,
+// 0.0.0.0) is NOT in the trusted-proxy list, so the forwarded header cannot be
+// believed: the attacker's chosen value must not reach the auth service. Under
+// the pre-fix code (clientIP := c.IP()) this app hands the raw header straight
+// through and the assertion fails.
+func TestAuthorize_ClientIP_SpoofedHeaderIsIgnoredWhenPeerUntrusted(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody map[string]string
+
+	server := bodyCapturingAuthServer(t, &capturedBody)
+
+	auth := &AuthClient{
+		Address:        server.URL,
+		Enabled:        true,
+		Logger:         &testLogger{},
+		trustedProxies: mustPrefixes(t, "10.0.0.0/8"),
+	}
+
+	resp := getWithForwardedFor(t, misconfiguredProxyApp(auth), "203.0.113.7")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	assert.NotEqual(t, "203.0.113.7", capturedBody["clientIp"],
+		"a forwarded header from an UNTRUSTED peer must never become the client IP")
+	assert.Equal(t, "0.0.0.0", capturedBody["clientIp"],
+		"the real socket peer is the only trustworthy hop here")
+}
+
+// TestAuthorize_ClientIP_WalksChainRightToLeft proves lib-auth parses the chain
+// itself. With the peer and the last hop trusted, the client is the first
+// untrusted hop from the right — not the whole raw header, which is what the
+// misconfigured Fiber app would return.
+func TestAuthorize_ClientIP_WalksChainRightToLeft(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody map[string]string
+
+	server := bodyCapturingAuthServer(t, &capturedBody)
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+		// The test peer stands in for the outermost proxy; 10.0.0.0/8 for the
+		// ingress subnet behind it.
+		trustedProxies: mustPrefixes(t, testPeerCIDR, "10.0.0.0/8"),
+	}
+
+	resp := getWithForwardedFor(t, misconfiguredProxyApp(auth), "203.0.113.7, 10.1.2.3")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	assert.Equal(t, "203.0.113.7", capturedBody["clientIp"],
+		"the first untrusted hop from the right is the client")
+}
+
+// TestAuthorize_ClientIP_AllHopsTrustedOmitsField covers fully-internal traffic:
+// every hop is a trusted proxy, no caller IP is attributable, and the optional
+// clientIp field is omitted so the wire body stays byte-identical to the
+// pre-IP behaviour for every deployed access-manager.
+func TestAuthorize_ClientIP_AllHopsTrustedOmitsField(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody map[string]string
+
+	server := bodyCapturingAuthServer(t, &capturedBody)
+
+	auth := &AuthClient{
+		Address:        server.URL,
+		Enabled:        true,
+		Logger:         &testLogger{},
+		trustedProxies: mustPrefixes(t, testPeerCIDR, "10.0.0.0/8"),
+	}
+
+	resp := getWithForwardedFor(t, misconfiguredProxyApp(auth), "10.1.2.3")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	_, has := capturedBody["clientIp"]
+	assert.False(t, has, "clientIp must be omitted when every hop is a trusted proxy")
+}
+
+// TestAuthorize_ClientIP_OmittedWhenTrustedProxiesUnset pins the unset->empty
+// product decision at the wire level: no TRUSTED_PROXIES, no clientIp field —
+// even though a forwarded header is present and Fiber would happily return it.
+// The auth service treats an absent clientIp as deny-missing-ip.
+func TestAuthorize_ClientIP_OmittedWhenTrustedProxiesUnset(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody map[string]string
+
+	server := bodyCapturingAuthServer(t, &capturedBody)
+
+	auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+	resp := getWithForwardedFor(t, misconfiguredProxyApp(auth), "203.0.113.7")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	_, has := capturedBody["clientIp"]
+	assert.False(t, has, "with no trusted-proxy list configured no client IP may be forwarded")
+}
+
+// TestAuthorize_ClientIP_EmptyKeysCacheAsEmpty guards the decision cache against
+// the change in what clientIP holds. With no trusted proxies every request
+// derives "" — so two requests carrying DIFFERENT forwarded headers collapse to
+// the SAME cache key (clientIP: "") and the second is served from cache. That is
+// the pre-existing gRPC/no-IP behaviour, unchanged. (It is safe precisely
+// because the decisions being shared are all made with no IP at all.)
+func TestAuthorize_ClientIP_EmptyKeysCacheAsEmpty(t *testing.T) {
+	t.Parallel()
+
+	server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+		writeAuthorized(w, true)
+	})
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+		cache:   newDecisionCache(time.Minute),
+	}
+	app := misconfiguredProxyApp(auth)
+
+	assert.Equal(t, http.StatusOK, getWithForwardedFor(t, app, "203.0.113.7").StatusCode)
+	assert.Equal(t, http.StatusOK, getWithForwardedFor(t, app, "198.51.100.9").StatusCode)
+
+	assert.Equal(t, int64(1), hits.Load(),
+		"both requests derive an empty client IP, so they share the cache key and the authz service is queried once")
+}
