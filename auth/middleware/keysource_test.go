@@ -1274,11 +1274,14 @@ func TestJWKSKeySource_Fetch_LoopbackToLoopbackRedirect_Allowed(t *testing.T) {
 func TestJWKSKeySource_Fetch_RedirectLoop_StoppedByHopLimit(t *testing.T) {
 	t.Parallel()
 
-	var hits int
+	// atomic: the handler runs on server goroutines while the assertion below reads
+	// from the test goroutine, and the client abandons the chain mid-flight at the
+	// hop cap — so the final write need not be ordered before the read.
+	var hits atomic.Int64
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/loop", func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		hits.Add(1)
 		http.Redirect(w, r, "/loop", http.StatusFound) // loopback self-redirect: policy-compliant, infinite
 	})
 
@@ -1291,7 +1294,7 @@ func TestJWKSKeySource_Fetch_RedirectLoop_StoppedByHopLimit(t *testing.T) {
 	rerr := source.Refresh(context.Background())
 	require.Error(t, rerr, "an infinite redirect loop must be stopped, not followed to the timeout")
 	assert.Contains(t, rerr.Error(), "redirects")
-	assert.LessOrEqual(t, hits, maxJWKSRedirects+1, "must stop at the hop cap, not loop unbounded")
+	assert.LessOrEqual(t, hits.Load(), int64(maxJWKSRedirects+1), "must stop at the hop cap, not loop unbounded")
 }
 
 // ---------------------------------------------------------------------------
