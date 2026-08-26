@@ -760,8 +760,13 @@ func TestNewJWKSKeySource_EmptyURL_Errors(t *testing.T) {
 func TestNewJWKSKeySource_BadBootstrapPEM_Errors(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewJWKSKeySource(JWKSConfig{URL: "http://example/jwks", BootstrapPEM: []byte("not-a-pem")})
+	// The URL must satisfy the plaintext policy (https, or http on loopback) or
+	// construction fails at validateJWKSURL and never reaches parseRSAPublicKeys —
+	// the bad-PEM branch would then go uncovered while the test still passed.
+	// Asserting the PEM-specific message keeps it that way.
+	_, err := NewJWKSKeySource(JWKSConfig{URL: "https://example.com/jwks", BootstrapPEM: []byte("not-a-pem")})
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bootstrap PEM")
 }
 
 func TestNewM2MAuthenticatorWithKeySource_EnabledRequiresSource(t *testing.T) {
