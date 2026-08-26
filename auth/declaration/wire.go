@@ -54,7 +54,8 @@ const (
 	envM2MClientID     = "IDP_M2M_CLIENT_ID"
 	envM2MClientSecret = "IDP_M2M_CLIENT_SECRET" // #nosec G101 -- env var NAME, not a credential value
 
-	// Deprecated aliases — the pre-#4232 un-prefixed names. Honored for ONE
+	// Deprecated aliases — the legacy pre-#4232 names (e.g. PLUGIN_IDENTITY_HOST
+	// for IDP_HOST; the M2M_* pair and DECLARATION_ENABLED were un-prefixed). Honored for ONE
 	// release with a WARN on use; delete after the alias-window release ships.
 	envDeclarationEnabledDeprecated = "DECLARATION_ENABLED"
 	envIdentityHostDeprecated       = "PLUGIN_IDENTITY_HOST"
@@ -114,7 +115,7 @@ type WireInput struct {
 // func for graceful shutdown.
 //
 // Contract (the IDP_* names below are the CANONICAL ones — see the const block:
-// each also accepts its old un-prefixed name as a DEPRECATED alias for one
+// each also accepts its legacy (pre-#4232) name as a DEPRECATED alias for one
 // release, and canonical always wins. New deployments must set the IDP_* names):
 //   - IDP_DECLARATION_ENABLED != "true"  => no-op: returns a non-nil func(){} and
 //     a nil error WITHOUT reading or validating any other env (default-off keeps
