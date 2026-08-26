@@ -113,11 +113,13 @@ type WireInput struct {
 // lifecycle boilerplate that each plugin used to hand-write. It returns a stop
 // func for graceful shutdown.
 //
-// Contract:
-//   - DECLARATION_ENABLED != "true"  => no-op: returns a non-nil func(){} and a
-//     nil error WITHOUT reading or validating any other env (default-off keeps
+// Contract (the IDP_* names below are the CANONICAL ones — see the const block:
+// each also accepts its old un-prefixed name as a DEPRECATED alias for one
+// release, and canonical always wins. New deployments must set the IDP_* names):
+//   - IDP_DECLARATION_ENABLED != "true"  => no-op: returns a non-nil func(){} and
+//     a nil error WITHOUT reading or validating any other env (default-off keeps
 //     the plugin boot unchanged when the flag is off).
-//   - enabled => PLUGIN_IDENTITY_HOST, M2M_CLIENT_ID and M2M_CLIENT_SECRET are
+//   - enabled => IDP_HOST, IDP_M2M_CLIENT_ID and IDP_M2M_CLIENT_SECRET are
 //     required (each yields a clear, named error when blank). Deeper URL
 //     validation is delegated to New.
 //
