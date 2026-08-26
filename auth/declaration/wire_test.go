@@ -15,12 +15,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setWireEnv seeds the FIXED, un-prefixed env contract WireFromEnv consumes so
-// each test can then mutate a single knob. It intentionally sets EVERY variable
-// (via t.Setenv) so a leftover value from the host env can never bleed into a
-// case — t.Setenv also forbids t.Parallel, which is why these tests are serial.
+// setWireEnv seeds the DEPRECATED, un-prefixed env aliases WireFromEnv still
+// honors so each test can then mutate a single knob. It intentionally sets EVERY
+// variable (via t.Setenv) so a leftover value from the host env can never bleed
+// into a case — t.Setenv also forbids t.Parallel, which is why these tests are
+// serial.
+//
+// The canonical IDP_* names are explicitly BLANKED first: lookupWithDeprecatedAlias
+// prefers a non-empty canonical value, so an ambient IDP_* in the host/CI env would
+// otherwise win over the alias this fixture is exercising — silently testing the
+// wrong path (and pointing the publisher's background request at the host IDP_HOST).
 func setWireEnv(t *testing.T, identityHost, authHost string, authEnabled bool) {
 	t.Helper()
+
+	clearCanonicalIDPEnv(t)
 
 	t.Setenv("DECLARATION_ENABLED", "true")
 	t.Setenv("PLUGIN_IDENTITY_HOST", identityHost)
@@ -32,6 +40,24 @@ func setWireEnv(t *testing.T, identityHost, authHost string, authEnabled bool) {
 		t.Setenv("PLUGIN_AUTH_ENABLED", "true")
 	} else {
 		t.Setenv("PLUGIN_AUTH_ENABLED", "false")
+	}
+}
+
+// clearCanonicalIDPEnv blanks the four canonical IDP_* variables so an ambient
+// value from the host or CI environment cannot override the deprecated aliases a
+// test fixture sets. Blank (not unset) is sufficient and is what t.Setenv offers:
+// lookupWithDeprecatedAlias trims before testing for emptiness, so a blank
+// canonical falls through to the alias exactly as an unset one would.
+func clearCanonicalIDPEnv(t *testing.T) {
+	t.Helper()
+
+	for _, name := range []string{
+		"IDP_DECLARATION_ENABLED",
+		"IDP_HOST",
+		"IDP_M2M_CLIENT_ID",
+		"IDP_M2M_CLIENT_SECRET",
+	} {
+		t.Setenv(name, "")
 	}
 }
 
@@ -57,6 +83,14 @@ func TestWireFromEnv_Disabled(t *testing.T) {
 
 	for name, val := range cases {
 		t.Run(name, func(t *testing.T) {
+			// The canonical IDP_* names are blanked so an ambient
+			// IDP_DECLARATION_ENABLED=true in the host/CI env cannot win over the
+			// alias and flip this case onto the ENABLED path — which would still
+			// satisfy every assertion below (a wired publisher also returns a
+			// non-nil stop and a nil error) while silently testing the opposite
+			// branch and firing a background publish at the host IDP_HOST.
+			clearCanonicalIDPEnv(t)
+
 			// Only the flag is set (to a non-"true" value, or empty). NO other
 			// env is provided — proving the disabled path validates nothing.
 			if val == "" {
