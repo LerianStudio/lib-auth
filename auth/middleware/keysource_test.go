@@ -1369,3 +1369,66 @@ func TestVerify_SourcePath_ConcurrentForcedRefresh_AtMostOneFetchPerWindow(t *te
 	assert.Equal(t, int64(1), hits.Load(),
 		"N concurrent forced refreshes in one cooldown window must collapse to exactly ONE upstream fetch")
 }
+
+// Concurrent forced refreshes must JOIN the in-flight fetch, not be bounced by
+// the cooldown. The cooldown exists to suppress SEQUENTIAL repeats; a follower
+// that arrives while the leader is fetching a rotated key must wait for that
+// fetch and see its outcome — bouncing it to serve-stale makes the follower's
+// retry verify against the old keys and fail 401 during a real rotation.
+func TestJWKSKeySource_Refresh_ConcurrentFollowerJoinsInflightFetch(t *testing.T) {
+	t.Parallel()
+
+	priv, _ := pubKeyOf(t)
+	bootstrapPEM := pubPEMOf(t, priv)
+
+	_, rotatedPub := pubKeyOf(t)
+	rotatedBody := jwksJSON(t, "rotated", rotatedPub)
+
+	var hits atomic.Int64
+	entered := make(chan struct{})
+	release := make(chan struct{})
+
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) == 1 {
+			close(entered)
+		}
+		<-release
+		_, _ = w.Write(rotatedBody)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(releaseAll) // LIFO: unblock the handler before srv.Close waits on it
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	source, err := NewJWKSKeySource(JWKSConfig{
+		URL:             srv.URL,
+		BootstrapPEM:    []byte(bootstrapPEM),
+		RefreshInterval: time.Hour,
+		Ctx:             ctx,
+	})
+	require.NoError(t, err)
+
+	leaderDone := make(chan error, 1)
+	go func() { leaderDone <- source.Refresh(context.Background()) }()
+
+	<-entered // the leader is now in-flight upstream
+
+	followerDone := make(chan error, 1)
+	go func() { followerDone <- source.Refresh(context.Background()) }()
+
+	select {
+	case <-followerDone:
+		t.Fatal("the follower returned while the leader's fetch was still in flight — it must join and wait")
+	case <-time.After(75 * time.Millisecond):
+	}
+
+	releaseAll()
+	require.NoError(t, <-leaderDone)
+	require.NoError(t, <-followerDone)
+
+	assert.Equal(t, int64(1), hits.Load(), "leader and follower must share one upstream fetch")
+}

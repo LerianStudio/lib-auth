@@ -54,6 +54,11 @@ const (
 	// same JWKS URL, so concurrent forced refreshes collapse onto one in-flight fetch.
 	jwksRefreshFlightKey = "refresh"
 
+	// jwksForcedFlightKey is the single-flight key for the cooldown-gated FORCED
+	// refresh wrapper (Refresh). Distinct from jwksRefreshFlightKey so the nested
+	// group.Do in refreshNow does not join — and deadlock on — its own caller.
+	jwksForcedFlightKey = "forced-refresh"
+
 	// defaultForcedRefreshCooldown is the minimum interval between two forced
 	// (signature-failure-triggered) upstream JWKS fetches. It caps refresh
 	// amplification: a stream of DISTINCT bad-signature tokens cannot drive one
@@ -434,33 +439,37 @@ func (s *jwksKeySource) cacheAgeGaugeBuilder(ctx context.Context) *metrics.Gauge
 // single-flight. The stable-kid fast path is preserved: the first forced refresh
 // (lastForcedNano == 0) always fires, so a real rotation refreshes promptly.
 func (s *jwksKeySource) Refresh(ctx context.Context) error {
-	now := s.now().UnixNano()
+	// The cooldown decision runs INSIDE its own single-flight, so a follower that
+	// arrives while the leader is fetching JOINS that fetch and shares its outcome
+	// instead of being bounced by the freshly-claimed window. Bouncing it made the
+	// follower's retry verify against the still-stale cache and fail 401 in the
+	// middle of a real rotation. The cooldown therefore suppresses only SEQUENTIAL
+	// repeats: a caller that arrives after the flight closed gets serve-stale nil.
+	// The key differs from refreshNow's, or the nested Do would join itself.
+	_, err, _ := s.group.Do(jwksForcedFlightKey, func() (any, error) {
+		now := s.now().UnixNano()
 
-	prev := s.lastForcedNano.Load()
-	if prev != 0 && now-prev < s.forcedCooldown.Nanoseconds() {
-		return nil // gated: serve stale, do not hit upstream
-	}
+		prev := s.lastForcedNano.Load()
+		if prev != 0 && now-prev < s.forcedCooldown.Nanoseconds() {
+			return nil, nil // gated: serve stale, do not hit upstream
+		}
 
-	// Claim the window ATOMICALLY before fetching. The load/check/store sequence was not
-	// atomic: two callers could both read the same prev, both pass the gate, and — when
-	// their single-flight windows did not overlap — both start an upstream fetch inside
-	// one cooldown window. CompareAndSwap makes the claim the single serialization point:
-	// exactly one caller advances prev->now and fetches; a racing caller's CAS fails and
-	// it serves stale (returns nil) instead of starting a second fetch.
-	if !s.lastForcedNano.CompareAndSwap(prev, now) {
-		return nil
-	}
+		// Single goroutine inside the flight: a plain Store claims the window.
+		s.lastForcedNano.Store(now)
 
-	err := s.refreshNow(ctx)
+		err := s.refreshNow(ctx)
 
-	// A genuinely-cancelled attempt (context.Canceled) never meaningfully reached
-	// upstream, so release the window — otherwise a cancellation could stall a real
-	// key rotation for the whole cooldown. Ordinary fetch failures/timeouts (e.g.
-	// DeadlineExceeded, 5xx) SHOULD hold the window: that is the amplification guard.
-	// CompareAndSwap only restores if no concurrent refresh has since re-claimed it.
-	if err != nil && errors.Is(err, context.Canceled) {
-		s.lastForcedNano.CompareAndSwap(now, prev)
-	}
+		// A genuinely-cancelled attempt (context.Canceled) never meaningfully reached
+		// upstream, so release the window — otherwise a cancellation could stall a real
+		// key rotation for the whole cooldown. Ordinary fetch failures/timeouts (e.g.
+		// DeadlineExceeded, 5xx) SHOULD hold the window: that is the amplification guard.
+		// CompareAndSwap only restores if no concurrent refresh has since re-claimed it.
+		if err != nil && errors.Is(err, context.Canceled) {
+			s.lastForcedNano.CompareAndSwap(now, prev)
+		}
+
+		return nil, err
+	})
 
 	return err
 }
