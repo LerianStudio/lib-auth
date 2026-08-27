@@ -1,3 +1,38 @@
+## [3.5.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v3.5.0-beta.3...v3.5.0-beta.4) (2026-08-27)
+
+
+### Bug Fixes
+
+* **auth:** let concurrent forced JWKS refreshes join the in-flight fetch ([d370ec3](https://github.com/LerianStudio/lib-auth/commit/d370ec3fb51848bf57be3982d7f1d38dad6a82ba)), closes [#152](https://github.com/LerianStudio/lib-auth/issues/152)
+
+## [3.5.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v3.5.0-beta.2...v3.5.0-beta.3) (2026-08-26)
+
+## [3.5.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v3.5.0-beta.1...v3.5.0-beta.2) (2026-08-26)
+
+## [3.5.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.4.0...v3.5.0-beta.1) (2026-08-23)
+
+
+### Features
+
+* **declaration:** add WireFromEnv to hoist plugin D7 boilerplate ([7ef812e](https://github.com/LerianStudio/lib-auth/commit/7ef812e4a3d9ec0064984134937a239c3d4705e9))
+* **middleware:** dynamic JWKS key source for M2M token verification ([9e252e1](https://github.com/LerianStudio/lib-auth/commit/9e252e1dcb5cff02ee028f0de5e7ad9b5d5c3155))
+* **declaration:** namespace RI/D7 env contract under IDP_ prefix ([#4232](https://github.com/LerianStudio/lib-auth/issues/4232)) ([3e1cdf7](https://github.com/LerianStudio/lib-auth/commit/3e1cdf772a6820bcaada0d099b326de2690f21d4))
+* **declaration:** reject HTTP-verb actions in manifest validation ([6ce4f5a](https://github.com/LerianStudio/lib-auth/commit/6ce4f5a0c99bf6ea94fb7a1607e52b1a893bc73b))
+* **declaration:** remove HTTP-verb action reject from manifest validation ([c4b590d](https://github.com/LerianStudio/lib-auth/commit/c4b590dce3ee77ce93e537986e7f93c69fa1b2d1)), closes [#143](https://github.com/LerianStudio/lib-auth/issues/143)
+
+
+### Bug Fixes
+
+* **middleware:** address JWKS review — https fail-closed, ctx detach, bounds ([25ef0e0](https://github.com/LerianStudio/lib-auth/commit/25ef0e09ea927857961b6713fbe0ac4f612de13f))
+* **middleware:** address review comments on test goroutine safety and README version note ([85e9d71](https://github.com/LerianStudio/lib-auth/commit/85e9d71301d2bcd231fe5a890ef4c62cccddcbbe))
+* **middleware:** bind decision-cache entries to the bearer token ([#147](https://github.com/LerianStudio/lib-auth/issues/147)) ([c7f8460](https://github.com/LerianStudio/lib-auth/commit/c7f84601e856a78caa22348268cdebe3304b6149)), closes [#146](https://github.com/LerianStudio/lib-auth/issues/146)
+* **middleware:** cap JWKS redirect hops ([163d728](https://github.com/LerianStudio/lib-auth/commit/163d7288ed7577e4eb3b645c41d9c62c59043fff)), closes [#144](https://github.com/LerianStudio/lib-auth/issues/144)
+* **middleware:** inherit the request context instead of extracting inbound trace headers ([#148](https://github.com/LerianStudio/lib-auth/issues/148)) ([0e3da25](https://github.com/LerianStudio/lib-auth/commit/0e3da251fa4356d1850bb9c96e43dd1e51b6816b))
+* **middleware:** inherit the request context instead of extracting inbound trace headers ([9a1a05a](https://github.com/LerianStudio/lib-auth/commit/9a1a05a5a1d1ab4facb2722a87e1bb8ccb89633e))
+* **middleware:** JWKS review round 2 — redirect policy, host check, atomic cooldown ([ba9c026](https://github.com/LerianStudio/lib-auth/commit/ba9c02693b3a8c961c8440e23a053e92333ac69f))
+* **declaration:** suppress G101 env-name false positive, align identity env doc, harden trim test ([088aa2e](https://github.com/LerianStudio/lib-auth/commit/088aa2e79bb44a57e861b52768d0281424062af5))
+* **declaration:** use gosec hash-form nosec directive to suppress G101 ([40ee028](https://github.com/LerianStudio/lib-auth/commit/40ee0289db1267f8b1c281cfeba2cb0ac319a5c8))
+
 ## [3.4.0](https://github.com/LerianStudio/lib-auth/compare/v3.3.0...v3.4.0) (2026-08-23)
 
 
@@ -9,6 +44,66 @@
 * **middleware:** rebase v4-mapped trusted-proxy ranges to IPv4 ([1fc3e0f](https://github.com/LerianStudio/lib-auth/commit/1fc3e0f5cc26e04ec9afc507d74661df3c632892))
 * **middleware:** suggest a zoned-address correction that parses ([16d09c5](https://github.com/LerianStudio/lib-auth/commit/16d09c5d0ee63b55a1dc4a027a9bf2a71f1ea8a0))
 * **middleware:** validate a suggested correction before printing it ([efea2c6](https://github.com/LerianStudio/lib-auth/commit/efea2c6f9556d203bfb3146502f7e0e6260a1983))
+
+## [3.4.0-beta.6](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.5...v3.4.0-beta.6) (2026-08-19)
+
+
+### Features
+
+* **declaration:** namespace RI/D7 env contract under IDP_ prefix ([#4232](https://github.com/LerianStudio/lib-auth/issues/4232)) ([3e1cdf7](https://github.com/LerianStudio/lib-auth/commit/3e1cdf772a6820bcaada0d099b326de2690f21d4))
+
+## [3.4.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.4...v3.4.0-beta.5) (2026-08-18)
+
+
+### Bug Fixes
+
+* **middleware:** address review comments on test goroutine safety and README version note ([85e9d71](https://github.com/LerianStudio/lib-auth/commit/85e9d71301d2bcd231fe5a890ef4c62cccddcbbe))
+* **middleware:** inherit the request context instead of extracting inbound trace headers ([#148](https://github.com/LerianStudio/lib-auth/issues/148)) ([0e3da25](https://github.com/LerianStudio/lib-auth/commit/0e3da251fa4356d1850bb9c96e43dd1e51b6816b))
+* **middleware:** inherit the request context instead of extracting inbound trace headers ([9a1a05a](https://github.com/LerianStudio/lib-auth/commit/9a1a05a5a1d1ab4facb2722a87e1bb8ccb89633e))
+
+## [3.4.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.3...v3.4.0-beta.4) (2026-08-08)
+
+
+### Bug Fixes
+
+* **middleware:** bind decision-cache entries to the bearer token ([#147](https://github.com/LerianStudio/lib-auth/issues/147)) ([c7f8460](https://github.com/LerianStudio/lib-auth/commit/c7f84601e856a78caa22348268cdebe3304b6149)), closes [#146](https://github.com/LerianStudio/lib-auth/issues/146)
+
+## [3.4.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.2...v3.4.0-beta.3) (2026-08-07)
+
+
+### Features
+
+* **middleware:** dynamic JWKS key source for M2M token verification ([9e252e1](https://github.com/LerianStudio/lib-auth/commit/9e252e1dcb5cff02ee028f0de5e7ad9b5d5c3155))
+* **declaration:** remove HTTP-verb action reject from manifest validation ([c4b590d](https://github.com/LerianStudio/lib-auth/commit/c4b590dce3ee77ce93e537986e7f93c69fa1b2d1)), closes [#143](https://github.com/LerianStudio/lib-auth/issues/143)
+
+
+### Bug Fixes
+
+* **middleware:** address JWKS review — https fail-closed, ctx detach, bounds ([25ef0e0](https://github.com/LerianStudio/lib-auth/commit/25ef0e09ea927857961b6713fbe0ac4f612de13f))
+* **middleware:** cap JWKS redirect hops ([163d728](https://github.com/LerianStudio/lib-auth/commit/163d7288ed7577e4eb3b645c41d9c62c59043fff)), closes [#144](https://github.com/LerianStudio/lib-auth/issues/144)
+* **middleware:** JWKS review round 2 — redirect policy, host check, atomic cooldown ([ba9c026](https://github.com/LerianStudio/lib-auth/commit/ba9c02693b3a8c961c8440e23a053e92333ac69f))
+
+## [3.4.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v3.4.0-beta.1...v3.4.0-beta.2) (2026-08-05)
+
+
+### Features
+
+* **declaration:** reject HTTP-verb actions in manifest validation ([6ce4f5a](https://github.com/LerianStudio/lib-auth/commit/6ce4f5a0c99bf6ea94fb7a1607e52b1a893bc73b))
+
+## [3.4.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.3.1-beta.1...v3.4.0-beta.1) (2026-08-04)
+
+
+### Features
+
+* **declaration:** add WireFromEnv to hoist plugin D7 boilerplate ([7ef812e](https://github.com/LerianStudio/lib-auth/commit/7ef812e4a3d9ec0064984134937a239c3d4705e9))
+
+
+### Bug Fixes
+
+* **declaration:** suppress G101 env-name false positive, align identity env doc, harden trim test ([088aa2e](https://github.com/LerianStudio/lib-auth/commit/088aa2e79bb44a57e861b52768d0281424062af5))
+* **declaration:** use gosec hash-form nosec directive to suppress G101 ([40ee028](https://github.com/LerianStudio/lib-auth/commit/40ee0289db1267f8b1c281cfeba2cb0ac319a5c8))
+
+## [3.3.1-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.3.0...v3.3.1-beta.1) (2026-07-30)
 
 ## [3.3.0](https://github.com/LerianStudio/lib-auth/compare/v3.2.0...v3.3.0) (2026-07-29)
 

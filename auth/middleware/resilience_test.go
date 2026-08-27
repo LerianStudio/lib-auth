@@ -25,6 +25,23 @@ func userToken() string {
 	})
 }
 
+// forgedUserToken builds a token whose claims are byte-identical to userToken's but
+// whose signature is not: the payload-edited / forged token an attacker replays.
+func forgedUserToken() string {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user-1",
+	})
+
+	signed, err := token.SignedString([]byte("attacker-secret"))
+	if err != nil {
+		panic("failed to sign forged test JWT: " + err.Error())
+	}
+
+	return signed
+}
+
 // countingAuthServer returns a server that records how many /v1/authorize requests
 // it received and responds per the supplied handler.
 func countingAuthServer(t *testing.T, handler func(w http.ResponseWriter, r *http.Request, n int64)) (*httptest.Server, *atomic.Int64) {
@@ -204,6 +221,43 @@ func TestCheckAuthorization_NegativeCache_Served(t *testing.T) {
 	}
 
 	assert.Equal(t, int64(1), hits.Load(), "a cached denial is served without re-querying")
+}
+
+// TestCheckAuthorization_ForgedTokenMustNotHitCachedAllow proves the cache does not
+// substitute for authentication. Local JWT verification is off (the default), so the
+// authz service is the ONLY party that verifies the token signature. Two tokens carry
+// identical claims but different signatures — the shape of a payload-edited or wholly
+// forged token — and the authz service authorizes only the genuine one. The forged
+// token must therefore reach the authz service and be denied, never be served an
+// allow that was cached for the genuine token.
+func TestCheckAuthorization_ForgedTokenMustNotHitCachedAllow(t *testing.T) {
+	t.Parallel()
+
+	genuine := userToken()
+	forged := forgedUserToken()
+
+	require.NotEqual(t, genuine, forged, "the two tokens must differ on the wire")
+
+	server, hits := countingAuthServer(t, func(w http.ResponseWriter, r *http.Request, _ int64) {
+		// The authz service verifies the signature; only the genuine token passes.
+		writeAuthorized(w, r.Header.Get("Authorization") == genuine)
+	})
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+		cache:   newDecisionCache(time.Minute),
+	}
+
+	authorized, _, err := auth.checkAuthorization(context.Background(), "", "res", "read", genuine, "")
+	require.NoError(t, err)
+	require.True(t, authorized, "the genuine token must be authorized and warm the cache")
+
+	authorized, _, err = auth.checkAuthorization(context.Background(), "", "res", "read", forged, "")
+	require.NoError(t, err)
+	assert.False(t, authorized, "a forged token must never be served a decision cached for a genuine one")
+	assert.Equal(t, int64(2), hits.Load(), "the forged token must miss the cache and reach authz")
 }
 
 // ---------------------------------------------------------------------------

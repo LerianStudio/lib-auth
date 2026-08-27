@@ -1,6 +1,8 @@
 package declaration
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -183,6 +185,35 @@ func TestValidate_Valid(t *testing.T) {
 	require.NoError(t, m.Validate())
 }
 
+// TestValidate_AllowsHTTPVerbAndSemanticActions locks in the REMOVAL of the
+// HTTP-verb action reject: an action is validated only for non-emptiness, so
+// HTTP-verb actions (post/get/put/patch, case-insensitive, incl. whitespace-padded)
+// now PASS Validate() with no error — exactly as they did before the reject existed.
+// It also keeps semantic actions ("delete" and CRUD verbs) and arbitrary domain
+// verbs passing. If the reject is ever accidentally re-added, this test fails.
+func TestValidate_AllowsHTTPVerbAndSemanticActions(t *testing.T) {
+	actions := []string{
+		// Previously-rejected HTTP verbs (all cases + whitespace padding) — now valid.
+		"post", "get", "put", "patch", "POST", "GET", "Put", "PaTcH",
+		" post ", "  PATCH  ",
+		// Semantic CRUD actions and domain verbs — always valid.
+		"create", "read", "update", "delete", "DELETE", "rotate",
+		// Other HTTP methods that were never rejected — still valid.
+		"head", "options", "trace", "connect",
+	}
+
+	for _, action := range actions {
+		t.Run(action, func(t *testing.T) {
+			raw := fmt.Sprintf(`{"service":"s","version":1,"roles":[{"name":"x"}],"permissions":[{"resource":"r","action":%q,"effect":"allow","roles":["x"]}]}`, action)
+
+			m, err := parseManifest([]byte(raw))
+			require.NoError(t, err)
+
+			require.NoError(t, m.Validate(), "action %q must be accepted (no HTTP-verb reject)", action)
+		})
+	}
+}
+
 func TestValidate_RejectsBadManifests(t *testing.T) {
 	tests := map[string]string{
 		"empty service":   `{"version":1,"permissions":[{"resource":"r","action":"read","effect":"allow","roles":["x"]}],"roles":[{"name":"x"}]}`,
@@ -205,4 +236,84 @@ func TestValidate_RejectsBadManifests(t *testing.T) {
 			assert.ErrorAs(t, verr, &me, "validation error must be a *ManifestError")
 		})
 	}
+}
+
+// TestValidate_AggregatesMultipleViolations locks in that Validate does NOT
+// fail-fast on the first bad permission: a single manifest carrying several
+// DISTINCT invalid permissions must surface a violation for EVERY offending
+// permissions[i], all joined into one *ManifestError (strings.Join(..., "; ")).
+// This restores the aggregation coverage lost when the HTTP-verb reject tests
+// were removed. The three permissions are engineered so each triggers exactly
+// one violation (distinct resources avoid composed-name collisions):
+//
+//	permissions[0] — empty resource   (resource must not be empty)
+//	permissions[1] — bad effect       (effect must be "allow" or "deny")
+//	permissions[2] — undeclared role  (references undeclared role "ghost")
+//
+// Service/version/roles are all valid, so the aggregated message contains
+// exactly these three permission violations and nothing else.
+// TestValidate_RejectsEmptyAction retains the negative coverage for the
+// non-empty-action contract requested in review. The HTTP-verb reject was
+// removed, but validatePermissions STILL rejects an action that is empty — or
+// whitespace-only, since it trims (strings.TrimSpace(p.Action) == "") — with a
+// "action must not be empty" violation. Each fixture keeps service/version/roles
+// and every OTHER permission field valid, so the empty-action check is the ONLY
+// violation triggered and the assertion is unambiguous.
+func TestValidate_RejectsEmptyAction(t *testing.T) {
+	tests := map[string]string{
+		"empty action":           `{"service":"s","version":1,"roles":[{"name":"x"}],"permissions":[{"resource":"r","action":"","effect":"allow","roles":["x"]}]}`,
+		"whitespace-only action": `{"service":"s","version":1,"roles":[{"name":"x"}],"permissions":[{"resource":"r","action":"   ","effect":"allow","roles":["x"]}]}`,
+	}
+
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			m, err := parseManifest([]byte(raw))
+			require.NoError(t, err)
+
+			verr := m.Validate()
+			require.Error(t, verr, "an empty or whitespace-only action must be rejected")
+
+			var me *ManifestError
+			require.ErrorAs(t, verr, &me, "validation error must be a *ManifestError")
+
+			// The offending permissions[0] must carry the action-empty reason.
+			assert.Contains(t, me.Reason, "permissions[0]: action must not be empty")
+
+			// Only the empty-action check fires — no unrelated violation muddies it.
+			violations := strings.Split(me.Reason, "; ")
+			assert.Len(t, violations, 1, "expected exactly the empty-action violation")
+		})
+	}
+}
+
+func TestValidate_AggregatesMultipleViolations(t *testing.T) {
+	const raw = `{
+	  "service": "s",
+	  "version": 1,
+	  "roles": [{ "name": "x" }],
+	  "permissions": [
+	    { "resource": "",   "action": "read", "effect": "allow", "roles": ["x"] },
+	    { "resource": "r1", "action": "read", "effect": "maybe", "roles": ["x"] },
+	    { "resource": "r2", "action": "read", "effect": "allow", "roles": ["ghost"] }
+	  ]
+	}`
+
+	m, err := parseManifest([]byte(raw))
+	require.NoError(t, err)
+
+	verr := m.Validate()
+	require.Error(t, verr, "manifest with multiple invalid permissions must be rejected")
+
+	var me *ManifestError
+	require.ErrorAs(t, verr, &me, "validation error must be a *ManifestError")
+
+	// Every offending permissions[i] must be reported, each with its own reason.
+	assert.Contains(t, me.Reason, "permissions[0]: resource must not be empty")
+	assert.Contains(t, me.Reason, `permissions[1]: effect must be "allow" or "deny"`)
+	assert.Contains(t, me.Reason, `permissions[2]: references undeclared role "ghost"`)
+
+	// The aggregation must not fail-fast: exactly one violation per bad index,
+	// joined with "; " — no more, no fewer.
+	violations := strings.Split(me.Reason, "; ")
+	assert.Len(t, violations, 3, "expected exactly one aggregated violation per offending permission")
 }

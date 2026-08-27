@@ -90,7 +90,8 @@ type Config struct {
 	// caller does the //go:embed (embed is relative to the caller's source). Required.
 	Manifest []byte
 	// IdentityAddr is the base URL of the identity component (target of the PUT).
-	// Distinct from the auth address; the plugin reads PLUGIN_IDENTITY_ADDRESS.
+	// Distinct from the auth address; WireFromEnv sources it from IDP_HOST (the
+	// pre-#4232 PLUGIN_IDENTITY_HOST remains a deprecated alias for one release).
 	// Required.
 	IdentityAddr string
 	// Auth is any TokenMinter — typically the plugin's existing *middleware.AuthClient

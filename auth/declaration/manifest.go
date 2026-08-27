@@ -44,9 +44,10 @@ type DeclarationManifest struct {
 	M2M *DeclarationM2M `json:"m2m,omitempty" yaml:"m2m,omitempty"`
 }
 
-// DeclarationPermission is a single declared permission. The action is SEMANTIC
-// (create/read/update/delete), never an HTTP verb. The resource is written bare;
-// the central reconciler composes the `{service}/` prefix.
+// DeclarationPermission is a single declared permission. The action is a free-form
+// string that must be non-empty; the SEMANTIC action naming standard (prefer domain
+// intent over transport verbs) is documented guidance, not enforced here. The resource
+// is written bare; the central reconciler composes the `{service}/` prefix.
 type DeclarationPermission struct {
 	Resource string   `json:"resource,omitempty" yaml:"resource,omitempty"`
 	Action   string   `json:"action,omitempty" yaml:"action,omitempty"`

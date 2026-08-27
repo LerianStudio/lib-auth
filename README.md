@@ -10,6 +10,36 @@ Repository: [lib-auth](https://github.com/LerianStudio/lib-auth)
 go get github.com/LerianStudio/lib-auth/v3@latest
 ```
 
+## 🔭 Inbound trace context is not extracted by the middleware
+
+`Authorize` and `RequireM2M` used to call `tracing.ExtractHTTPContext`
+themselves, parenting their spans onto a caller-supplied `traceparent` and
+replacing the context's baggage with the inbound `baggage` header. Both now
+inherit the ambient request context.
+
+Whether an inbound trace context is honored is the **application's** decision — a
+caller that can set the header can otherwise choose this service's trace ID and
+force its sampling decision, which is why lib-observability gates it behind
+`tracing.TelemetryConfig.TrustInboundTraceContext` (default false) from `v2.1.2`
+on. lib-auth cannot see that setting, so it inherits whatever parent the
+application's telemetry middleware decided on: an app that trusts the inbound
+trace already parented its server span to it and lib-auth joins for free; an app
+that does not stays local, and so does lib-auth. Baggage sent to the
+authorization service now comes from the application's context, never from the
+wire — `propagation.Baggage.Extract` replaces the whole baggage value instead of
+merging, so self-extraction silently discarded baggage the application seeded.
+The gRPC interceptor always behaved this way; the HTTP path is now consistent
+with it.
+
+**What you will observe:** auth spans stop joining a caller-supplied
+`traceparent` unless the application itself trusts it.
+
+Note: `lib-observability v2.1.2` is an **application-level** requirement, not a
+requirement of this module — lib-auth itself does not use
+`TrustInboundTraceContext` and keeps its own minimum at `v2.0.0`. Applications
+that want to opt in to honoring inbound trace context must depend on
+`lib-observability >= v2.1.2` and enable the flag themselves.
+
 ## 🚀 How to Use
 
 ### 1. Set the needed environment variables:

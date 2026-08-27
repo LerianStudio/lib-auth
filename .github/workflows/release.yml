@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   publish_release:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     environment:
       name: create_release
     name: Create Release to Lib

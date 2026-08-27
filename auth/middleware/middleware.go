@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,9 +74,13 @@ type AuthClient struct {
 	timeout time.Duration
 
 	// cache, when non-nil, memoizes authorization decisions for a short TTL keyed by
-	// (sub, resource, action, product, clientIp) — NEVER the access token. clientIp
-	// is part of the key because decisions are IP-dependent (tenant IP-allowlist), so
-	// a cross-IP cache hit would bypass the allowlist; do NOT drop it from the key.
+	// (sha256(accessToken), sub, resource, action, product, clientIp) — the digest of
+	// the access token, never the token itself. clientIp is part of the key because
+	// decisions are IP-dependent (tenant IP-allowlist), so a cross-IP cache hit would
+	// bypass the allowlist. The token digest is part of the key because local JWT
+	// verification is opt-in and off by default, which makes the authz round-trip the
+	// only signature check: keyed on claims alone, a forged token would be served an
+	// entry warmed by a genuine one. Do NOT drop either from the key.
 	// Enabled by AUTH_CACHE_TTL > 0 (opt-in; nil = no caching, prior behavior). It
 	// trades a bounded revocation-propagation lag (= TTL) for load shedding and outage
 	// resilience.
@@ -103,6 +108,14 @@ type AuthClient struct {
 	// verification. Read once from AUTH_JWT_ISSUER; inert when verifyKeys is empty.
 	verifyIssuer string
 
+	// source, when non-nil, supplies verification keys dynamically from a JWKS-backed
+	// KeySource — the SAME dynamic path the M2M gate uses (serve-stale cache + forced
+	// refresh-and-retry on a signature failure, the stable-kid rotation case). It is
+	// opt-in and additive: set via WithKeySource after NewAuthClient. When nil (the
+	// default) extractClaims preserves the exact env-PEM / ParseUnverified behavior.
+	// When set it takes precedence over verifyKeys for the verified path, and both
+	// route their crypto through the single shared verifyToken.
+	source KeySource
 	// trustedProxies is the CIDR allowlist of proxies whose forwarded hop may be
 	// believed. Read once from TRUSTED_PROXIES at construction.
 	trustedProxies []netip.Prefix
@@ -222,6 +235,23 @@ func initializeDefaultLogger() (log.Logger, error) {
 	return logger, nil
 }
 
+// WithKeySource wires a dynamic JWKS KeySource into the client's local token
+// verification, mirroring the M2M gate's dynamic path (serve-stale cache + forced
+// refresh-and-retry on a signature failure). It is additive and opt-in: the default
+// client (no KeySource) verifies via the env-configured PEM keys or, absent those,
+// preserves the historical ParseUnverified behavior. When set, the KeySource takes
+// precedence over the env-PEM keys for the verified path. Returns the receiver for
+// fluent configuration after NewAuthClient; a nil receiver or nil source is a no-op.
+func (auth *AuthClient) WithKeySource(source KeySource) *AuthClient {
+	if auth == nil || source == nil {
+		return auth
+	}
+
+	auth.source = source
+
+	return auth
+}
+
 // NewAuthClient creates a new instance of AuthClient.
 // It checks the health of the authorization service if the client is enabled and the address is provided.
 // If the service is healthy, it logs a successful connection message; otherwise, it logs the failure reason.
@@ -327,7 +357,21 @@ func (auth *AuthClient) mustRefuse() bool {
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
 	return func(c fiber.Ctx) error {
-		ctx := tracing.ExtractHTTPContext(c.Context(), c)
+		// Inherit the ambient request context instead of extracting inbound trace
+		// context here. Whether a caller-supplied traceparent is honored is the
+		// APPLICATION's decision — a caller that can set the header can otherwise
+		// choose this service's trace ID and force its sampling decision, which is
+		// why lib-observability gates it behind
+		// tracing.TelemetryConfig.TrustInboundTraceContext (default false) from
+		// v2.1.2 on. lib-auth cannot see that setting, so extracting on its own
+		// overrides the deployment's choice: the app's server span stays a local
+		// root while this span re-parents onto the caller's trace, detaching auth
+		// from the request it is authorizing. Self-extraction also REPLACES the
+		// context's baggage with the inbound header — propagation.Baggage.Extract
+		// does not merge — discarding baggage the application seeded. Inheriting is
+		// correct under both postures: an app that does trust the inbound trace has
+		// already parented its server span to it, so this span joins for free.
+		ctx := c.Context()
 
 		_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
@@ -569,11 +613,22 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		return false, http.StatusInternalServerError, err
 	}
 
-	// Cache key = exactly the authz request inputs (never the raw token). product is
-	// the value actually forwarded ("" when not forwarded), so the key matches the
-	// decision the authz service made. clientIP is in the key because the decision is
-	// IP-dependent (tenant IP-allowlist): a cross-IP cache hit would bypass it.
-	key := cacheKey{sub: sub, resource: resource, action: action, product: requestBody["product"], clientIP: clientIP}
+	// Cache key = the authz request inputs PLUS a digest of the bearer token they were
+	// derived from (never the raw token). product is the value actually forwarded ("" when
+	// not forwarded), so the key matches the decision the authz service made. clientIP is
+	// in the key because the decision is IP-dependent (tenant IP-allowlist): a cross-IP
+	// cache hit would bypass it. The token digest is in the key because local verification
+	// is off by default, which makes the authz round-trip the only signature check: without
+	// it a forged token with the same claims would hit an entry warmed by a genuine one and
+	// never reach the verifier.
+	key := cacheKey{
+		tokenDigest: sha256.Sum256([]byte(accessToken)),
+		sub:         sub,
+		resource:    resource,
+		action:      action,
+		product:     requestBody["product"],
+		clientIP:    clientIP,
+	}
 
 	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so
 	// the breaker only ever runs on a miss — its open state then denies (never
