@@ -1,3 +1,10 @@
+## [3.5.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v3.5.0-beta.3...v3.5.0-beta.4) (2026-08-27)
+
+
+### Bug Fixes
+
+* **auth:** let concurrent forced JWKS refreshes join the in-flight fetch ([d370ec3](https://github.com/LerianStudio/lib-auth/commit/d370ec3fb51848bf57be3982d7f1d38dad6a82ba)), closes [#152](https://github.com/LerianStudio/lib-auth/issues/152)
+
 ## [3.5.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v3.5.0-beta.2...v3.5.0-beta.3) (2026-08-26)
 
 ## [3.5.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v3.5.0-beta.1...v3.5.0-beta.2) (2026-08-26)
