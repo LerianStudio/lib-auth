@@ -34,11 +34,41 @@ with it.
 **What you will observe:** auth spans stop joining a caller-supplied
 `traceparent` unless the application itself trusts it.
 
-Note: `lib-observability v2.1.2` is an **application-level** requirement, not a
-requirement of this module — lib-auth itself does not use
-`TrustInboundTraceContext` and keeps its own minimum at `v2.0.0`. Applications
-that want to opt in to honoring inbound trace context must depend on
-`lib-observability >= v2.1.2` and enable the flag themselves.
+Note: `TrustInboundTraceContext` is an **application-level** requirement, not a
+requirement of this module — lib-auth itself does not use it, and no
+lib-observability type appears on lib-auth's public API, so an application is
+free to be on any major of that library (see "Logging" below). Applications
+that want to opt in to honoring inbound trace context must enable the flag
+themselves on whichever lib-observability version they depend on.
+
+## 🪵 Logging
+
+Every lib-auth entry point that takes a logger takes an `obs.Logger`, declared
+in `auth/obs` from stdlib types only:
+
+```go
+type Logger interface {
+	Log(ctx context.Context, level int, msg string, fields ...any)
+	Enabled(level int) bool
+	Sync(ctx context.Context) error
+}
+```
+
+Levels are `obs.LevelError` (0), `obs.LevelWarn` (1), `obs.LevelInfo` (2),
+`obs.LevelDebug` (3) — the same scale as lib-observability and lib-commons,
+lower is more severe.
+
+Nothing has to be adapted. A `lib-observability` logger (v4 or later), a
+`lib-commons` `commons/obs.Logger`, and a three-method type declared in your
+own package that imports no observability library at all are all accepted
+directly. Pass `nil` and lib-auth builds its own default logger; it never
+stores a nil logger.
+
+The point is that lib-auth's public API names no type from a versioned
+observability module, so a major bump there no longer forces one here. A CI
+guard (`auth/obs/boundary`) walks the exported API with `go/ast` and fails if a
+`lib-observability` type reappears in a field, parameter, return or exported
+alias.
 
 ## 🚀 How to Use
 
@@ -162,13 +192,13 @@ type Config struct {
 
 cfg := &Config{}
 
-logger := zap.InitializeLogger()
+logger, err := zap.New(zap.Config{Environment: zap.EnvironmentProduction})
 ```
 
 ```go
 import "github.com/LerianStudio/lib-auth/v3/auth/middleware"
 
-authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, &logger)
+authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, logger)
 ```
 
 ### 2. Use the middleware in your Fiber application:
@@ -281,7 +311,7 @@ import (
 )
 
 // Create the auth client once (same as HTTP)
-authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, &logger)
+authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, logger)
 
 // Map full gRPC method names to authorization policies
 policies := middleware.PolicyConfig{
