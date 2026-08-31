@@ -33,10 +33,10 @@ import (
 	"sync"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	"github.com/LerianStudio/lib-observability/v2/log"
-	"github.com/LerianStudio/lib-observability/v2/runtime"
-	"github.com/LerianStudio/lib-observability/v2/tracing"
+	"github.com/LerianStudio/lib-auth/v3/auth/obs"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	"github.com/LerianStudio/lib-observability/v4/runtime"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/cenkalti/backoff/v5"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -112,7 +112,7 @@ type Config struct {
 	// access-manager's availability.
 	FailFast bool
 	// Logger receives structured logs. Defaults to a no-op logger when nil.
-	Logger log.Logger
+	Logger obs.Logger
 }
 
 // Publisher publishes the plugin's permissions manifest to the access-manager at
@@ -126,7 +126,7 @@ type Publisher struct {
 	cache        Cache
 	interval     time.Duration
 	failFast     bool
-	logger       log.Logger
+	logger       obs.Logger
 
 	// manifest is parsed+validated eagerly at New; wire and hash are precomputed so
 	// each Publish pass is a pure I/O operation.
@@ -220,7 +220,7 @@ func New(cfg Config) (*Publisher, error) {
 
 	logger := cfg.Logger
 	if logger == nil {
-		logger = log.NewNop()
+		logger = obs.Nop()
 	}
 
 	return &Publisher{
@@ -517,13 +517,13 @@ func serverMessage(body []byte) string {
 }
 
 func (p *Publisher) logInfof(ctx context.Context, format string, args ...any) {
-	p.logger.Log(ctx, log.LevelInfo, fmt.Sprintf(format, args...))
+	p.logger.Log(ctx, obs.LevelInfo, fmt.Sprintf(format, args...))
 }
 
 func (p *Publisher) logWarnf(ctx context.Context, format string, args ...any) {
-	p.logger.Log(ctx, log.LevelWarn, fmt.Sprintf(format, args...))
+	p.logger.Log(ctx, obs.LevelWarn, fmt.Sprintf(format, args...))
 }
 
 func (p *Publisher) logErrorf(ctx context.Context, format string, args ...any) {
-	p.logger.Log(ctx, log.LevelError, fmt.Sprintf(format, args...))
+	p.logger.Log(ctx, obs.LevelError, fmt.Sprintf(format, args...))
 }

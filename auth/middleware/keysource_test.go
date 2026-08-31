@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-auth/v3/auth/obs"
 	"github.com/MicahParks/jwkset"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -144,9 +144,9 @@ func (c *fakeClock) Advance(d time.Duration) {
 func newSourceAuthenticator(t *testing.T, source KeySource, issuer string) *M2MAuthenticator {
 	t.Helper()
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
-	m, err := NewM2MAuthenticatorWithKeySource(source, issuer, true, &logger)
+	m, err := NewM2MAuthenticatorWithKeySource(source, issuer, true, logger)
 	require.NoError(t, err)
 
 	return m
@@ -772,18 +772,18 @@ func TestNewJWKSKeySource_BadBootstrapPEM_Errors(t *testing.T) {
 func TestNewM2MAuthenticatorWithKeySource_EnabledRequiresSource(t *testing.T) {
 	t.Parallel()
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
-	_, err := NewM2MAuthenticatorWithKeySource(nil, "", true, &logger)
+	_, err := NewM2MAuthenticatorWithKeySource(nil, "", true, logger)
 	require.Error(t, err)
 }
 
 func TestNewM2MAuthenticatorWithKeySource_DisabledAllowsNilSource(t *testing.T) {
 	t.Parallel()
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
-	m, err := NewM2MAuthenticatorWithKeySource(nil, "", false, &logger)
+	m, err := NewM2MAuthenticatorWithKeySource(nil, "", false, logger)
 	require.NoError(t, err)
 	require.NotNil(t, m)
 	assert.False(t, m.enabled)
@@ -915,11 +915,11 @@ func TestVerify_SourcePath_EmptyCache_RefreshesOnce(t *testing.T) {
 // assert that a specific WARN was emitted (e.g. the plaintext-HTTP warning).
 type capturingLogger struct {
 	mu   sync.Mutex
-	lvls []log.Level
+	lvls []int
 	msgs []string
 }
 
-func (c *capturingLogger) Log(_ context.Context, lvl log.Level, msg string, _ ...log.Field) {
+func (c *capturingLogger) Log(_ context.Context, lvl int, msg string, _ ...any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -927,10 +927,8 @@ func (c *capturingLogger) Log(_ context.Context, lvl log.Level, msg string, _ ..
 	c.msgs = append(c.msgs, msg)
 }
 
-func (c *capturingLogger) With(_ ...log.Field) log.Logger { return c }
-func (c *capturingLogger) WithGroup(_ string) log.Logger  { return c }
-func (c *capturingLogger) Enabled(_ log.Level) bool       { return true }
-func (c *capturingLogger) Sync(_ context.Context) error   { return nil }
+func (c *capturingLogger) Enabled(_ int) bool           { return true }
+func (c *capturingLogger) Sync(_ context.Context) error { return nil }
 
 func (c *capturingLogger) warnCount() int {
 	c.mu.Lock()
@@ -939,7 +937,7 @@ func (c *capturingLogger) warnCount() int {
 	n := 0
 
 	for _, l := range c.lvls {
-		if l == log.LevelWarn {
+		if l == obs.LevelWarn {
 			n++
 		}
 	}
@@ -1057,7 +1055,7 @@ func TestNewJWKSKeySource_NonLoopbackHTTP_AllowedWithFlag_Warns(t *testing.T) {
 	t.Parallel()
 
 	cap := &capturingLogger{}
-	logger := log.Logger(cap)
+	logger := obs.Logger(cap)
 
 	_, err := newJWKSKeySource(JWKSConfig{
 		URL:              "http://casdoor.example.com/jwks",

@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-auth/v3/auth/obs"
 	"github.com/gofiber/fiber/v3"
 )
 
@@ -67,7 +67,7 @@ const forwardedHeader = fiber.HeaderXForwardedFor
 // construction, naming both the cause and the consequence, so an operator learns
 // it from the boot log rather than from a surprise verdict in production. It is
 // not logged per request: the value is read once here and cached on the client.
-func loadTrustedProxies(logger log.Logger) []netip.Prefix {
+func loadTrustedProxies(logger obs.Logger) []netip.Prefix {
 	raw := os.Getenv(trustedProxiesEnv)
 
 	prefixes := parseTrustedProxies(raw, logger)
@@ -101,7 +101,7 @@ func loadTrustedProxies(logger log.Logger) []netip.Prefix {
 // form, and stored in the same address form the hop walk compares against — see
 // rebaseMappedPrefix for why a range written in IPv4-mapped IPv6 form is
 // rewritten rather than kept as written.
-func parseTrustedProxies(raw string, logger log.Logger) []netip.Prefix {
+func parseTrustedProxies(raw string, logger obs.Logger) []netip.Prefix {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
@@ -174,7 +174,7 @@ func acceptTrustedProxy(entry string) (netip.Prefix, bool) {
 // actually fired rather than assuming it. If acceptTrustedProxy ever grows a
 // fourth rule, an entry refused by that rule degrades to a vague line instead
 // of being told, confidently, to fix a width that was never the problem.
-func logRejectedEntry(logger log.Logger, entry string) {
+func logRejectedEntry(logger obs.Logger, entry string) {
 	ctx := context.Background()
 
 	prefix, err := netip.ParsePrefix(entry)

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/LerianStudio/lib-auth/v3/auth/middleware"
-	liblog "github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-auth/v3/auth/obs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -111,16 +111,14 @@ type captureLogger struct {
 	msgs []string
 }
 
-func (c *captureLogger) Log(_ context.Context, _ liblog.Level, msg string, fields ...liblog.Field) {
+func (c *captureLogger) Log(_ context.Context, _ int, msg string, _ ...any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.msgs = append(c.msgs, msg)
 }
-func (c *captureLogger) With(_ ...liblog.Field) liblog.Logger { return c }
-func (c *captureLogger) WithGroup(_ string) liblog.Logger     { return c }
-func (c *captureLogger) Enabled(_ liblog.Level) bool          { return true }
-func (c *captureLogger) Sync(_ context.Context) error         { return nil }
+func (c *captureLogger) Enabled(_ int) bool           { return true }
+func (c *captureLogger) Sync(_ context.Context) error { return nil }
 
 func (c *captureLogger) all() string {
 	c.mu.Lock()
@@ -159,8 +157,7 @@ func (c *fakeCache) get(key string) (string, bool) { return c.Get(context.Backgr
 func testConfig(t *testing.T, authURL, identityURL string) Config {
 	t.Helper()
 
-	l := liblog.NewNop()
-	auth := middleware.NewAuthClient(authURL, true, &l)
+	auth := middleware.NewAuthClient(authURL, true, obs.Nop())
 
 	return Config{
 		Slug:         "plugin-fees",

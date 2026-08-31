@@ -15,10 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	"github.com/LerianStudio/lib-observability/v2/log"
-	"github.com/LerianStudio/lib-observability/v2/metrics"
-	obsruntime "github.com/LerianStudio/lib-observability/v2/runtime"
+	"github.com/LerianStudio/lib-auth/v3/auth/obs"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	"github.com/LerianStudio/lib-observability/v4/metrics"
+	obsruntime "github.com/LerianStudio/lib-observability/v4/runtime"
 	"github.com/MicahParks/jwkset"
 	"golang.org/x/sync/singleflight"
 )
@@ -141,7 +141,7 @@ type JWKSConfig struct {
 	HTTPClient *http.Client
 
 	// Logger records refresh outcomes. Defaults to a no-op logger when nil.
-	Logger log.Logger
+	Logger obs.Logger
 
 	// Ctx bounds the background refresh goroutine's lifecycle: cancelling it stops
 	// the background refresher (used for graceful shutdown and to avoid leaking the
@@ -157,7 +157,7 @@ type jwksKeySource struct {
 	httpClient      *http.Client
 	refreshInterval time.Duration
 	forcedCooldown  time.Duration
-	logger          log.Logger
+	logger          obs.Logger
 
 	// allowInsecure mirrors JWKSConfig.AllowInsecureURL. It is retained on the source
 	// so the SAME transport policy validated at construction is re-applied to every
@@ -192,7 +192,7 @@ type jwksKeySource struct {
 	// alongside the jwks_refresh_total{result} counter so the outcome counts stay
 	// directly assertable in unit tests without an OTEL reader. The four metrics
 	// (jwks_refresh_total{result}, jwks_cache_age_seconds, jwks_verify_fail_total,
-	// jwks_unknown_kid_total) are emitted via the lib-observability/v2 metrics factory
+	// jwks_unknown_kid_total) are emitted via the lib-observability metrics factory
 	// resolved from ctx — see metrics.go.
 	refreshOK   atomic.Int64
 	refreshFail atomic.Int64
@@ -249,7 +249,7 @@ func newJWKSKeySource(cfg JWKSConfig) (*jwksKeySource, error) {
 
 	logger := cfg.Logger
 	if logger == nil {
-		logger = log.NewNop()
+		logger = obs.Nop()
 	}
 
 	httpClient := cfg.HTTPClient
@@ -277,7 +277,7 @@ func newJWKSKeySource(cfg JWKSConfig) (*jwksKeySource, error) {
 	}
 
 	if warnInsecure {
-		logger.Log(context.Background(), log.LevelWarn,
+		logger.Log(context.Background(), obs.LevelWarn,
 			fmt.Sprintf("JWKS is fetched over plaintext HTTP against a non-loopback host (URL=%q); the JWKS is the trust root for token verification — enable TLS in production", cfg.URL))
 	}
 
@@ -420,7 +420,7 @@ func (s *jwksKeySource) cacheAgeGaugeBuilder(ctx context.Context) *metrics.Gauge
 
 		gauge, err := factory.Gauge(metricJWKSCacheAgeSeconds)
 		if err != nil {
-			logger.Log(ctx, log.LevelWarn, fmt.Sprintf("failed to create metric %q: %v", metricJWKSCacheAgeSeconds.Name, err))
+			logger.Log(ctx, obs.LevelWarn, fmt.Sprintf("failed to create metric %q: %v", metricJWKSCacheAgeSeconds.Name, err))
 
 			return
 		}
@@ -642,7 +642,7 @@ func (s *jwksKeySource) logWarn(ctx context.Context, format string, args ...any)
 		return
 	}
 
-	s.logger.Log(ctx, log.LevelWarn, fmt.Sprintf(format, args...))
+	s.logger.Log(ctx, obs.LevelWarn, fmt.Sprintf(format, args...))
 }
 
 // parseJWKSKeysAndKIDs unmarshals a JWKS-JSON document and returns its RS256 public

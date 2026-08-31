@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -71,9 +70,9 @@ func applicationClaims() jwt.MapClaims {
 func newTestM2MAuthenticator(t *testing.T, pubPEM string) *M2MAuthenticator {
 	t.Helper()
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
-	m, err := NewM2MAuthenticator(pubPEM, "", true, &logger)
+	m, err := NewM2MAuthenticator(pubPEM, "", true, logger)
 	require.NoError(t, err)
 
 	return m
@@ -82,9 +81,9 @@ func newTestM2MAuthenticator(t *testing.T, pubPEM string) *M2MAuthenticator {
 func newTestM2MAuthenticatorWithIssuer(t *testing.T, pubPEM, issuer string) *M2MAuthenticator {
 	t.Helper()
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
-	m, err := NewM2MAuthenticator(pubPEM, issuer, true, &logger)
+	m, err := NewM2MAuthenticator(pubPEM, issuer, true, logger)
 	require.NoError(t, err)
 
 	return m
@@ -116,9 +115,9 @@ func newTestM2MApp(m *M2MAuthenticator) *fiber.App {
 func TestNewM2MAuthenticator_DisabledAllowsEmptyCert(t *testing.T) {
 	t.Parallel()
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
-	m, err := NewM2MAuthenticator("", "", false, &logger)
+	m, err := NewM2MAuthenticator("", "", false, logger)
 	require.NoError(t, err)
 	require.NotNil(t, m)
 	assert.False(t, m.enabled)
@@ -128,9 +127,9 @@ func TestNewM2MAuthenticator_DisabledAllowsEmptyCert(t *testing.T) {
 func TestNewM2MAuthenticator_EnabledRejectsInvalidCert(t *testing.T) {
 	t.Parallel()
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
-	m, err := NewM2MAuthenticator("not-a-pem", "", true, &logger)
+	m, err := NewM2MAuthenticator("not-a-pem", "", true, logger)
 	require.Error(t, err)
 	assert.Nil(t, m)
 }
@@ -140,9 +139,9 @@ func TestNewM2MAuthenticator_EnabledParsesValidCert(t *testing.T) {
 
 	_, pubPEM := newTestRSAKeyPEM(t)
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
-	m, err := NewM2MAuthenticator(pubPEM, "", true, &logger)
+	m, err := NewM2MAuthenticator(pubPEM, "", true, logger)
 	require.NoError(t, err)
 	require.NotNil(t, m)
 	assert.True(t, m.enabled)
@@ -364,9 +363,9 @@ func TestVerify_NilKey_FailsClosed(t *testing.T) {
 func TestRequireM2M_Disabled_PassesThrough(t *testing.T) {
 	t.Parallel()
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
-	m, err := NewM2MAuthenticator("", "", false, &logger)
+	m, err := NewM2MAuthenticator("", "", false, logger)
 	require.NoError(t, err)
 
 	app := newTestM2MApp(m)
