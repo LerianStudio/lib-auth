@@ -1,3 +1,24 @@
+## [4.0.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.5.0...v4.0.0-beta.1) (2026-09-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** take a logger interface, not a lib-observability type
+
+### Features
+
+* **auth:** declare a universal logger contract in auth/obs ([0238504](https://github.com/LerianStudio/lib-auth/commit/0238504cf334ceaf6a239e13a6decda2ecdcd98a))
+
+
+### Bug Fixes
+
+* **auth:** treat a typed-nil logger as unset ([e4ed2df](https://github.com/LerianStudio/lib-auth/commit/e4ed2df751a344efac302212ea9470b703f0158a))
+
+
+### Code Refactoring
+
+* **auth:** take a logger interface, not a lib-observability type ([9ae1a14](https://github.com/LerianStudio/lib-auth/commit/9ae1a14192cc807a8a9a2b498a5cdd1afa67a54d))
+
 ## [3.5.0](https://github.com/LerianStudio/lib-auth/compare/v3.4.0...v3.5.0) (2026-08-27)
 
 
