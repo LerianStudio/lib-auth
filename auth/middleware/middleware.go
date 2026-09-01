@@ -244,7 +244,7 @@ func initializeDefaultLogger() (obs.Logger, error) {
 // statement with an extra indirection that could not hold a concrete pointer
 // implementation and had two distinct empty values.
 func resolveLogger(logger obs.Logger) obs.Logger {
-	if logger != nil {
+	if !obs.IsNil(logger) {
 		return logger
 	}
 

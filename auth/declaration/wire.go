@@ -85,7 +85,7 @@ func lookupWithDeprecatedAlias(canonical, deprecated string, logger obs.Logger) 
 	}
 
 	if v := strings.TrimSpace(os.Getenv(deprecated)); v != "" {
-		if logger != nil {
+		if !obs.IsNil(logger) {
 			logger.Log(context.Background(), obs.LevelWarn,
 				fmt.Sprintf("env %s is deprecated; use %s", deprecated, canonical))
 		}

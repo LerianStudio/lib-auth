@@ -219,7 +219,7 @@ func New(cfg Config) (*Publisher, error) {
 	}
 
 	logger := cfg.Logger
-	if logger == nil {
+	if obs.IsNil(logger) {
 		logger = obs.Nop()
 	}
 

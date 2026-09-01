@@ -248,7 +248,7 @@ func newJWKSKeySource(cfg JWKSConfig) (*jwksKeySource, error) {
 	}
 
 	logger := cfg.Logger
-	if logger == nil {
+	if obs.IsNil(logger) {
 		logger = obs.Nop()
 	}
 
