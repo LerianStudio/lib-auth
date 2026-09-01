@@ -39,7 +39,9 @@ requirement of this module — lib-auth itself does not use it, and no
 lib-observability type appears on lib-auth's public API, so an application is
 free to be on any major of that library (see "Logging" below). Applications
 that want to opt in to honoring inbound trace context must enable the flag
-themselves on whichever lib-observability version they depend on.
+themselves, which requires lib-observability `v2.1.2` or later; on an earlier
+version the flag does not exist and an inbound trace context is never trusted.
+That is a constraint on using the FLAG, not on using lib-auth.
 
 ## 🪵 Logging
 
@@ -193,6 +195,12 @@ type Config struct {
 cfg := &Config{}
 
 logger, err := zap.New(zap.Config{Environment: zap.EnvironmentProduction})
+if err != nil {
+    // Do not fall through: on failure `logger` is a typed-nil *zap.Logger, not
+    // a usable logger. Passing it on is a caller bug, not a "use the default"
+    // signal -- pass a literal nil for that.
+    log.Fatalf("failed to build logger: %v", err)
+}
 ```
 
 ```go

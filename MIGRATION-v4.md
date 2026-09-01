@@ -161,7 +161,9 @@ grep -rl 'LerianStudio/lib-auth/v3' --include='*.go' . \
 grep -rl 'LerianStudio/lib-auth/v3' --include='*.md' . \
   | xargs sed -i -E 's#(LerianStudio/lib-auth)/v3#\1/v4#g'
 
-gofmt -l . && go build ./... && go test -count=1 ./...
+# gofmt -l lists unformatted files but still exits 0, so check its OUTPUT is
+# empty rather than its status, or the chain below runs on unformatted code.
+test -z "$(gofmt -l .)" && go build ./... && go test -count=1 ./...
 ```
 
 ## 6. The regression guard
