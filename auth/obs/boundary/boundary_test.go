@@ -147,6 +147,13 @@ func scanFile(path, rel string) ([]violation, error) {
 						continue
 					}
 
+					// Type parameters are part of the exported signature: a
+					// constraint naming a lib-observability type re-pins every
+					// consumer that instantiates the type.
+					if s.TypeParams != nil {
+						report(s.TypeParams, s.Name.Name+" (type parameters)")
+					}
+
 					reportExportedFields(s, report)
 				case *ast.ValueSpec:
 					for _, name := range s.Names {
@@ -182,6 +189,16 @@ func reportExportedFields(spec *ast.TypeSpec, report func(ast.Node, string)) {
 		}
 	case *ast.InterfaceType:
 		for _, method := range t.Methods.List {
+			// An entry with no name is an EMBEDDED interface (or a type-set
+			// element in a constraint). It carries the embedded type's whole
+			// method set onto this one, so it is every bit as exported as a
+			// named method.
+			if len(method.Names) == 0 {
+				report(method.Type, spec.Name.Name+" (embedded)")
+
+				continue
+			}
+
 			for _, name := range method.Names {
 				if name.IsExported() {
 					report(method.Type, spec.Name.Name+"."+name.Name)
