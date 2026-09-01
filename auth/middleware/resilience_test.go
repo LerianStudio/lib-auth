@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/v2/log"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -483,7 +482,7 @@ func TestCheckAuthorization_CallerCancellation_Propagates(t *testing.T) {
 func TestNewAuthClient_ResilienceConfig(t *testing.T) {
 	// Cannot use t.Parallel(): subtests use t.Setenv. enabled=false returns early
 	// without any network call, exercising the config wiring in isolation.
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
 	t.Run("defaults_are_behavior_neutral", func(t *testing.T) {
 		t.Setenv("AUTH_TIMEOUT", "")
@@ -491,7 +490,7 @@ func TestNewAuthClient_ResilienceConfig(t *testing.T) {
 		t.Setenv("AUTH_BREAKER_ENABLED", "")
 		t.Setenv("AUTH_RETRY_MAX", "")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.Equal(t, defaultAuthTimeout, client.timeout)
 		assert.Nil(t, client.cache)
 		assert.Nil(t, client.breaker)
@@ -504,7 +503,7 @@ func TestNewAuthClient_ResilienceConfig(t *testing.T) {
 		t.Setenv("AUTH_BREAKER_ENABLED", "true")
 		t.Setenv("AUTH_RETRY_MAX", "2")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.Equal(t, 5*time.Second, client.timeout)
 		assert.NotNil(t, client.cache)
 		assert.NotNil(t, client.breaker)
@@ -516,7 +515,7 @@ func TestNewAuthClient_ResilienceConfig(t *testing.T) {
 		t.Setenv("AUTH_CACHE_TTL", "0s")
 		t.Setenv("AUTH_RETRY_MAX", "-1")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.Equal(t, defaultAuthTimeout, client.timeout)
 		assert.Nil(t, client.cache)
 		assert.Equal(t, uint(0), client.retryMax)

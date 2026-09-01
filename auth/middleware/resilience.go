@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/v2/tracing"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/cenkalti/backoff/v5"
 	"github.com/sony/gobreaker"
 	"go.opentelemetry.io/otel/trace"

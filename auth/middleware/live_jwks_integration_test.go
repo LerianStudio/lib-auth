@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -65,7 +64,7 @@ func TestLiveJWKS_WrongBootstrapRecoveredByLiveFetch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
 	source, err := NewJWKSKeySource(JWKSConfig{
 		URL:             jwksURL,
@@ -79,7 +78,7 @@ func TestLiveJWKS_WrongBootstrapRecoveredByLiveFetch(t *testing.T) {
 	}
 	defer func() { _ = source.Close() }()
 
-	m, err := NewM2MAuthenticatorWithKeySource(source, issuer, true, &logger)
+	m, err := NewM2MAuthenticatorWithKeySource(source, issuer, true, logger)
 	if err != nil {
 		t.Fatalf("NewM2MAuthenticatorWithKeySource: %v", err)
 	}
@@ -132,7 +131,7 @@ func TestLiveJWKS_WrongBootstrapUnreachableFailsClosed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
 	source, err := NewJWKSKeySource(JWKSConfig{
 		URL:             "http://127.0.0.1:1/.well-known/jwks", // unreachable
@@ -146,7 +145,7 @@ func TestLiveJWKS_WrongBootstrapUnreachableFailsClosed(t *testing.T) {
 	}
 	defer func() { _ = source.Close() }()
 
-	m, err := NewM2MAuthenticatorWithKeySource(source, issuer, true, &logger)
+	m, err := NewM2MAuthenticatorWithKeySource(source, issuer, true, logger)
 	if err != nil {
 		t.Fatalf("NewM2MAuthenticatorWithKeySource: %v", err)
 	}

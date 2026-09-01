@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	"github.com/LerianStudio/lib-observability/v2/log"
-	"github.com/LerianStudio/lib-observability/v2/tracing"
-	"github.com/LerianStudio/lib-observability/v2/zap"
+	"github.com/LerianStudio/lib-auth/v3/auth/obs"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
+	"github.com/LerianStudio/lib-observability/v4/zap"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -33,7 +33,7 @@ import (
 type AuthClient struct {
 	Address string
 	Enabled bool
-	Logger  log.Logger
+	Logger  obs.Logger
 
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
@@ -187,23 +187,23 @@ func unmarshalErrorResponse(body []byte) (commons.Response, error) {
 	return resp, nil
 }
 
-func logErrorf(ctx context.Context, logger log.Logger, format string, args ...any) {
+func logErrorf(ctx context.Context, logger obs.Logger, format string, args ...any) {
 	if logger == nil {
 		return
 	}
 
-	logger.Log(ctx, log.LevelError, fmt.Sprintf(format, args...))
+	logger.Log(ctx, obs.LevelError, fmt.Sprintf(format, args...))
 }
 
-func logInfof(ctx context.Context, logger log.Logger, format string, args ...any) {
+func logInfof(ctx context.Context, logger obs.Logger, format string, args ...any) {
 	if logger == nil {
 		return
 	}
 
-	logger.Log(ctx, log.LevelInfo, fmt.Sprintf(format, args...))
+	logger.Log(ctx, obs.LevelInfo, fmt.Sprintf(format, args...))
 }
 
-func initializeDefaultLogger() (log.Logger, error) {
+func initializeDefaultLogger() (obs.Logger, error) {
 	envName := strings.ToLower(strings.TrimSpace(os.Getenv("ENV_NAME")))
 
 	environment := zap.EnvironmentLocal
@@ -235,6 +235,29 @@ func initializeDefaultLogger() (log.Logger, error) {
 	return logger, nil
 }
 
+// resolveLogger returns the caller's logger, or a default one (falling back to
+// a no-op logger when the default cannot be built), so no constructor in this
+// package ever stores a nil Logger.
+//
+// A nil obs.Logger interface means "give me the default"; that is the whole
+// contract. The parameter used to be a *log.Logger, which made the same
+// statement with an extra indirection that could not hold a concrete pointer
+// implementation and had two distinct empty values.
+func resolveLogger(logger obs.Logger) obs.Logger {
+	if !obs.IsNil(logger) {
+		return logger
+	}
+
+	l, err := initializeDefaultLogger()
+	if err != nil {
+		stdlog.Printf("failed to initialize logger, using NopLogger: %v", err)
+
+		return obs.Nop()
+	}
+
+	return l
+}
+
 // WithKeySource wires a dynamic JWKS KeySource into the client's local token
 // verification, mirroring the M2M gate's dynamic path (serve-stale cache + forced
 // refresh-and-retry on a signature failure). It is additive and opt-in: the default
@@ -255,21 +278,8 @@ func (auth *AuthClient) WithKeySource(source KeySource) *AuthClient {
 // NewAuthClient creates a new instance of AuthClient.
 // It checks the health of the authorization service if the client is enabled and the address is provided.
 // If the service is healthy, it logs a successful connection message; otherwise, it logs the failure reason.
-func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient {
-	var l log.Logger
-
-	var err error
-
-	if logger != nil {
-		l = *logger
-	} else {
-		l, err = initializeDefaultLogger()
-		if err != nil {
-			stdlog.Printf("failed to initialize logger, using NopLogger: %v", err)
-
-			l = log.NewNop()
-		}
-	}
+func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient {
+	l := resolveLogger(logger)
 
 	verifyKeys, verifyIssuer := loadVerification(l)
 

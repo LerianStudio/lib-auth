@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-auth/v3/auth/obs"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -397,7 +397,7 @@ func TestParseTrustedProxies_DroppedEntriesNameTheirReason(t *testing.T) {
 			defer logger.mu.Unlock()
 
 			require.Len(t, logger.messages, 1, "one dropped entry, one line")
-			assert.Equal(t, log.LevelError, logger.levels[0])
+			assert.Equal(t, obs.LevelError, logger.levels[0])
 			assert.Contains(t, logger.messages[0], tt.want)
 
 			if tt.notWant != "" {
@@ -646,10 +646,10 @@ func TestLoadTrustedProxies_ReadsEnv(t *testing.T) {
 type recordingLogger struct {
 	mu       sync.Mutex
 	messages []string
-	levels   []log.Level
+	levels   []int
 }
 
-func (l *recordingLogger) Log(_ context.Context, level log.Level, msg string, _ ...log.Field) {
+func (l *recordingLogger) Log(_ context.Context, level int, msg string, _ ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -657,10 +657,8 @@ func (l *recordingLogger) Log(_ context.Context, level log.Level, msg string, _ 
 	l.levels = append(l.levels, level)
 }
 
-func (l *recordingLogger) With(_ ...log.Field) log.Logger { return l }
-func (l *recordingLogger) WithGroup(_ string) log.Logger  { return l }
-func (l *recordingLogger) Enabled(_ log.Level) bool       { return true }
-func (l *recordingLogger) Sync(_ context.Context) error   { return nil }
+func (l *recordingLogger) Enabled(_ int) bool           { return true }
+func (l *recordingLogger) Sync(_ context.Context) error { return nil }
 
 // degradedLines returns the messages announcing that no client IP will be
 // forwarded. The phrase is the consequence half of the line, which is the part
@@ -697,7 +695,7 @@ func TestLoadTrustedProxies_DegradationIsObservable(t *testing.T) {
 		require.Len(t, lines, 1, "the degradation must be announced exactly once, at construction")
 		assert.Contains(t, lines[0], "TRUSTED_PROXIES is not set", "the line must name the cause")
 		assert.Contains(t, lines[0], "client IP will not be forwarded", "the line must name the consequence")
-		assert.Equal(t, log.LevelError, logger.levels[len(logger.levels)-1],
+		assert.Equal(t, obs.LevelError, logger.levels[len(logger.levels)-1],
 			"a silently-disabled security control is logged at the level this library already uses for degraded config")
 	})
 
