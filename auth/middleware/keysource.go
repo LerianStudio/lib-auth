@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/LerianStudio/lib-auth/v3/auth/obs"
+	"github.com/LerianStudio/lib-auth/v4/auth/obs"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/LerianStudio/lib-observability/v4/metrics"
 	obsruntime "github.com/LerianStudio/lib-observability/v4/runtime"

@@ -7,7 +7,7 @@ Repository: [lib-auth](https://github.com/LerianStudio/lib-auth)
 ## 📦 Installation
 
 ```bash
-go get github.com/LerianStudio/lib-auth/v3@latest
+go get github.com/LerianStudio/lib-auth/v4@latest
 ```
 
 ## 🔭 Inbound trace context is not extracted by the middleware
@@ -204,7 +204,7 @@ if err != nil {
 ```
 
 ```go
-import "github.com/LerianStudio/lib-auth/v3/auth/middleware"
+import "github.com/LerianStudio/lib-auth/v4/auth/middleware"
 
 authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, logger)
 ```
@@ -315,7 +315,7 @@ Secure a gRPC server with the unary interceptor using per-method policies. It re
 import (
     "context"
     "google.golang.org/grpc"
-    "github.com/LerianStudio/lib-auth/v3/auth/middleware"
+    "github.com/LerianStudio/lib-auth/v4/auth/middleware"
 )
 
 // Create the auth client once (same as HTTP)

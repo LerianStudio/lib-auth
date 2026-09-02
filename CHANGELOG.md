@@ -224,7 +224,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* **middleware:** module path is now github.com/LerianStudio/lib-auth/v3 and the
+* **middleware:** module path is now github.com/LerianStudio/lib-auth/v4 and the
 Authorize middleware requires Fiber v3.
 
 X-Lerian-Ref: 0x1
@@ -308,7 +308,7 @@ X-Lerian-Ref: 0x1
 
 ### ⚠ BREAKING CHANGES
 
-* **middleware:** module path is now github.com/LerianStudio/lib-auth/v3 and the
+* **middleware:** module path is now github.com/LerianStudio/lib-auth/v4 and the
 Authorize middleware requires Fiber v3.
 
 X-Lerian-Ref: 0x1

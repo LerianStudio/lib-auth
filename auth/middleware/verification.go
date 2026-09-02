@@ -10,7 +10,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/LerianStudio/lib-auth/v3/auth/obs"
+	"github.com/LerianStudio/lib-auth/v4/auth/obs"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel/trace"

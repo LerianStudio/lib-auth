@@ -146,7 +146,7 @@ go build ./... && go vet ./...
 ## 5. The module-path bump
 
 The major bump is **not applied in this branch** — the module path is still
-`github.com/LerianStudio/lib-auth/v3`. Apply it as the release step, on its
+`github.com/LerianStudio/lib-auth/v4`. Apply it as the release step, on its
 own commit:
 
 ```bash
