@@ -59,3 +59,8 @@ type Logger interface {
 	// Sync flushes any buffered log entries.
 	Sync(ctx context.Context) error
 }
+
+// Release note: v4.0.0-beta.1 was first cut before the /v3 -> /v4 module path
+// rename landed, so the tag pointed at a /v3 go.mod and Go rejected it. The
+// tag was deleted and recreated from the renamed head. If a future major
+// repeats this, land the rename in the same PR as the break.
