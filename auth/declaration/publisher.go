@@ -143,8 +143,14 @@ type Publisher struct {
 	httpClient *http.Client
 }
 
-// PublishError is a typed publish failure. Deterministic errors (401/403/422, or
-// a misconfiguration) are NOT retried and NOT cached — they need human action.
+// PublishError is a typed publish failure. Deterministic errors (401/403/422/501,
+// or a misconfiguration) are NOT retried and NOT cached — they need human action,
+// but which action depends on the shape. 401/403/422 are a REJECTION of what was
+// sent: look at the M2M credential or the manifest. 501 means this deployment does
+// not serve declaration upserts at all (multi-tenant, where the tenant-manager
+// materializes manifests instead) — nothing in the credential or the manifest can
+// change that answer, so there is nothing to correct there; the action is to stop
+// declaring on that deployment (IDP_DECLARATION_ENABLED=false in its chart).
 // Transient errors (409/5xx/network) are retried with backoff; after the budget is
 // exhausted the last transient error is returned (and the caller, if fail-open,
 // reschedules).
@@ -362,6 +368,12 @@ func (p *Publisher) mintAndPutWithRetry(ctx context.Context) error {
 // doPut performs one PUT and classifies the result per §8. A returned error is
 // either wrapped in backoff.Permanent (deterministic → stop) or plain (transient →
 // retry). nil means the declaration was accepted (200).
+//
+// Deterministic covers two distinct shapes, logged differently: a REJECTION of what
+// was sent (401/403/422 — look at the credential or the manifest) and a deployment
+// that does NOT SERVE the operation (501 — multi-tenant; nothing to correct in the
+// credential or the manifest, but the operator should stop declaring on that
+// deployment).
 func (p *Publisher) doPut(ctx context.Context, token string) error {
 	// Build the URL from a parsed base so a trailing slash on IdentityAddr does not
 	// yield a "//v1" path. JoinPath is used only for the STATIC prefix; the slug is
@@ -411,6 +423,24 @@ func (p *Publisher) doPut(ctx context.Context, token string) error {
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusUnprocessableEntity:
 		pubErr := &PublishError{Deterministic: true, StatusCode: resp.StatusCode, Op: "put declaration", Detail: detail}
 		p.logErrorf(ctx, "declaration PUT rejected for slug=%s: status=%d detail=%q (deterministic, not retrying)", p.slug, resp.StatusCode, detail)
+
+		return backoff.Permanent(pubErr)
+	case http.StatusNotImplemented:
+		// 501 is deterministic like the three above, but for a different reason,
+		// so it gets its own message. 401/403/422 mean "the server rejected what
+		// you sent" — the operator should look at the M2M credential or the
+		// manifest. 501 means "this deployment does not serve this operation at
+		// all": the identity returns it in multi-tenant mode, where materializing
+		// a manifest belongs to the tenant-manager (S3 catalog -> Caradhras, with
+		// an explicit owner). Nothing about this plugin, its credential or its
+		// manifest can change the answer, and MULTI_TENANT_ENABLED is a
+		// deployment-mode flag that does not flip under a running pod — so this is
+		// permanent for the deployment, never transient. Logged at WARN, not
+		// ERROR: no component failed. It stays above INFO because declaring is
+		// switched ON in a deployment that can never accept it, which the
+		// operator should fix in the chart (IDP_DECLARATION_ENABLED=false).
+		pubErr := &PublishError{Deterministic: true, StatusCode: resp.StatusCode, Op: "put declaration", Detail: detail}
+		p.logWarnf(ctx, "declaration PUT not implemented by this identity deployment for slug=%s: status=%d detail=%q (deterministic, not retrying); in multi-tenant mode manifest materialization is owned by the tenant-manager, not by the plugin, so there is nothing to fix in this plugin's M2M credential or manifest; set IDP_DECLARATION_ENABLED=false on multi-tenant deployments to stop declaring", p.slug, resp.StatusCode, detail)
 
 		return backoff.Permanent(pubErr)
 	default:

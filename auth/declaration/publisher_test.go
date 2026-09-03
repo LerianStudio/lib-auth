@@ -106,16 +106,20 @@ func (is *identityServer) count() int {
 }
 
 // captureLogger records every message so tests can assert secrets never leak.
+// The LEVEL of each entry is recorded alongside its text so a test can also
+// assert the severity a path logs at, not only what it says.
 type captureLogger struct {
 	mu   sync.Mutex
 	msgs []string
+	lvls []liblog.Level
 }
 
-func (c *captureLogger) Log(_ context.Context, _ liblog.Level, msg string, fields ...liblog.Field) {
+func (c *captureLogger) Log(_ context.Context, level liblog.Level, msg string, _ ...liblog.Field) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.msgs = append(c.msgs, msg)
+	c.lvls = append(c.lvls, level)
 }
 func (c *captureLogger) With(_ ...liblog.Field) liblog.Logger { return c }
 func (c *captureLogger) WithGroup(_ string) liblog.Logger     { return c }
@@ -127,6 +131,21 @@ func (c *captureLogger) all() string {
 	defer c.mu.Unlock()
 
 	return strings.Join(c.msgs, "\n")
+}
+
+// find returns the first recorded entry containing sub, together with the level
+// it was logged at.
+func (c *captureLogger) find(sub string) (msg string, level liblog.Level, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for i, m := range c.msgs {
+		if strings.Contains(m, sub) {
+			return m, c.lvls[i], true
+		}
+	}
+
+	return "", 0, false
 }
 
 // fakeCache is a map-backed test double for the pluggable Cache seam.
@@ -318,7 +337,16 @@ func TestPublish_CacheHit_SkipsPUT(t *testing.T) {
 }
 
 func TestPublish_Deterministic_NoRetry(t *testing.T) {
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusUnprocessableEntity} {
+	// 501 belongs here with 401/403/422: the identity returns it when the
+	// deployment is multi-tenant, where manifest materialization is the
+	// tenant-manager's job. That refusal is permanent for the deployment — no
+	// token, role or permission lifts it — so retrying it is pure waste.
+	for _, status := range []int{
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusUnprocessableEntity,
+		http.StatusNotImplemented,
+	} {
 		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
 			auth := newAuthServer(t)
 			t.Cleanup(auth.Close)
@@ -347,7 +375,12 @@ func TestPublish_Deterministic_NoRetry(t *testing.T) {
 }
 
 func TestPublish_Transient_RetriesThenGivesUp(t *testing.T) {
-	for _, status := range []int{http.StatusConflict, http.StatusInternalServerError, http.StatusBadGateway} {
+	for _, status := range []int{
+		http.StatusConflict,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+	} {
 		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
 			auth := newAuthServer(t)
 			t.Cleanup(auth.Close)
@@ -391,6 +424,86 @@ func TestPublish_NetworkError_Transient(t *testing.T) {
 	var pe *PublishError
 	require.ErrorAs(t, err, &pe)
 	assert.False(t, pe.Deterministic, "network failure must be transient")
+}
+
+// TestPublish_NotImplemented_DistinctMultiTenantLog pins the OPERATOR-FACING
+// half of the fix. Classifying 501 as deterministic is not enough: an operator
+// reading "rejected ... (deterministic, not retrying)" would go hunting for a
+// bad credential or a malformed manifest, and there is nothing wrong with
+// either. The 501 message must name the real owner of multi-tenant
+// materialization (the tenant-manager) and must not read as transient.
+func TestPublish_NotImplemented_DistinctMultiTenantLog(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	run := func(t *testing.T, status int) (*captureLogger, *identityServer) {
+		t.Helper()
+
+		identity := newIdentityServer(t, status, `{"message":"declaration upsert is not available in multi-tenant mode"}`)
+		t.Cleanup(identity.Close)
+
+		logs := &captureLogger{}
+		cfg := testConfig(t, auth.URL, identity.URL)
+		cfg.Logger = logs
+		p := newFastPublisher(t, cfg)
+
+		require.Error(t, p.Publish(context.Background()))
+
+		return logs, identity
+	}
+
+	notImplemented, identity := run(t, http.StatusNotImplemented)
+	forbidden, _ := run(t, http.StatusForbidden)
+
+	assert.Equal(t, 1, identity.count(), "501 must be attempted exactly once")
+
+	msg, level, found := notImplemented.find("status=501")
+	require.True(t, found, "the 501 path must log the status; got:\n%s", notImplemented.all())
+
+	assert.Equal(t, liblog.LevelWarn, level,
+		"501 is a correct answer from a deployment that does not serve this operation, not a plugin fault: warn, not error")
+	assert.Contains(t, msg, "tenant-manager",
+		"the 501 message must name who owns multi-tenant materialization")
+	assert.Contains(t, msg, "multi-tenant")
+	assert.NotContains(t, msg, "will retry",
+		"a permanent refusal must never be described as transient")
+
+	rejected, _, ok := forbidden.find("status=403")
+	require.True(t, ok, "the 403 path must log the status; got:\n%s", forbidden.all())
+
+	assert.NotEqual(t, rejected, msg, "501 must not reuse the 401/403/422 wording")
+	assert.NotContains(t, forbidden.all(), "tenant-manager",
+		"the 403 message must stay about the rejected request, not multi-tenant ownership")
+}
+
+// TestStart_Periodic_NotImplemented_KeepsTicking documents TODAY's periodic
+// behavior for a deterministic refusal, which 501 deliberately shares with
+// 401/403/422: runLoop logs the failure and keeps ticking. One PUT per tick (no
+// in-pass retry) is the whole win here; stopping the loop on a deterministic
+// class is a follow-up that must change all four statuses together, not 501
+// alone.
+func TestStart_Periodic_NotImplemented_KeepsTicking(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusNotImplemented, `{"message":"declaration upsert is not available in multi-tenant mode"}`)
+	t.Cleanup(identity.Close)
+
+	cfg := testConfig(t, auth.URL, identity.URL)
+	cfg.Interval = 10 * time.Millisecond
+	p := newFastPublisher(t, cfg)
+
+	stop, err := p.Start(context.Background())
+	require.NoError(t, err, "a 501 refusal must not be fatal at boot (fail-open)")
+	t.Cleanup(stop)
+
+	for i := 1; i <= 2; i++ {
+		select {
+		case <-identity.puts:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("expected PUT #%d: the periodic loop must keep ticking after a 501", i)
+		}
+	}
 }
 
 func TestStart_FailOpen_5xx_NoFatal(t *testing.T) {
