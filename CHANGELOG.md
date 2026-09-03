@@ -1,3 +1,10 @@
+## [3.6.0](https://github.com/LerianStudio/lib-auth/compare/v3.5.0...v3.6.0) (2026-09-03)
+
+
+### Bug Fixes
+
+* **declaration:** classify 501 as deterministic with a multi-tenant-aware log ([7ee363c](https://github.com/LerianStudio/lib-auth/commit/7ee363c9472a1207314128d36b6626253878876c)), closes [plugin-access-manager#410](https://github.com/LerianStudio/plugin-access-manager/issues/410)
+
 ## [3.5.0](https://github.com/LerianStudio/lib-auth/compare/v3.4.0...v3.5.0) (2026-08-27)
 
 
