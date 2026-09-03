@@ -145,8 +145,12 @@ type Publisher struct {
 
 // PublishError is a typed publish failure. Deterministic errors (401/403/422/501,
 // or a misconfiguration) are NOT retried and NOT cached — they need human action,
-// or, for 501, no action at all: the deployment does not serve declaration upserts
-// (multi-tenant, where the tenant-manager materializes manifests instead).
+// but which action depends on the shape. 401/403/422 are a REJECTION of what was
+// sent: look at the M2M credential or the manifest. 501 means this deployment does
+// not serve declaration upserts at all (multi-tenant, where the tenant-manager
+// materializes manifests instead) — nothing in the credential or the manifest can
+// change that answer, so there is nothing to correct there; the action is to stop
+// declaring on that deployment (IDP_DECLARATION_ENABLED=false in its chart).
 // Transient errors (409/5xx/network) are retried with backoff; after the budget is
 // exhausted the last transient error is returned (and the caller, if fail-open,
 // reschedules).
@@ -367,7 +371,9 @@ func (p *Publisher) mintAndPutWithRetry(ctx context.Context) error {
 //
 // Deterministic covers two distinct shapes, logged differently: a REJECTION of what
 // was sent (401/403/422 — look at the credential or the manifest) and a deployment
-// that does NOT SERVE the operation (501 — multi-tenant, nothing to fix here).
+// that does NOT SERVE the operation (501 — multi-tenant; nothing to correct in the
+// credential or the manifest, but the operator should stop declaring on that
+// deployment).
 func (p *Publisher) doPut(ctx context.Context, token string) error {
 	// Build the URL from a parsed base so a trailing slash on IdentityAddr does not
 	// yield a "//v1" path. JoinPath is used only for the STATIC prefix; the slug is
