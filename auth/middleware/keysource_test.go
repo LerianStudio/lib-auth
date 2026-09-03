@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-auth/v3/auth/obs"
+	"github.com/LerianStudio/lib-auth/v4/auth/obs"
 	"github.com/MicahParks/jwkset"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"

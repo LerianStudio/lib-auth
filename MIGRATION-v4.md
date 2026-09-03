@@ -145,26 +145,18 @@ go build ./... && go vet ./...
 
 ## 5. The module-path bump
 
-The major bump is **not applied in this branch** — the module path is still
-`github.com/LerianStudio/lib-auth/v3`. Apply it as the release step, on its
-own commit:
+**Done.** The path is now `github.com/LerianStudio/lib-auth/v4`.
 
-```bash
-cd /path/to/lib-auth
+It was deliberately left out of the boundary PR (#156) so the review would show
+the API change rather than the rewritten import lines, and landed separately in
+#157. That ordering turned out to be a mistake: semantic-release tagged
+`v4.0.0-beta.1` on the still-`/v3` path the moment #156 merged, and Go rejects
+that combination outright — `module path includes a major version suffix, so
+major version must match` — so the released version was not installable by
+anyone until #157 landed.
 
-go mod edit -module github.com/LerianStudio/lib-auth/v4
-
-grep -rl 'LerianStudio/lib-auth/v3' --include='*.go' . \
-  | grep -v '/vendor/' \
-  | xargs sed -i -E 's#(LerianStudio/lib-auth)/v3#\1/v4#g'
-
-grep -rl 'LerianStudio/lib-auth/v3' --include='*.md' . \
-  | xargs sed -i -E 's#(LerianStudio/lib-auth)/v3#\1/v4#g'
-
-# gofmt -l lists unformatted files but still exits 0, so check its OUTPUT is
-# empty rather than its status, or the chain below runs on unformatted code.
-test -z "$(gofmt -l .)" && go build ./... && go test -count=1 ./...
-```
+On a repository with automated releases, the path rename belongs in the same PR
+as the break, or the release has to be held.
 
 ## 6. The regression guard
 

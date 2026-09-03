@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/LerianStudio/lib-auth/v3/auth/obs"
+	"github.com/LerianStudio/lib-auth/v4/auth/obs"
 	"github.com/gofiber/fiber/v3"
 )
 

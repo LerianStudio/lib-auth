@@ -1,4 +1,4 @@
-module github.com/LerianStudio/lib-auth/v3
+module github.com/LerianStudio/lib-auth/v4
 
 go 1.26.3
 
