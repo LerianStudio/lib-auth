@@ -38,12 +38,20 @@ type AuthClient struct {
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
 	// "{product}/" prefix from stored resources and dual-match a bare request.
-	// It is read once from AUTH_M2M_PRODUCT_FORWARD_ENABLED at construction, with
-	// LookupEnv, so an explicit "false" is distinguishable from an unset variable
-	// and can act as a kill switch; the default (unset) is false, which preserves
-	// the prior behavior of sending no product for M2M. Only the exact string
-	// "true" enables it. Forwarding is additionally gated by M2MInversionEnabled
-	// (see checkAuthorization), so this field alone never forwards anything.
+	// It is read once from AUTH_M2M_PRODUCT_FORWARD_ENABLED at construction and its
+	// DEFAULT is whatever M2MInversionEnabled resolved to, so a deployment needs
+	// only AUTH_M2M_INVERSION_ENABLED to get M2M product forwarding. The variable
+	// stays an explicit override in both directions (read with LookupEnv, so an
+	// explicit "false" is distinguishable from an unset variable): "false" is the
+	// kill switch, keeping inversion on while forwarding stays off, and only the
+	// exact string "true" enables it.
+	//
+	// Forwarding is additionally gated by M2MInversionEnabled in
+	// checkAuthorization, so this field alone never forwards anything: the
+	// (ForwardM2MProduct, M2MInversionEnabled) = (true, false) combination is a
+	// no-op. That invariant is why deriving the default can change exactly ONE
+	// configuration — inversion on with the variable unset, which used to send no
+	// product and now sends one.
 	// Gating it by env keeps deploy != release: flipping the flag activates M2M
 	// product isolation without a code change in consumers.
 	ForwardM2MProduct bool
@@ -59,6 +67,10 @@ type AuthClient struct {
 	// consumer bumping this library for Fiber v3 is NOT forced into the new authz
 	// model. Gating it by env keeps deploy != release: flipping the flag activates
 	// the inversion without a code change in consumers.
+	//
+	// It also supplies the DEFAULT for ForwardM2MProduct, so enabling the inversion
+	// model enables M2M product forwarding with it unless
+	// AUTH_M2M_PRODUCT_FORWARD_ENABLED explicitly says otherwise.
 	M2MInversionEnabled bool
 
 	// Required, when true, makes the middleware fail closed: if auth is disabled
@@ -287,12 +299,18 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 
 	verifyKeys, verifyIssuer := loadVerification(l)
 
-	// AUTH_M2M_PRODUCT_FORWARD_ENABLED is read with LookupEnv, not Getenv, so that
-	// "unset" and an explicit "false" are two distinguishable states. Both resolve
-	// to false here — the default is false — but only LookupEnv can express an
-	// explicit opt-OUT, which is what any non-false default would need as a kill
-	// switch. Any value other than the exact string "true" disables forwarding.
-	forwardM2MProduct := false
+	// AUTH_M2M_INVERSION_ENABLED is the single toggle a deployment needs: an ABSENT
+	// AUTH_M2M_PRODUCT_FORWARD_ENABLED follows it, so turning on the inversion
+	// model turns on M2M product forwarding with it.
+	//
+	// AUTH_M2M_PRODUCT_FORWARD_ENABLED remains an explicit override in BOTH
+	// directions, which is why it is read with LookupEnv and not Getenv: an
+	// explicit "false" is the kill switch (inversion stays on, forwarding stays
+	// off) and can only exist if "unset" and "false" are distinguishable. Any value
+	// other than the exact string "true" disables forwarding.
+	inversion := os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true"
+
+	forwardM2MProduct := inversion
 	if v, ok := os.LookupEnv("AUTH_M2M_PRODUCT_FORWARD_ENABLED"); ok {
 		forwardM2MProduct = v == "true"
 	}
@@ -304,7 +322,7 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 		Enabled:             enabled,
 		Logger:              l,
 		ForwardM2MProduct:   forwardM2MProduct,
-		M2MInversionEnabled: os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true",
+		M2MInversionEnabled: inversion,
 		Required:            os.Getenv("AUTH_REQUIRED") == "true",
 		timeout:             parseAuthTimeout(),
 		cache:               newDecisionCacheFromEnv(),
@@ -377,7 +395,8 @@ func (auth *AuthClient) mustRefuse() bool {
 
 // Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
 // product identifies the product/application owning the route (e.g. "midaz"); it is forwarded for normal-user flows, and for M2M (application)
-// flows when AUTH_M2M_PRODUCT_FORWARD_ENABLED is set, so the auth service can isolate permissions by product. M2M tokens are identified by their own subject claim.
+// flows when M2M product forwarding is on (AUTH_M2M_PRODUCT_FORWARD_ENABLED, which defaults to AUTH_M2M_INVERSION_ENABLED), so the auth service
+// can isolate permissions by product. M2M tokens are identified by their own subject claim.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
 	return func(c fiber.Ctx) error {
@@ -596,6 +615,12 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 	// M2M product forwarding only applies under the inversion model; the legacy
 	// path (inversion OFF) forwards product for normal-user flows only (pre-#122).
 	// shouldForwardProduct(userType, product, false) == the legacy normal-user rule.
+	//
+	// The AND is redundant for the DEFAULT path — ForwardM2MProduct is derived from
+	// M2MInversionEnabled in NewAuthClient — and is kept deliberately: it is the
+	// invariant that forwarding can never happen without inversion, and it is still
+	// load-bearing when an operator sets AUTH_M2M_PRODUCT_FORWARD_ENABLED=true with
+	// inversion off, or when a caller builds an AuthClient literal directly.
 	forwardM2MProduct := auth.ForwardM2MProduct && auth.M2MInversionEnabled
 	if shouldForwardProduct(userType, product, forwardM2MProduct) {
 		requestBody["product"] = product

@@ -705,26 +705,83 @@ func TestNewAuthClient_ReadsForwardM2MProductFlag(t *testing.T) {
 	logger := &testLogger{}
 
 	tests := []struct {
-		name        string
-		forward     string // meaningful only when forwardSet is true
-		forwardSet  bool   // false = the variable is absent from the environment
-		wantForward bool
+		name          string
+		inversion     string // meaningful only when inversionSet is true
+		inversionSet  bool   // false = the variable is absent from the environment
+		forward       string // meaningful only when forwardSet is true
+		forwardSet    bool   // false = the variable is absent from the environment
+		wantInversion bool
+		wantForward   bool
 	}{
-		{name: "flag_absent_defaults_false", forwardSet: false, wantForward: false},
-		{name: "flag_true_enables_forward", forward: "true", forwardSet: true, wantForward: true},
-		{name: "flag_explicit_false_disables_forward", forward: "false", forwardSet: true, wantForward: false},
-		{name: "flag_empty_value_is_false", forward: "", forwardSet: true, wantForward: false},
-		{name: "flag_non_true_value_is_false", forward: "1", forwardSet: true, wantForward: false},
+		// The derived default: one variable is enough to turn on M2M product
+		// forwarding, because an absent forward flag follows the inversion flag.
+		{
+			name:      "inversion_on_forward_absent_follows_inversion",
+			inversion: "true", inversionSet: true, forwardSet: false,
+			wantInversion: true, wantForward: true,
+		},
+		// Explicit override, both directions. "false" is the kill switch: it keeps
+		// inversion on while forwarding stays off.
+		{
+			name:      "inversion_on_forward_explicit_false_is_kill_switch",
+			inversion: "true", inversionSet: true, forward: "false", forwardSet: true,
+			wantInversion: true, wantForward: false,
+		},
+		{
+			name:      "inversion_on_forward_explicit_true_enables_forward",
+			inversion: "true", inversionSet: true, forward: "true", forwardSet: true,
+			wantInversion: true, wantForward: true,
+		},
+		// Only the exact string "true" enables. "" and "1" are SET, so they are
+		// overrides that beat the inversion-derived default - not "absent".
+		{
+			name:      "inversion_on_forward_empty_value_is_false",
+			inversion: "true", inversionSet: true, forward: "", forwardSet: true,
+			wantInversion: true, wantForward: false,
+		},
+		{
+			name:      "inversion_on_forward_non_true_value_is_false",
+			inversion: "true", inversionSet: true, forward: "1", forwardSet: true,
+			wantInversion: true, wantForward: false,
+		},
+		// Inversion off: the derived default is false, exactly as before.
+		{
+			name:         "inversion_absent_forward_absent_defaults_false",
+			inversionSet: false, forwardSet: false,
+			wantInversion: false, wantForward: false,
+		},
+		{
+			name:      "inversion_explicit_false_forward_absent_defaults_false",
+			inversion: "false", inversionSet: true, forwardSet: false,
+			wantInversion: false, wantForward: false,
+		},
+		{
+			name:      "inversion_non_true_value_forward_absent_defaults_false",
+			inversion: "1", inversionSet: true, forwardSet: false,
+			wantInversion: false, wantForward: false,
+		},
+		// forward=true with inversion off sets the FIELD, but forwards nothing: the
+		// effective behaviour is asserted end to end in
+		// TestCheckAuthorization_Application_ForwardWithoutInversion_NotForwarded.
+		{
+			name:         "inversion_absent_forward_explicit_true_sets_field_only",
+			inversionSet: false, forward: "true", forwardSet: true,
+			wantInversion: false, wantForward: true,
+		},
 	}
 
 	for _, tt := range tests {
 		tt := tt
 
 		t.Run(tt.name, func(t *testing.T) {
-			// The forward flag is read independently of the inversion flag, so pin
-			// the inversion flag to absent: an ambient value in the developer's or
-			// CI's environment must never be able to move this result.
-			unsetEnvForTest(t, envInversion)
+			// Both variables are pinned in every row - absent is a state under test,
+			// so an ambient value in the developer's or CI's environment must never
+			// be able to move a result.
+			if tt.inversionSet {
+				t.Setenv(envInversion, tt.inversion)
+			} else {
+				unsetEnvForTest(t, envInversion)
+			}
 
 			if tt.forwardSet {
 				t.Setenv(envForward, tt.forward)
@@ -734,9 +791,54 @@ func TestNewAuthClient_ReadsForwardM2MProductFlag(t *testing.T) {
 
 			client := NewAuthClient("", false, logger)
 
+			assert.Equal(t, tt.wantInversion, client.M2MInversionEnabled, "M2MInversionEnabled")
 			assert.Equal(t, tt.wantForward, client.ForwardM2MProduct, "ForwardM2MProduct")
 		})
 	}
+}
+
+func TestCheckAuthorization_Application_ForwardWithoutInversion_NotForwarded(t *testing.T) {
+	t.Parallel()
+
+	// The invariant that makes the derived default safe: forwarding can never
+	// happen without inversion. ForwardM2MProduct alone is true here, yet no
+	// product reaches the wire, because checkAuthorization ANDs the two flags.
+	// This is also the one combination the derived default cannot produce - only an
+	// operator setting forward=true with inversion off gets here - and it stays a
+	// no-op, which is why collapsing the default changes exactly one configuration
+	// (inversion on, forward absent) and not this one.
+	var capturedBody map[string]string
+
+	server := captureAuthServer(t, &capturedBody)
+	defer server.Close()
+
+	auth := &AuthClient{
+		Address:             server.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		ForwardM2MProduct:   true,
+		M2MInversionEnabled: false,
+	}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"name": "my-app",
+		"sub":  "acme-org/my-app",
+	})
+
+	authorized, statusCode, err := auth.checkAuthorization(
+		context.Background(), "midaz", "resource", "action", token, "",
+	)
+
+	require.NoError(t, err)
+	assert.True(t, authorized)
+	assert.Equal(t, http.StatusOK, statusCode)
+
+	// Legacy subject (inversion off) and, crucially, NO product on the wire.
+	assert.Equal(t, "admin/midaz-editor-role", capturedBody["sub"])
+
+	_, hasProduct := capturedBody["product"]
+	assert.False(t, hasProduct, "product must not be forwarded while inversion is off")
 }
 
 // ---------------------------------------------------------------------------

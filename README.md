@@ -84,9 +84,15 @@ PLUGIN_AUTH_ENABLED=true
 
 # Optional. When "true", the client also forwards the route product on M2M
 # (application-token) authorization calls, so the auth service can isolate
-# permissions by product (matching product-prefixed resources). Defaults to
-# false, preserving the previous behavior of sending no product for M2M.
-AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
+# permissions by product (matching product-prefixed resources).
+#
+# DEFAULTS TO AUTH_M2M_INVERSION_ENABLED (below), so a deployment needs only that
+# one variable to get M2M product forwarding. Leave this unset unless you want to
+# override the pairing; setting it to "false" is the kill switch, keeping the
+# inversion model on while forwarding stays off. Only the exact string "true"
+# enables it, and forwarding never happens while AUTH_M2M_INVERSION_ENABLED is
+# off, whatever this is set to.
+AUTH_M2M_PRODUCT_FORWARD_ENABLED=
 
 # Optional. When "true", enables the M2M/authz "inversion of responsibility"
 # model: application tokens authorize under their own real sub claim and any token
@@ -94,7 +100,9 @@ AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
 # preserving the legacy pre-inversion model (non-normal-user types authorize under
 # the fabricated "admin/{product}-editor-role" subject and unknown types fail open).
 # Keep it false when your Casdoor seed still uses the legacy model; opt in once
-# seeds are migrated.
+# seeds are migrated. Note that it also supplies the default for
+# AUTH_M2M_PRODUCT_FORWARD_ENABLED above, so turning it on turns on M2M product
+# forwarding too unless that variable explicitly says otherwise.
 AUTH_M2M_INVERSION_ENABLED=false
 
 # Optional. Opt-in local JWT signature verification for the general authorization

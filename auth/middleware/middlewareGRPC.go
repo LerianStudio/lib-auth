@@ -31,9 +31,10 @@ type Policy struct {
 //   - DefaultPolicy used when a method mapping is absent.
 //   - SubResolver derives the product identifier (e.g., "midaz") passed to
 //     checkAuthorization as its product argument. It is forwarded for normal-user
-//     tokens, and for M2M (application) tokens when AUTH_M2M_PRODUCT_FORWARD_ENABLED
-//     is set; M2M tokens are identified by their own subject claim. Return ""
-//     when not applicable.
+//     tokens, and for M2M (application) tokens when M2M product forwarding is on
+//     (AUTH_M2M_PRODUCT_FORWARD_ENABLED, which defaults to
+//     AUTH_M2M_INVERSION_ENABLED); M2M tokens are identified by their own subject
+//     claim. Return "" when not applicable.
 type PolicyConfig struct {
 	MethodPolicies map[string]Policy
 	DefaultPolicy  *Policy
@@ -47,9 +48,14 @@ type PolicyConfig struct {
 // - Rejects missing tokens with codes.Unauthenticated; misconfiguration returns codes.Internal.
 // Telemetry:
 //   - Sets app.request.request_id.
-//   - Sets app.request.payload with {resource, action}, including product only when
-//     it is actually forwarded to the auth service (normal-user, or M2M when
-//     AUTH_M2M_PRODUCT_FORWARD_ENABLED is set), mirroring the request body.
+//   - Sets app.request.payload with {resource, action}, including product when it
+//     is forwarded to the auth service (normal-user, or M2M when M2M product
+//     forwarding is on: AUTH_M2M_PRODUCT_FORWARD_ENABLED, which defaults to
+//     AUTH_M2M_INVERSION_ENABLED). The payload is built from
+//     AuthClient.ForwardM2MProduct alone, while the wire body additionally
+//     requires M2MInversionEnabled, so the two differ in the one combination where
+//     forwarding is enabled with inversion off — there the span shows a product the
+//     wire body omits.
 func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if auth.mustRefuse() {
@@ -83,7 +89,9 @@ func NewGRPCAuthUnaryPolicy(auth *AuthClient, cfg PolicyConfig) grpc.UnaryServer
 
 		// product is the resolved product identifier passed as checkAuthorization's
 		// product argument. It is forwarded for normal-user flows, and for M2M
-		// (application) flows when AUTH_M2M_PRODUCT_FORWARD_ENABLED is set.
+		// (application) flows when M2M product forwarding is on
+		// (AUTH_M2M_PRODUCT_FORWARD_ENABLED, which defaults to
+		// AUTH_M2M_INVERSION_ENABLED).
 		var product string
 
 		if cfg.SubResolver != nil {
@@ -317,7 +325,9 @@ func NewGRPCAuthStreamPolicy(auth *AuthClient, cfg PolicyConfig) grpc.StreamServ
 
 		// product is the resolved product identifier passed as checkAuthorization's
 		// product argument. It is forwarded for normal-user flows, and for M2M
-		// (application) flows when AUTH_M2M_PRODUCT_FORWARD_ENABLED is set.
+		// (application) flows when M2M product forwarding is on
+		// (AUTH_M2M_PRODUCT_FORWARD_ENABLED, which defaults to
+		// AUTH_M2M_INVERSION_ENABLED).
 		var product string
 
 		if cfg.SubResolver != nil {
