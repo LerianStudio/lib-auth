@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -676,32 +677,66 @@ func TestCheckAuthorization_ServerReturnsInvalidJSON(t *testing.T) {
 // NewAuthClient - ForwardM2MProduct flag
 // ---------------------------------------------------------------------------
 
+// unsetEnvForTest makes key absent for the duration of the test and restores the
+// pre-test state — including "it was unset" — through t.Setenv's own cleanup.
+// Go 1.26 has no t.Unsetenv and t.Setenv cannot express absence, so the pairing is
+// deliberate: t.Setenv registers the restore, then os.Unsetenv removes the key so
+// os.LookupEnv reports ok=false. This is the only way to exercise the "unset"
+// branch of a LookupEnv-based default; an empty string does NOT reach it.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+
+	t.Setenv(key, "")
+
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("failed to unset %s: %v", key, err)
+	}
+}
+
 func TestNewAuthClient_ReadsForwardM2MProductFlag(t *testing.T) {
-	// Cannot use t.Parallel(): subtests use t.Setenv which modifies process env.
+	// Cannot use t.Parallel(): subtests mutate process env (t.Setenv/os.Unsetenv).
 	// enabled=false / empty address returns early without any network call, so the
 	// flag wiring is exercised in isolation.
+	const (
+		envForward   = "AUTH_M2M_PRODUCT_FORWARD_ENABLED"
+		envInversion = "AUTH_M2M_INVERSION_ENABLED"
+	)
+
 	logger := &testLogger{}
 
-	t.Run("flag_true_enables_forward", func(t *testing.T) {
-		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "true")
+	tests := []struct {
+		name        string
+		forward     string // meaningful only when forwardSet is true
+		forwardSet  bool   // false = the variable is absent from the environment
+		wantForward bool
+	}{
+		{name: "flag_absent_defaults_false", forwardSet: false, wantForward: false},
+		{name: "flag_true_enables_forward", forward: "true", forwardSet: true, wantForward: true},
+		{name: "flag_explicit_false_disables_forward", forward: "false", forwardSet: true, wantForward: false},
+		{name: "flag_empty_value_is_false", forward: "", forwardSet: true, wantForward: false},
+		{name: "flag_non_true_value_is_false", forward: "1", forwardSet: true, wantForward: false},
+	}
 
-		client := NewAuthClient("", false, logger)
-		assert.True(t, client.ForwardM2MProduct)
-	})
+	for _, tt := range tests {
+		tt := tt
 
-	t.Run("flag_absent_defaults_false", func(t *testing.T) {
-		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "")
+		t.Run(tt.name, func(t *testing.T) {
+			// The forward flag is read independently of the inversion flag, so pin
+			// the inversion flag to absent: an ambient value in the developer's or
+			// CI's environment must never be able to move this result.
+			unsetEnvForTest(t, envInversion)
 
-		client := NewAuthClient("", false, logger)
-		assert.False(t, client.ForwardM2MProduct)
-	})
+			if tt.forwardSet {
+				t.Setenv(envForward, tt.forward)
+			} else {
+				unsetEnvForTest(t, envForward)
+			}
 
-	t.Run("flag_non_true_value_is_false", func(t *testing.T) {
-		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "1")
+			client := NewAuthClient("", false, logger)
 
-		client := NewAuthClient("", false, logger)
-		assert.False(t, client.ForwardM2MProduct)
-	})
+			assert.Equal(t, tt.wantForward, client.ForwardM2MProduct, "ForwardM2MProduct")
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
