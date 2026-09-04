@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-auth/v3/auth/middleware"
-	liblog "github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-auth/v4/auth/middleware"
+	"github.com/LerianStudio/lib-auth/v4/auth/obs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -111,20 +111,18 @@ func (is *identityServer) count() int {
 type captureLogger struct {
 	mu   sync.Mutex
 	msgs []string
-	lvls []liblog.Level
+	lvls []int
 }
 
-func (c *captureLogger) Log(_ context.Context, level liblog.Level, msg string, _ ...liblog.Field) {
+func (c *captureLogger) Log(_ context.Context, level int, msg string, _ ...any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.msgs = append(c.msgs, msg)
 	c.lvls = append(c.lvls, level)
 }
-func (c *captureLogger) With(_ ...liblog.Field) liblog.Logger { return c }
-func (c *captureLogger) WithGroup(_ string) liblog.Logger     { return c }
-func (c *captureLogger) Enabled(_ liblog.Level) bool          { return true }
-func (c *captureLogger) Sync(_ context.Context) error         { return nil }
+func (c *captureLogger) Enabled(_ int) bool           { return true }
+func (c *captureLogger) Sync(_ context.Context) error { return nil }
 
 func (c *captureLogger) all() string {
 	c.mu.Lock()
@@ -135,7 +133,7 @@ func (c *captureLogger) all() string {
 
 // find returns the first recorded entry containing sub, together with the level
 // it was logged at.
-func (c *captureLogger) find(sub string) (msg string, level liblog.Level, ok bool) {
+func (c *captureLogger) find(sub string) (msg string, level int, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -178,8 +176,7 @@ func (c *fakeCache) get(key string) (string, bool) { return c.Get(context.Backgr
 func testConfig(t *testing.T, authURL, identityURL string) Config {
 	t.Helper()
 
-	l := liblog.NewNop()
-	auth := middleware.NewAuthClient(authURL, true, &l)
+	auth := middleware.NewAuthClient(authURL, true, obs.Nop())
 
 	return Config{
 		Slug:         "plugin-fees",
@@ -460,7 +457,7 @@ func TestPublish_NotImplemented_DistinctMultiTenantLog(t *testing.T) {
 	msg, level, found := notImplemented.find("status=501")
 	require.True(t, found, "the 501 path must log the status; got:\n%s", notImplemented.all())
 
-	assert.Equal(t, liblog.LevelWarn, level,
+	assert.Equal(t, obs.LevelWarn, level,
 		"501 is a correct answer from a deployment that does not serve this operation, not a plugin fault: warn, not error")
 	assert.Contains(t, msg, "tenant-manager",
 		"the 501 message must name who owns multi-tenant materialization")

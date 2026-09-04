@@ -22,8 +22,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/LerianStudio/lib-auth/v3/auth/middleware"
-	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-auth/v4/auth/middleware"
+	"github.com/LerianStudio/lib-auth/v4/auth/obs"
 )
 
 // Fixed env contract consumed by WireFromEnv. The four RI/D7-declaration vars
@@ -79,14 +79,14 @@ const (
 // It is kept local to this package deliberately: the deprecation warning is a
 // one-release migration aid specific to the RI/D7-declaration contract, not a
 // general-purpose utility worth widening lib-commons' surface for.
-func lookupWithDeprecatedAlias(canonical, deprecated string, logger log.Logger) string {
+func lookupWithDeprecatedAlias(canonical, deprecated string, logger obs.Logger) string {
 	if v := strings.TrimSpace(os.Getenv(canonical)); v != "" {
 		return v
 	}
 
 	if v := strings.TrimSpace(os.Getenv(deprecated)); v != "" {
-		if logger != nil {
-			logger.Log(context.Background(), log.LevelWarn,
+		if !obs.IsNil(logger) {
+			logger.Log(context.Background(), obs.LevelWarn,
 				fmt.Sprintf("env %s is deprecated; use %s", deprecated, canonical))
 		}
 
@@ -106,7 +106,7 @@ type WireInput struct {
 	// the //go:embed (embed is relative to the caller's source). Required.
 	Manifest []byte
 	// Logger receives structured logs. Optional; nil => a no-op logger.
-	Logger log.Logger
+	Logger obs.Logger
 }
 
 // WireFromEnv builds and starts the D7 declaration publisher from the FIXED,
@@ -160,16 +160,11 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 		return noop, fmt.Errorf("%s is required when %s=true", envM2MClientSecret, envDeclarationEnabled)
 	}
 
-	// Build the token minter. NewAuthClient takes *log.Logger: pass a pointer to
-	// the caller's logger when present, else nil (it falls back to its own
-	// logger). Auth is passed through faithfully — the publisher fail-opens if a
-	// token can't be minted, matching current plugin behavior.
-	var loggerPtr *log.Logger
-	if in.Logger != nil {
-		loggerPtr = &in.Logger
-	}
-
-	auth := middleware.NewAuthClient(authHost, authEnabled, loggerPtr)
+	// Build the token minter. NewAuthClient takes an obs.Logger and resolves a
+	// nil one to its own default, so the caller's logger goes straight through.
+	// Auth is passed through faithfully — the publisher fail-opens if a token
+	// can't be minted, matching current plugin behavior.
+	auth := middleware.NewAuthClient(authHost, authEnabled, in.Logger)
 
 	// Assemble the Config. Cache/Interval/FailFast are hardcoded to the
 	// pilot-safe values (no extra env knobs now): no dedup cache, startup-only,

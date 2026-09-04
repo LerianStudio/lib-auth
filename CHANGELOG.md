@@ -1,3 +1,119 @@
+## [4.0.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v4.0.0-beta.3...v4.0.0-beta.4) (2026-09-04)
+
+
+### Bug Fixes
+
+* **declaration:** classify 501 as deterministic with a multi-tenant-aware log ([7ee363c](https://github.com/LerianStudio/lib-auth/commit/7ee363c9472a1207314128d36b6626253878876c)), closes [plugin-access-manager#410](https://github.com/LerianStudio/plugin-access-manager/issues/410)
+
+## [4.0.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v4.0.0-beta.2...v4.0.0-beta.3) (2026-09-04)
+
+## [4.0.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v4.0.0-beta.1...v4.0.0-beta.2) (2026-09-04)
+
+## [4.0.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.5.0...v4.0.0-beta.1) (2026-09-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** rename the module path to /v4
+* **auth:** take a logger interface, not a lib-observability type
+
+### Features
+
+* **auth:** declare a universal logger contract in auth/obs ([0238504](https://github.com/LerianStudio/lib-auth/commit/0238504cf334ceaf6a239e13a6decda2ecdcd98a))
+
+
+### Bug Fixes
+
+* **declaration:** classify 501 as deterministic with a multi-tenant-aware log ([7ee363c](https://github.com/LerianStudio/lib-auth/commit/7ee363c9472a1207314128d36b6626253878876c)), closes [plugin-access-manager#410](https://github.com/LerianStudio/plugin-access-manager/issues/410)
+* **declaration:** classify 501 as deterministic with a multi-tenant-aware log ([8bdc3d2](https://github.com/LerianStudio/lib-auth/commit/8bdc3d28c0dd9e1e6e99f89be19a33c2cc2b7127)), closes [plugin-access-manager#410](https://github.com/LerianStudio/plugin-access-manager/issues/410)
+* **auth:** treat a typed-nil logger as unset ([e4ed2df](https://github.com/LerianStudio/lib-auth/commit/e4ed2df751a344efac302212ea9470b703f0158a))
+
+
+### Miscellaneous Chores
+
+* **auth:** rename the module path to /v4 ([a139357](https://github.com/LerianStudio/lib-auth/commit/a139357c3f257ab72987ae677e3105f657d6fba3)), closes [#156](https://github.com/LerianStudio/lib-auth/issues/156)
+
+
+### Code Refactoring
+
+* **auth:** take a logger interface, not a lib-observability type ([9ae1a14](https://github.com/LerianStudio/lib-auth/commit/9ae1a14192cc807a8a9a2b498a5cdd1afa67a54d))
+
+## [4.0.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.5.0...v4.0.0-beta.1) (2026-09-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** rename the module path to /v4
+* **auth:** take a logger interface, not a lib-observability type
+
+### Features
+
+* **auth:** declare a universal logger contract in auth/obs ([0238504](https://github.com/LerianStudio/lib-auth/commit/0238504cf334ceaf6a239e13a6decda2ecdcd98a))
+
+
+### Bug Fixes
+
+* **declaration:** classify 501 as deterministic with a multi-tenant-aware log ([8bdc3d2](https://github.com/LerianStudio/lib-auth/commit/8bdc3d28c0dd9e1e6e99f89be19a33c2cc2b7127)), closes [plugin-access-manager#410](https://github.com/LerianStudio/plugin-access-manager/issues/410)
+* **auth:** treat a typed-nil logger as unset ([e4ed2df](https://github.com/LerianStudio/lib-auth/commit/e4ed2df751a344efac302212ea9470b703f0158a))
+
+
+### Miscellaneous Chores
+
+* **auth:** rename the module path to /v4 ([a139357](https://github.com/LerianStudio/lib-auth/commit/a139357c3f257ab72987ae677e3105f657d6fba3)), closes [#156](https://github.com/LerianStudio/lib-auth/issues/156)
+
+
+### Code Refactoring
+
+* **auth:** take a logger interface, not a lib-observability type ([9ae1a14](https://github.com/LerianStudio/lib-auth/commit/9ae1a14192cc807a8a9a2b498a5cdd1afa67a54d))
+
+## [4.0.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.5.0...v4.0.0-beta.1) (2026-09-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** rename the module path to /v4
+* **auth:** take a logger interface, not a lib-observability type
+
+### Features
+
+* **auth:** declare a universal logger contract in auth/obs ([0238504](https://github.com/LerianStudio/lib-auth/commit/0238504cf334ceaf6a239e13a6decda2ecdcd98a))
+
+
+### Bug Fixes
+
+* **auth:** treat a typed-nil logger as unset ([e4ed2df](https://github.com/LerianStudio/lib-auth/commit/e4ed2df751a344efac302212ea9470b703f0158a))
+
+
+### Miscellaneous Chores
+
+* **auth:** rename the module path to /v4 ([a139357](https://github.com/LerianStudio/lib-auth/commit/a139357c3f257ab72987ae677e3105f657d6fba3)), closes [#156](https://github.com/LerianStudio/lib-auth/issues/156)
+
+
+### Code Refactoring
+
+* **auth:** take a logger interface, not a lib-observability type ([9ae1a14](https://github.com/LerianStudio/lib-auth/commit/9ae1a14192cc807a8a9a2b498a5cdd1afa67a54d))
+
+## [4.0.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v3.5.0...v4.0.0-beta.1) (2026-09-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** take a logger interface, not a lib-observability type
+
+### Features
+
+* **auth:** declare a universal logger contract in auth/obs ([0238504](https://github.com/LerianStudio/lib-auth/commit/0238504cf334ceaf6a239e13a6decda2ecdcd98a))
+
+
+### Bug Fixes
+
+* **auth:** treat a typed-nil logger as unset ([e4ed2df](https://github.com/LerianStudio/lib-auth/commit/e4ed2df751a344efac302212ea9470b703f0158a))
+
+
+### Code Refactoring
+
+* **auth:** take a logger interface, not a lib-observability type ([9ae1a14](https://github.com/LerianStudio/lib-auth/commit/9ae1a14192cc807a8a9a2b498a5cdd1afa67a54d))
+
 ## [3.6.0](https://github.com/LerianStudio/lib-auth/compare/v3.5.0...v3.6.0) (2026-09-03)
 
 

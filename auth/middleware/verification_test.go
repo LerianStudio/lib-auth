@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/v2/log"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -424,14 +423,14 @@ func TestCheckAuthorization_VerificationDisabled_UnsignedTokenStillWorks(t *test
 func TestNewAuthClient_VerificationConfig(t *testing.T) {
 	// Cannot use t.Parallel(): subtests use t.Setenv. enabled=false returns early
 	// without any network call, exercising the config wiring in isolation.
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
 	t.Run("inline_cert_populates_keys", func(t *testing.T) {
 		_, pubPEM := newTestRSAKeyPEM(t)
 		t.Setenv("AUTH_JWT_VERIFY_CERT", pubPEM)
 		t.Setenv("AUTH_JWT_ISSUER", "http://issuer:8000")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.Len(t, client.verifyKeys, 1)
 		assert.Equal(t, "http://issuer:8000", client.verifyIssuer)
 	})
@@ -441,7 +440,7 @@ func TestNewAuthClient_VerificationConfig(t *testing.T) {
 		_, pem2 := newTestRSAKeyPEM(t)
 		t.Setenv("AUTH_JWT_VERIFY_CERT", pem1+"\n"+pem2)
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.Len(t, client.verifyKeys, 2)
 	})
 
@@ -449,14 +448,14 @@ func TestNewAuthClient_VerificationConfig(t *testing.T) {
 		t.Setenv("AUTH_JWT_VERIFY_CERT", "")
 		t.Setenv("AUTH_JWT_VERIFY_CERT_PATH", "")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.Nil(t, client.verifyKeys)
 	})
 
 	t.Run("bad_cert_disables_verification_without_panic", func(t *testing.T) {
 		t.Setenv("AUTH_JWT_VERIFY_CERT", "-----BEGIN PUBLIC KEY-----\ngarbage\n-----END PUBLIC KEY-----")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.Nil(t, client.verifyKeys)
 	})
 
@@ -469,7 +468,7 @@ func TestNewAuthClient_VerificationConfig(t *testing.T) {
 		t.Setenv("AUTH_JWT_VERIFY_CERT", "")
 		t.Setenv("AUTH_JWT_VERIFY_CERT_PATH", path)
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.Len(t, client.verifyKeys, 1)
 	})
 
@@ -477,7 +476,7 @@ func TestNewAuthClient_VerificationConfig(t *testing.T) {
 		t.Setenv("AUTH_JWT_VERIFY_CERT", "")
 		t.Setenv("AUTH_JWT_VERIFY_CERT_PATH", filepath.Join(t.TempDir(), "does-not-exist.pem"))
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.Nil(t, client.verifyKeys)
 	})
 
@@ -486,7 +485,7 @@ func TestNewAuthClient_VerificationConfig(t *testing.T) {
 		t.Setenv("AUTH_JWT_VERIFY_CERT", inlinePEM)
 		t.Setenv("AUTH_JWT_VERIFY_CERT_PATH", filepath.Join(t.TempDir(), "unused.pem"))
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.Len(t, client.verifyKeys, 1)
 	})
 }

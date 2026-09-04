@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	liblog "github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-auth/v4/auth/obs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -67,7 +67,7 @@ func wireInput() WireInput {
 	return WireInput{
 		Slug:     "plugin-fees",
 		Manifest: []byte(feesJSON),
-		Logger:   liblog.NewNop(),
+		Logger:   obs.Nop(),
 	}
 }
 
@@ -277,7 +277,7 @@ func TestWireFromEnv_HappyPath_IdentityUnreachable(t *testing.T) {
 	assert.NotPanics(t, func() { stop() })
 }
 
-// recordingLogger is a minimal liblog.Logger spy that records the messages
+// recordingLogger is a minimal obs.Logger spy that records the messages
 // emitted at LevelWarn, so a test can assert the deprecated-alias warning fires
 // exactly once and never carries a secret value.
 type recordingLogger struct {
@@ -285,8 +285,8 @@ type recordingLogger struct {
 	warns []string
 }
 
-func (l *recordingLogger) Log(_ context.Context, level liblog.Level, msg string, _ ...liblog.Field) {
-	if level != liblog.LevelWarn {
+func (l *recordingLogger) Log(_ context.Context, level int, msg string, _ ...any) {
+	if level != obs.LevelWarn {
 		return
 	}
 
@@ -295,10 +295,8 @@ func (l *recordingLogger) Log(_ context.Context, level liblog.Level, msg string,
 	l.mu.Unlock()
 }
 
-func (l *recordingLogger) With(_ ...liblog.Field) liblog.Logger { return l }
-func (l *recordingLogger) WithGroup(_ string) liblog.Logger     { return l }
-func (l *recordingLogger) Enabled(_ liblog.Level) bool          { return true }
-func (l *recordingLogger) Sync(_ context.Context) error         { return nil }
+func (l *recordingLogger) Enabled(_ int) bool           { return true }
+func (l *recordingLogger) Sync(_ context.Context) error { return nil }
 
 func (l *recordingLogger) warnCount() int {
 	l.mu.Lock()

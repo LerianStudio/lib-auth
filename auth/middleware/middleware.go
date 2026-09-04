@@ -16,15 +16,15 @@ import (
 	"strings"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	"github.com/LerianStudio/lib-observability/v2/log"
-	"github.com/LerianStudio/lib-observability/v2/tracing"
-	"github.com/LerianStudio/lib-observability/v2/zap"
+	"github.com/LerianStudio/lib-auth/v4/auth/obs"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
+	"github.com/LerianStudio/lib-observability/v4/zap"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/LerianStudio/lib-commons/v6/commons"
-	libHTTP "github.com/LerianStudio/lib-commons/v6/commons/net/http"
+	"github.com/LerianStudio/lib-commons/v7/commons"
+	libHTTP "github.com/LerianStudio/lib-commons/v7/commons/net/http"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/sony/gobreaker"
@@ -33,13 +33,17 @@ import (
 type AuthClient struct {
 	Address string
 	Enabled bool
-	Logger  log.Logger
+	Logger  obs.Logger
 
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
 	// "{product}/" prefix from stored resources and dual-match a bare request.
-	// It is read once from AUTH_M2M_PRODUCT_FORWARD_ENABLED at construction; the
-	// default (false) preserves the prior behavior of sending no product for M2M.
+	// It is read once from AUTH_M2M_PRODUCT_FORWARD_ENABLED at construction, with
+	// LookupEnv, so an explicit "false" is distinguishable from an unset variable
+	// and can act as a kill switch; the default (unset) is false, which preserves
+	// the prior behavior of sending no product for M2M. Only the exact string
+	// "true" enables it. Forwarding is additionally gated by M2MInversionEnabled
+	// (see checkAuthorization), so this field alone never forwards anything.
 	// Gating it by env keeps deploy != release: flipping the flag activates M2M
 	// product isolation without a code change in consumers.
 	ForwardM2MProduct bool
@@ -187,23 +191,23 @@ func unmarshalErrorResponse(body []byte) (commons.Response, error) {
 	return resp, nil
 }
 
-func logErrorf(ctx context.Context, logger log.Logger, format string, args ...any) {
+func logErrorf(ctx context.Context, logger obs.Logger, format string, args ...any) {
 	if logger == nil {
 		return
 	}
 
-	logger.Log(ctx, log.LevelError, fmt.Sprintf(format, args...))
+	logger.Log(ctx, obs.LevelError, fmt.Sprintf(format, args...))
 }
 
-func logInfof(ctx context.Context, logger log.Logger, format string, args ...any) {
+func logInfof(ctx context.Context, logger obs.Logger, format string, args ...any) {
 	if logger == nil {
 		return
 	}
 
-	logger.Log(ctx, log.LevelInfo, fmt.Sprintf(format, args...))
+	logger.Log(ctx, obs.LevelInfo, fmt.Sprintf(format, args...))
 }
 
-func initializeDefaultLogger() (log.Logger, error) {
+func initializeDefaultLogger() (obs.Logger, error) {
 	envName := strings.ToLower(strings.TrimSpace(os.Getenv("ENV_NAME")))
 
 	environment := zap.EnvironmentLocal
@@ -235,6 +239,29 @@ func initializeDefaultLogger() (log.Logger, error) {
 	return logger, nil
 }
 
+// resolveLogger returns the caller's logger, or a default one (falling back to
+// a no-op logger when the default cannot be built), so no constructor in this
+// package ever stores a nil Logger.
+//
+// A nil obs.Logger interface means "give me the default"; that is the whole
+// contract. The parameter used to be a *log.Logger, which made the same
+// statement with an extra indirection that could not hold a concrete pointer
+// implementation and had two distinct empty values.
+func resolveLogger(logger obs.Logger) obs.Logger {
+	if !obs.IsNil(logger) {
+		return logger
+	}
+
+	l, err := initializeDefaultLogger()
+	if err != nil {
+		stdlog.Printf("failed to initialize logger, using NopLogger: %v", err)
+
+		return obs.Nop()
+	}
+
+	return l
+}
+
 // WithKeySource wires a dynamic JWKS KeySource into the client's local token
 // verification, mirroring the M2M gate's dynamic path (serve-stale cache + forced
 // refresh-and-retry on a signature failure). It is additive and opt-in: the default
@@ -255,23 +282,20 @@ func (auth *AuthClient) WithKeySource(source KeySource) *AuthClient {
 // NewAuthClient creates a new instance of AuthClient.
 // It checks the health of the authorization service if the client is enabled and the address is provided.
 // If the service is healthy, it logs a successful connection message; otherwise, it logs the failure reason.
-func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient {
-	var l log.Logger
-
-	var err error
-
-	if logger != nil {
-		l = *logger
-	} else {
-		l, err = initializeDefaultLogger()
-		if err != nil {
-			stdlog.Printf("failed to initialize logger, using NopLogger: %v", err)
-
-			l = log.NewNop()
-		}
-	}
+func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient {
+	l := resolveLogger(logger)
 
 	verifyKeys, verifyIssuer := loadVerification(l)
+
+	// AUTH_M2M_PRODUCT_FORWARD_ENABLED is read with LookupEnv, not Getenv, so that
+	// "unset" and an explicit "false" are two distinguishable states. Both resolve
+	// to false here — the default is false — but only LookupEnv can express an
+	// explicit opt-OUT, which is what any non-false default would need as a kill
+	// switch. Any value other than the exact string "true" disables forwarding.
+	forwardM2MProduct := false
+	if v, ok := os.LookupEnv("AUTH_M2M_PRODUCT_FORWARD_ENABLED"); ok {
+		forwardM2MProduct = v == "true"
+	}
 
 	// Build the client once with all env-derived config, then return it from every
 	// path below; the health check only logs, it never changes these fields.
@@ -279,7 +303,7 @@ func NewAuthClient(address string, enabled bool, logger *log.Logger) *AuthClient
 		Address:             address,
 		Enabled:             enabled,
 		Logger:              l,
-		ForwardM2MProduct:   os.Getenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED") == "true",
+		ForwardM2MProduct:   forwardM2MProduct,
 		M2MInversionEnabled: os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true",
 		Required:            os.Getenv("AUTH_REQUIRED") == "true",
 		timeout:             parseAuthTimeout(),

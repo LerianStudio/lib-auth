@@ -6,13 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	"github.com/LerianStudio/lib-observability/v2/log"
+	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -56,14 +56,14 @@ func mockAuthServer(t *testing.T, authorized bool, statusCode int) *httptest.Ser
 	}))
 }
 
-// testLogger is a minimal log.Logger implementation for tests that discards all output.
+// testLogger is a minimal obs.Logger implementation for tests that discards all
+// output. It is declared with universal types only and imports nothing from
+// lib-observability, which is the property auth/obs exists to make possible.
 type testLogger struct{}
 
-func (l *testLogger) Log(_ context.Context, _ log.Level, _ string, _ ...log.Field) {}
-func (l *testLogger) With(_ ...log.Field) log.Logger                               { return l }
-func (l *testLogger) WithGroup(_ string) log.Logger                                { return l }
-func (l *testLogger) Enabled(_ log.Level) bool                                     { return false }
-func (l *testLogger) Sync(_ context.Context) error                                 { return nil }
+func (l *testLogger) Log(_ context.Context, _ int, _ string, _ ...any) {}
+func (l *testLogger) Enabled(_ int) bool                               { return false }
+func (l *testLogger) Sync(_ context.Context) error                     { return nil }
 
 // ---------------------------------------------------------------------------
 // checkAuthorization - subject construction
@@ -677,32 +677,66 @@ func TestCheckAuthorization_ServerReturnsInvalidJSON(t *testing.T) {
 // NewAuthClient - ForwardM2MProduct flag
 // ---------------------------------------------------------------------------
 
+// unsetEnvForTest makes key absent for the duration of the test and restores the
+// pre-test state — including "it was unset" — through t.Setenv's own cleanup.
+// Go 1.26 has no t.Unsetenv and t.Setenv cannot express absence, so the pairing is
+// deliberate: t.Setenv registers the restore, then os.Unsetenv removes the key so
+// os.LookupEnv reports ok=false. This is the only way to exercise the "unset"
+// branch of a LookupEnv-based default; an empty string does NOT reach it.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+
+	t.Setenv(key, "")
+
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("failed to unset %s: %v", key, err)
+	}
+}
+
 func TestNewAuthClient_ReadsForwardM2MProductFlag(t *testing.T) {
-	// Cannot use t.Parallel(): subtests use t.Setenv which modifies process env.
+	// Cannot use t.Parallel(): subtests mutate process env (t.Setenv/os.Unsetenv).
 	// enabled=false / empty address returns early without any network call, so the
 	// flag wiring is exercised in isolation.
-	logger := log.Logger(&testLogger{})
+	const (
+		envForward   = "AUTH_M2M_PRODUCT_FORWARD_ENABLED"
+		envInversion = "AUTH_M2M_INVERSION_ENABLED"
+	)
 
-	t.Run("flag_true_enables_forward", func(t *testing.T) {
-		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "true")
+	logger := &testLogger{}
 
-		client := NewAuthClient("", false, &logger)
-		assert.True(t, client.ForwardM2MProduct)
-	})
+	tests := []struct {
+		name        string
+		forward     string // meaningful only when forwardSet is true
+		forwardSet  bool   // false = the variable is absent from the environment
+		wantForward bool
+	}{
+		{name: "flag_absent_defaults_false", forwardSet: false, wantForward: false},
+		{name: "flag_true_enables_forward", forward: "true", forwardSet: true, wantForward: true},
+		{name: "flag_explicit_false_disables_forward", forward: "false", forwardSet: true, wantForward: false},
+		{name: "flag_empty_value_is_false", forward: "", forwardSet: true, wantForward: false},
+		{name: "flag_non_true_value_is_false", forward: "1", forwardSet: true, wantForward: false},
+	}
 
-	t.Run("flag_absent_defaults_false", func(t *testing.T) {
-		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "")
+	for _, tt := range tests {
+		tt := tt
 
-		client := NewAuthClient("", false, &logger)
-		assert.False(t, client.ForwardM2MProduct)
-	})
+		t.Run(tt.name, func(t *testing.T) {
+			// The forward flag is read independently of the inversion flag, so pin
+			// the inversion flag to absent: an ambient value in the developer's or
+			// CI's environment must never be able to move this result.
+			unsetEnvForTest(t, envInversion)
 
-	t.Run("flag_non_true_value_is_false", func(t *testing.T) {
-		t.Setenv("AUTH_M2M_PRODUCT_FORWARD_ENABLED", "1")
+			if tt.forwardSet {
+				t.Setenv(envForward, tt.forward)
+			} else {
+				unsetEnvForTest(t, envForward)
+			}
 
-		client := NewAuthClient("", false, &logger)
-		assert.False(t, client.ForwardM2MProduct)
-	})
+			client := NewAuthClient("", false, logger)
+
+			assert.Equal(t, tt.wantForward, client.ForwardM2MProduct, "ForwardM2MProduct")
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -713,26 +747,26 @@ func TestNewAuthClient_ReadsRequiredFlag(t *testing.T) {
 	// Cannot use t.Parallel(): subtests use t.Setenv which modifies process env.
 	// enabled=false / empty address returns early without any network call, so the
 	// flag wiring is exercised in isolation.
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
 	t.Run("flag_true_enables_required", func(t *testing.T) {
 		t.Setenv("AUTH_REQUIRED", "true")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.True(t, client.Required)
 	})
 
 	t.Run("flag_absent_defaults_false", func(t *testing.T) {
 		t.Setenv("AUTH_REQUIRED", "")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.False(t, client.Required)
 	})
 
 	t.Run("flag_non_true_value_is_false", func(t *testing.T) {
 		t.Setenv("AUTH_REQUIRED", "1")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.False(t, client.Required)
 	})
 }
@@ -1429,26 +1463,26 @@ func TestNewAuthClient_ReadsM2MInversionFlag(t *testing.T) {
 	// Cannot use t.Parallel(): subtests use t.Setenv which modifies process env.
 	// enabled=false / empty address returns early without any network call, so the
 	// flag wiring is exercised in isolation.
-	logger := log.Logger(&testLogger{})
+	logger := &testLogger{}
 
 	t.Run("flag_true_enables_inversion", func(t *testing.T) {
 		t.Setenv("AUTH_M2M_INVERSION_ENABLED", "true")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.True(t, client.M2MInversionEnabled)
 	})
 
 	t.Run("flag_absent_defaults_false", func(t *testing.T) {
 		t.Setenv("AUTH_M2M_INVERSION_ENABLED", "")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.False(t, client.M2MInversionEnabled)
 	})
 
 	t.Run("flag_non_true_value_is_false", func(t *testing.T) {
 		t.Setenv("AUTH_M2M_INVERSION_ENABLED", "1")
 
-		client := NewAuthClient("", false, &logger)
+		client := NewAuthClient("", false, logger)
 		assert.False(t, client.M2MInversionEnabled)
 	})
 }

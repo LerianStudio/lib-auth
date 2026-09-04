@@ -5,17 +5,16 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
-	stdlog "log"
 	"net/http"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	"github.com/LerianStudio/lib-observability/v2/log"
-	"github.com/LerianStudio/lib-observability/v2/tracing"
+	"github.com/LerianStudio/lib-auth/v4/auth/obs"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/LerianStudio/lib-commons/v6/commons"
-	libHTTP "github.com/LerianStudio/lib-commons/v6/commons/net/http"
+	"github.com/LerianStudio/lib-commons/v7/commons"
+	libHTTP "github.com/LerianStudio/lib-commons/v7/commons/net/http"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 )
@@ -58,7 +57,7 @@ type M2MAuthenticator struct {
 	// single-issuer deployment).
 	expectedIssuer string
 	enabled        bool
-	logger         log.Logger
+	logger         obs.Logger
 }
 
 // NewM2MAuthenticator builds an M2MAuthenticator from the issuer's certificate
@@ -76,8 +75,8 @@ type M2MAuthenticator struct {
 // against reuse of a token minted by a different issuer that shares the same
 // signing key). Pass "" to skip the issuer check; this is only safe in a
 // single-issuer deployment and setting it is recommended otherwise.
-func NewM2MAuthenticator(certificatePEM, expectedIssuer string, enabled bool, logger *log.Logger) (*M2MAuthenticator, error) {
-	l := resolveM2MLogger(logger)
+func NewM2MAuthenticator(certificatePEM, expectedIssuer string, enabled bool, logger obs.Logger) (*M2MAuthenticator, error) {
+	l := resolveLogger(logger)
 
 	if !enabled {
 		return &M2MAuthenticator{publicKey: nil, expectedIssuer: expectedIssuer, enabled: false, logger: l}, nil
@@ -106,8 +105,8 @@ func NewM2MAuthenticator(certificatePEM, expectedIssuer string, enabled bool, lo
 //
 // expectedIssuer pins the token "iss" claim when non-empty (defense in depth), the
 // same as the static constructor.
-func NewM2MAuthenticatorWithKeySource(source KeySource, expectedIssuer string, enabled bool, logger *log.Logger) (*M2MAuthenticator, error) {
-	l := resolveM2MLogger(logger)
+func NewM2MAuthenticatorWithKeySource(source KeySource, expectedIssuer string, enabled bool, logger obs.Logger) (*M2MAuthenticator, error) {
+	l := resolveLogger(logger)
 
 	if !enabled {
 		return &M2MAuthenticator{source: source, expectedIssuer: expectedIssuer, enabled: false, logger: l}, nil
@@ -118,24 +117,6 @@ func NewM2MAuthenticatorWithKeySource(source KeySource, expectedIssuer string, e
 	}
 
 	return &M2MAuthenticator{source: source, expectedIssuer: expectedIssuer, enabled: true, logger: l}, nil
-}
-
-// resolveM2MLogger returns the caller's logger, or a default (falling back to a
-// NopLogger if the default cannot be built) so the authenticator never holds a nil
-// logger. Shared by both constructors.
-func resolveM2MLogger(logger *log.Logger) log.Logger {
-	if logger != nil {
-		return *logger
-	}
-
-	l, err := initializeDefaultLogger()
-	if err != nil {
-		stdlog.Printf("failed to initialize logger, using NopLogger: %v", err)
-
-		return log.NewNop()
-	}
-
-	return l
 }
 
 // RequireM2M is a Fiber middleware that rejects any request not carrying a
@@ -281,7 +262,7 @@ func (m *M2MAuthenticator) verifySignature(ctx context.Context, span trace.Span,
 // never refresh (they are not key staleness). It emits jwks_unknown_kid_total (a
 // metric-only kid-presence probe) and jwks_verify_fail_total (on a genuine verify
 // failure), and never logs the token.
-func verifyTokenWithSource(ctx context.Context, span trace.Span, source KeySource, expectedIssuer, accessToken string, logger log.Logger) (jwt.MapClaims, int, error) {
+func verifyTokenWithSource(ctx context.Context, span trace.Span, source KeySource, expectedIssuer, accessToken string, logger obs.Logger) (jwt.MapClaims, int, error) {
 	keys := source.Keys(ctx)
 
 	// Metric-only: flag a token whose kid is absent from the cached JWKS. This does

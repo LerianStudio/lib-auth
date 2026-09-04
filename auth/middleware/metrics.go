@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	"github.com/LerianStudio/lib-observability/v2/log"
-	"github.com/LerianStudio/lib-observability/v2/metrics"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	"github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/LerianStudio/lib-observability/v4/metrics"
 )
 
 // JWKS key-source metric definitions (card 1.1.8). Names/units follow the
-// lib-observability/v2 metrics.Metric convention (mirroring metrics.MetricAccountsCreated
+// lib-observability metrics.Metric convention (mirroring metrics.MetricAccountsCreated
 // et al.): a unit of "1" for dimensionless counters and "s" for the age gauge.
 var (
 	// metricJWKSRefreshTotal counts upstream JWKS fetch outcomes, labelled result=ok|fail.

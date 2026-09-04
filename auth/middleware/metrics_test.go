@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	"github.com/LerianStudio/lib-observability/v2/log"
-	obsmetrics "github.com/LerianStudio/lib-observability/v2/metrics"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	"github.com/LerianStudio/lib-observability/v4/log"
+	obsmetrics "github.com/LerianStudio/lib-observability/v4/metrics"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

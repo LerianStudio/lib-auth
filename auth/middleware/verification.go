@@ -10,8 +10,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/LerianStudio/lib-observability/v2/log"
-	"github.com/LerianStudio/lib-observability/v2/tracing"
+	"github.com/LerianStudio/lib-auth/v4/auth/obs"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -134,7 +134,7 @@ func (auth *AuthClient) extractClaims(ctx context.Context, span trace.Span, acce
 // A configured-but-unparseable cert is logged loud at ERROR and verification is
 // left disabled (the authz round-trip stays the trust anchor); it never silently
 // accepts a bad cert and never panics, keeping NewAuthClient's no-error signature.
-func loadVerification(logger log.Logger) (keys []*rsa.PublicKey, issuer string) {
+func loadVerification(logger obs.Logger) (keys []*rsa.PublicKey, issuer string) {
 	issuer = strings.TrimSpace(os.Getenv("AUTH_JWT_ISSUER"))
 
 	pemData, err := loadVerifyCertPEM()
