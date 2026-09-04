@@ -17,6 +17,7 @@
 
 ### Bug Fixes
 
+* **declaration:** classify 501 as deterministic with a multi-tenant-aware log ([7ee363c](https://github.com/LerianStudio/lib-auth/commit/7ee363c9472a1207314128d36b6626253878876c)), closes [plugin-access-manager#410](https://github.com/LerianStudio/plugin-access-manager/issues/410)
 * **declaration:** classify 501 as deterministic with a multi-tenant-aware log ([8bdc3d2](https://github.com/LerianStudio/lib-auth/commit/8bdc3d28c0dd9e1e6e99f89be19a33c2cc2b7127)), closes [plugin-access-manager#410](https://github.com/LerianStudio/plugin-access-manager/issues/410)
 * **auth:** treat a typed-nil logger as unset ([e4ed2df](https://github.com/LerianStudio/lib-auth/commit/e4ed2df751a344efac302212ea9470b703f0158a))
 
@@ -105,6 +106,13 @@
 ### Code Refactoring
 
 * **auth:** take a logger interface, not a lib-observability type ([9ae1a14](https://github.com/LerianStudio/lib-auth/commit/9ae1a14192cc807a8a9a2b498a5cdd1afa67a54d))
+
+## [3.6.0](https://github.com/LerianStudio/lib-auth/compare/v3.5.0...v3.6.0) (2026-09-03)
+
+
+### Bug Fixes
+
+* **declaration:** classify 501 as deterministic with a multi-tenant-aware log ([7ee363c](https://github.com/LerianStudio/lib-auth/commit/7ee363c9472a1207314128d36b6626253878876c)), closes [plugin-access-manager#410](https://github.com/LerianStudio/plugin-access-manager/issues/410)
 
 ## [3.5.0](https://github.com/LerianStudio/lib-auth/compare/v3.4.0...v3.5.0) (2026-08-27)
 
