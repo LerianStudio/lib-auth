@@ -1,4 +1,3 @@
-## [3.6.0](https://github.com/LerianStudio/lib-auth/compare/v3.5.0...v3.6.0) (2026-09-03)
 ## [4.0.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v4.0.0-beta.2...v4.0.0-beta.3) (2026-09-04)
 
 ## [4.0.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v4.0.0-beta.1...v4.0.0-beta.2) (2026-09-04)
@@ -107,6 +106,13 @@
 ### Code Refactoring
 
 * **auth:** take a logger interface, not a lib-observability type ([9ae1a14](https://github.com/LerianStudio/lib-auth/commit/9ae1a14192cc807a8a9a2b498a5cdd1afa67a54d))
+
+## [3.6.0](https://github.com/LerianStudio/lib-auth/compare/v3.5.0...v3.6.0) (2026-09-03)
+
+
+### Bug Fixes
+
+* **declaration:** classify 501 as deterministic with a multi-tenant-aware log ([7ee363c](https://github.com/LerianStudio/lib-auth/commit/7ee363c9472a1207314128d36b6626253878876c)), closes [plugin-access-manager#410](https://github.com/LerianStudio/plugin-access-manager/issues/410)
 
 ## [3.5.0](https://github.com/LerianStudio/lib-auth/compare/v3.4.0...v3.5.0) (2026-08-27)
 
