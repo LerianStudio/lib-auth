@@ -3,12 +3,13 @@ module github.com/LerianStudio/lib-auth/v4
 go 1.26.3
 
 require (
+	github.com/LerianStudio/lib-commons/v7 v7.0.0-beta.1
 	github.com/MicahParks/jwkset v0.11.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
-	google.golang.org/grpc v1.83.1
+	google.golang.org/grpc v1.83.2
 )
 
 require (
@@ -24,8 +25,7 @@ require (
 )
 
 require (
-	github.com/LerianStudio/lib-commons/v6 v6.9.0-beta.3
-	github.com/LerianStudio/lib-observability/v4 v4.0.0-beta.1
+	github.com/LerianStudio/lib-observability/v4 v4.0.1
 	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/bxcodec/dbresolver/v2 v2.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3
@@ -81,7 +81,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	golang.org/x/crypto v0.56.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect

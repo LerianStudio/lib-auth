@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/LerianStudio/lib-commons/v6/commons"
+	"github.com/LerianStudio/lib-commons/v7/commons"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	jwt "github.com/golang-jwt/jwt/v5"
