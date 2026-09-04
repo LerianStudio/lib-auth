@@ -46,6 +46,12 @@ type AuthClient struct {
 	// kill switch, keeping inversion on while forwarding stays off, and only the
 	// exact string "true" enables it.
 	//
+	// ABSENCE, not emptiness, is what follows M2MInversionEnabled. Because the
+	// read is LookupEnv, AUTH_M2M_PRODUCT_FORWARD_ENABLED="" is SET, so an empty
+	// value is an explicit "false" that overrides the derived default exactly like
+	// "false" does — it does NOT mean "unset". Only a variable missing from the
+	// environment follows the inversion toggle.
+	//
 	// Forwarding is additionally gated by M2MInversionEnabled in
 	// checkAuthorization, so this field alone never forwards anything: the
 	// (ForwardM2MProduct, M2MInversionEnabled) = (true, false) combination is a
@@ -70,7 +76,8 @@ type AuthClient struct {
 	//
 	// It also supplies the DEFAULT for ForwardM2MProduct, so enabling the inversion
 	// model enables M2M product forwarding with it unless
-	// AUTH_M2M_PRODUCT_FORWARD_ENABLED explicitly says otherwise.
+	// AUTH_M2M_PRODUCT_FORWARD_ENABLED explicitly says otherwise — that is, unless
+	// it is present with any value but "true", an empty value included.
 	M2MInversionEnabled bool
 
 	// Required, when true, makes the middleware fail closed: if auth is disabled
@@ -307,7 +314,9 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 	// directions, which is why it is read with LookupEnv and not Getenv: an
 	// explicit "false" is the kill switch (inversion stays on, forwarding stays
 	// off) and can only exist if "unset" and "false" are distinguishable. Any value
-	// other than the exact string "true" disables forwarding.
+	// other than the exact string "true" disables forwarding — an EMPTY value
+	// included: it is present, so LookupEnv reports ok and it overrides the derived
+	// default instead of following it. Only true absence follows inversion.
 	inversion := os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true"
 
 	forwardM2MProduct := inversion

@@ -89,10 +89,17 @@ PLUGIN_AUTH_ENABLED=true
 # DEFAULTS TO AUTH_M2M_INVERSION_ENABLED (below), so a deployment needs only that
 # one variable to get M2M product forwarding. Leave this unset unless you want to
 # override the pairing; setting it to "false" is the kill switch, keeping the
-# inversion model on while forwarding stays off. Only the exact string "true"
-# enables it, and forwarding never happens while AUTH_M2M_INVERSION_ENABLED is
-# off, whatever this is set to.
-AUTH_M2M_PRODUCT_FORWARD_ENABLED=
+# inversion model on while forwarding stays off. When it IS set, only the exact
+# string "true" enables forwarding, and every other value is an explicit "false"
+# — an EMPTY value included, because an empty variable is still a set variable,
+# so assigning it with nothing after the "=" silently overrides the pairing
+# instead of following it. Absence is the only state that follows the inversion
+# toggle, which is why the line below is left commented out rather than assigned.
+# And forwarding never happens while AUTH_M2M_INVERSION_ENABLED is off, whatever
+# this is set to.
+#
+# Uncomment only to opt out:
+# AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
 
 # Optional. When "true", enables the M2M/authz "inversion of responsibility"
 # model: application tokens authorize under their own real sub claim and any token
@@ -102,7 +109,10 @@ AUTH_M2M_PRODUCT_FORWARD_ENABLED=
 # Keep it false when your Casdoor seed still uses the legacy model; opt in once
 # seeds are migrated. Note that it also supplies the default for
 # AUTH_M2M_PRODUCT_FORWARD_ENABLED above, so turning it on turns on M2M product
-# forwarding too unless that variable explicitly says otherwise.
+# forwarding too unless that variable explicitly says otherwise — that is, unless
+# it is set to anything but "true", an empty value included. This flag itself has
+# no unset-versus-empty distinction: unset, empty and "false" are all false, so
+# assigning it here is safe.
 AUTH_M2M_INVERSION_ENABLED=false
 
 # Optional. Opt-in local JWT signature verification for the general authorization
