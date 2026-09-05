@@ -67,12 +67,22 @@ const forwardedHeader = fiber.HeaderXForwardedFor
 // construction, naming both the cause and the consequence, so an operator learns
 // it from the boot log rather than from a surprise verdict in production. It is
 // not logged per request: the value is read once here and cached on the client.
-func loadTrustedProxies(logger obs.Logger) []netip.Prefix {
+//
+// That line is emitted here at INFO, and RETURNED so it can be raised again at
+// ERROR by the one thing in this library that consumes the list. The severity is
+// not knowable at this point: NewAuthClient is also the constructor for a client
+// that only mints tokens (GetApplicationToken), for a gRPC-only client, and for a
+// service that hand-rolls its own authorize call — none of which ever resolve a
+// caller IP, so none of which can experience the degradation the line describes.
+// Paging all of them on every restart for a feature they never mount is what the
+// split fixes; see AuthClient.warnMissingTrustedProxies for where ERROR belongs.
+// The wording is identical at both levels so one grep finds either.
+func loadTrustedProxies(logger obs.Logger) ([]netip.Prefix, string) {
 	raw := os.Getenv(trustedProxiesEnv)
 
 	prefixes := parseTrustedProxies(raw, logger)
 	if len(prefixes) > 0 {
-		return prefixes
+		return prefixes, ""
 	}
 
 	// Same consequence either way; the cause differs, and the cause is what
@@ -82,10 +92,11 @@ func loadTrustedProxies(logger obs.Logger) []netip.Prefix {
 		cause = trustedProxiesEnv + " has no usable CIDR (every entry was dropped, see the errors above)"
 	}
 
-	logErrorf(context.Background(), logger,
-		"%s; client IP will not be forwarded and the per-tenant IP allowlist has nothing to match the caller against", cause)
+	degraded := cause + "; client IP will not be forwarded and the per-tenant IP allowlist has nothing to match the caller against"
 
-	return nil
+	logInfof(context.Background(), logger, "%s", degraded)
+
+	return nil, degraded
 }
 
 // parseTrustedProxies parses a comma-separated CIDR list into prefixes. It is

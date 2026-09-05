@@ -627,7 +627,9 @@ func TestExampleIPv4Entry_IsAccepted(t *testing.T) {
 func TestLoadTrustedProxies_UnsetYieldsNoTrust(t *testing.T) {
 	t.Setenv("TRUSTED_PROXIES", "")
 
-	assert.Empty(t, loadTrustedProxies(&testLogger{}),
+	prefixes, _ := loadTrustedProxies(&testLogger{})
+
+	assert.Empty(t, prefixes,
 		"TRUSTED_PROXIES unset must yield no trusted proxies (client IP empty, nothing forwarded), never a socket-peer fallback")
 }
 
@@ -637,8 +639,9 @@ func TestLoadTrustedProxies_UnsetYieldsNoTrust(t *testing.T) {
 func TestLoadTrustedProxies_ReadsEnv(t *testing.T) {
 	t.Setenv("TRUSTED_PROXIES", "10.0.0.0/8, 192.168.0.0/16")
 
-	assert.Equal(t, []string{"10.0.0.0/8", "192.168.0.0/16"},
-		prefixStrings(loadTrustedProxies(&testLogger{})))
+	prefixes, _ := loadTrustedProxies(&testLogger{})
+
+	assert.Equal(t, []string{"10.0.0.0/8", "192.168.0.0/16"}, prefixStrings(prefixes))
 }
 
 // recordingLogger captures emitted messages so a test can assert on what an
@@ -684,31 +687,42 @@ func (l *recordingLogger) degradedLines() []string {
 // boot), but the operator gets EXACTLY ONE log line naming both the cause and
 // the consequence. Silence here is the failure mode: IP policy stops enforcing
 // and the only other signal is a 403 in production.
+//
+// The line is emitted at INFO here and RETURNED, so the client can raise the
+// same wording at ERROR if and when the Fiber middleware that consumes the
+// trusted-proxy list is actually mounted — see
+// TestTrustedProxiesDegradation_LevelFollowsUse for that half of the contract.
 func TestLoadTrustedProxies_DegradationIsObservable(t *testing.T) {
 	t.Run("unset_logs_cause_and_consequence_once", func(t *testing.T) {
 		t.Setenv("TRUSTED_PROXIES", "")
 
 		logger := &recordingLogger{}
-		require.Empty(t, loadTrustedProxies(logger))
+		prefixes, degraded := loadTrustedProxies(logger)
+		require.Empty(t, prefixes)
 
 		lines := logger.degradedLines()
 		require.Len(t, lines, 1, "the degradation must be announced exactly once, at construction")
 		assert.Contains(t, lines[0], "TRUSTED_PROXIES is not set", "the line must name the cause")
 		assert.Contains(t, lines[0], "client IP will not be forwarded", "the line must name the consequence")
-		assert.Equal(t, obs.LevelError, logger.levels[len(logger.levels)-1],
-			"a silently-disabled security control is logged at the level this library already uses for degraded config")
+		assert.Equal(t, obs.LevelInfo, logger.levels[len(logger.levels)-1],
+			"at construction nothing yet depends on the caller address, so this is a disclosure, not a page")
+		assert.Equal(t, lines[0], degraded,
+			"the returned line must be the wording that was logged, so the ERROR raised later is the same text")
 	})
 
 	t.Run("all_entries_unusable_logs_a_distinct_cause_once", func(t *testing.T) {
 		t.Setenv("TRUSTED_PROXIES", "not-an-ip,10.0.0.1")
 
 		logger := &recordingLogger{}
-		require.Empty(t, loadTrustedProxies(logger))
+		prefixes, _ := loadTrustedProxies(logger)
+		require.Empty(t, prefixes)
 
 		lines := logger.degradedLines()
 		require.Len(t, lines, 1, "the degradation must be announced exactly once, however many entries were dropped")
 		assert.Contains(t, lines[0], "no usable CIDR",
 			"a value that was set but unusable must be distinguishable from one that was never set")
+		assert.Contains(t, logger.levels, obs.LevelError,
+			"each unusable entry is a live misconfiguration and still pages on its own")
 	})
 
 	t.Run("v4_mapped_entry_that_cannot_be_trusted_is_announced_not_stored", func(t *testing.T) {
@@ -719,7 +733,8 @@ func TestLoadTrustedProxies_DegradationIsObservable(t *testing.T) {
 		t.Setenv("TRUSTED_PROXIES", "::ffff:10.0.0.0/100,::ffff:10.0.0.0/95")
 
 		logger := &recordingLogger{}
-		require.Empty(t, loadTrustedProxies(logger),
+		prefixes, _ := loadTrustedProxies(logger)
+		require.Empty(t, prefixes,
 			"neither entry can be trusted as written, so nothing may be stored")
 
 		lines := logger.degradedLines()
@@ -731,9 +746,11 @@ func TestLoadTrustedProxies_DegradationIsObservable(t *testing.T) {
 		t.Setenv("TRUSTED_PROXIES", "10.0.0.0/8")
 
 		logger := &recordingLogger{}
-		require.Len(t, loadTrustedProxies(logger), 1)
+		prefixes, degraded := loadTrustedProxies(logger)
+		require.Len(t, prefixes, 1)
 
 		assert.Empty(t, logger.degradedLines(), "a working configuration must not warn")
+		assert.Empty(t, degraded, "a working configuration leaves nothing for the middleware to raise")
 	})
 }
 
@@ -1291,4 +1308,150 @@ func TestAuthorize_ClientIP_EmptyForwardedPositionStopsTheWalk(t *testing.T) {
 		"an empty position is an unreadable hop: it stops the walk instead of being closed over")
 	assert.NotEqual(t, "203.0.113.7", body["clientIp"],
 		"skipping the empty position would splice the chain and credit the caller's own text")
+}
+
+// degradedLevels returns the level of each degradation line, in emission order.
+// The level is the half of that line an operator's alerting reacts to, so a test
+// that asserts the wording without the level pins only half the contract.
+func (l *recordingLogger) degradedLevels() []int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var found []int
+
+	for i, msg := range l.messages {
+		if strings.Contains(msg, "IP allowlist has nothing to match") {
+			found = append(found, l.levels[i])
+		}
+	}
+
+	return found
+}
+
+// healthyAuthServer answers the /health probe NewAuthClient runs at construction
+// with the exact body it accepts, so a test can build a client that genuinely
+// canAuthorize() without the connection ERROR muddying the log it inspects.
+func healthyAuthServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("healthy"))
+	}))
+	t.Cleanup(server.Close)
+
+	return server
+}
+
+// TestTrustedProxiesDegradation_LevelFollowsUse pins WHEN a missing
+// trusted-proxy list is an ERROR and when it is only a disclosure.
+//
+// The severity is not knowable at construction. This library consumes the
+// trusted-proxy list in exactly one place — resolveClientIP, reached only from
+// the Fiber Authorize middleware — so a client built to mint tokens
+// (GetApplicationToken), a gRPC-only client, and a service that hand-rolls its
+// own authorize call all resolve no caller IP ever and cannot experience the
+// degradation the line describes. Paging them on every restart for a feature
+// they never mount dilutes the ERROR budget of the service that adopts this
+// library (br-sfn's br-desk builds three such clients and got three).
+//
+// So: INFO at construction, with the same wording, so the boot log still carries
+// it; ERROR exactly once when Authorize is mounted on a client that can actually
+// reach the authorization service, because from that point every authorized
+// request omits clientIp and a tenant with an active allowlist denies an
+// addressless caller.
+func TestTrustedProxiesDegradation_LevelFollowsUse(t *testing.T) {
+	tests := []struct {
+		name           string
+		trustedProxies string
+		authEnabled    bool
+		mountAuthorize int
+		wantLevels     []int
+		wantCause      string
+	}{
+		{
+			// br-desk's three clients: constructed, never mounted as middleware.
+			name:           "unset_and_no_ip_dependent_feature_is_disclosed_not_paged",
+			trustedProxies: "",
+			authEnabled:    true,
+			mountAuthorize: 0,
+			wantLevels:     []int{obs.LevelInfo},
+			wantCause:      "TRUSTED_PROXIES is not set",
+		},
+		{
+			name:           "unset_and_authorize_mounted_is_an_error",
+			trustedProxies: "",
+			authEnabled:    true,
+			mountAuthorize: 1,
+			wantLevels:     []int{obs.LevelInfo, obs.LevelError},
+			wantCause:      "TRUSTED_PROXIES is not set",
+		},
+		{
+			// Every route mounts the middleware; the operator gets one line, not one
+			// per route.
+			name:           "unset_and_authorize_mounted_many_times_errors_once",
+			trustedProxies: "",
+			authEnabled:    true,
+			mountAuthorize: 5,
+			wantLevels:     []int{obs.LevelInfo, obs.LevelError},
+			wantCause:      "TRUSTED_PROXIES is not set",
+		},
+		{
+			// Auth disabled: the middleware passes every request through without an
+			// authorize call, so no clientIp is ever omitted from anything.
+			name:           "unset_and_authorize_mounted_on_a_disabled_client_is_not_an_error",
+			trustedProxies: "",
+			authEnabled:    false,
+			mountAuthorize: 1,
+			wantLevels:     []int{obs.LevelInfo},
+			wantCause:      "TRUSTED_PROXIES is not set",
+		},
+		{
+			// Set but unusable: each rejected entry already ERRORs on its own from
+			// parseTrustedProxies. The aggregate line follows the same rule as the
+			// unset one, and keeps its distinct cause so the operator knows to fix
+			// the value rather than add the variable.
+			name:           "set_but_unusable_and_authorize_mounted_is_an_error",
+			trustedProxies: "not-an-ip,10.0.0.1",
+			authEnabled:    true,
+			mountAuthorize: 1,
+			wantLevels:     []int{obs.LevelInfo, obs.LevelError},
+			wantCause:      "no usable CIDR",
+		},
+		{
+			name:           "configured_is_silent_even_with_authorize_mounted",
+			trustedProxies: "10.0.0.0/8",
+			authEnabled:    true,
+			mountAuthorize: 1,
+			wantLevels:     nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TRUSTED_PROXIES", tt.trustedProxies)
+
+			logger := &recordingLogger{}
+			client := NewAuthClient(healthyAuthServer(t).URL, tt.authEnabled, logger)
+
+			for range tt.mountAuthorize {
+				require.NotNil(t, client.Authorize("midaz", "account", "get"))
+			}
+
+			assert.Equal(t, tt.wantLevels, logger.degradedLevels(),
+				"the degradation line must be emitted at these levels, in this order")
+
+			lines := logger.degradedLines()
+			if tt.wantCause == "" {
+				assert.Empty(t, lines, "a working configuration must not announce a degradation")
+
+				return
+			}
+
+			for _, line := range lines {
+				assert.Contains(t, line, tt.wantCause, "every line must name the cause")
+				assert.Contains(t, line, "client IP will not be forwarded",
+					"every line must name the consequence, at whichever level it is emitted")
+			}
+		})
+	}
 }
