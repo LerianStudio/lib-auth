@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LerianStudio/lib-auth/v4/auth/obs"
@@ -123,6 +124,15 @@ type AuthClient struct {
 	// trustedProxies is the CIDR allowlist of proxies whose forwarded hop may be
 	// believed. Read once from TRUSTED_PROXIES at construction.
 	trustedProxies []netip.Prefix
+
+	// noProxiesLine is the degradation line loadTrustedProxies composed when the
+	// list came out empty, already disclosed at INFO during construction. It is
+	// held so Authorize can raise the SAME wording at ERROR the moment the caller
+	// address starts to matter. Empty when the list is usable.
+	noProxiesLine string
+	// noProxiesOnce keeps that ERROR to one line per client however many routes
+	// mount the middleware.
+	noProxiesOnce sync.Once
 }
 
 type AuthResponse struct {
@@ -297,6 +307,8 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 		forwardM2MProduct = v == "true"
 	}
 
+	trustedProxies, noProxiesLine := loadTrustedProxies(l)
+
 	// Build the client once with all env-derived config, then return it from every
 	// path below; the health check only logs, it never changes these fields.
 	c := &AuthClient{
@@ -312,7 +324,8 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 		retryMax:            parseRetryMax(),
 		verifyKeys:          verifyKeys,
 		verifyIssuer:        verifyIssuer,
-		trustedProxies:      loadTrustedProxies(l),
+		trustedProxies:      trustedProxies,
+		noProxiesLine:       noProxiesLine,
 	}
 
 	if !enabled || address == "" {
@@ -375,11 +388,43 @@ func (auth *AuthClient) mustRefuse() bool {
 	return auth != nil && auth.Required && !auth.canAuthorize()
 }
 
+// warnMissingTrustedProxies raises the missing-trusted-proxies degradation at
+// ERROR, at most once per client, at the moment it starts to matter: when the
+// Fiber authorization middleware — the ONLY consumer of the trusted-proxy list
+// in this library (resolveClientIP) — is mounted on a client that can actually
+// reach the authorization service.
+//
+// Mounting it IS the configuration that makes the caller address load-bearing.
+// From here on every authorized request omits clientIp, and as of 2026-08-23 a
+// tenant with an active allowlist DENIES an addressless caller unless the
+// authorization service recognises it as one of the platform's own. That is a
+// silently-disabled security control on a live path, and it pages.
+//
+// A client that never gets here cannot experience it: one built only to mint
+// tokens, a gRPC-only client (the gRPC interceptors forward no client IP), a
+// service that hand-rolls its own authorize call, or one whose auth is disabled
+// or addressless so no authorize call is made at all. Those keep the INFO
+// disclosure loadTrustedProxies already wrote to the boot log, in the same
+// wording, and are not paged for a feature they do not use.
+//
+// A nil receiver is safe: canAuthorize reports false for it.
+func (auth *AuthClient) warnMissingTrustedProxies() {
+	if !auth.canAuthorize() || auth.noProxiesLine == "" {
+		return
+	}
+
+	auth.noProxiesOnce.Do(func() {
+		logErrorf(context.Background(), auth.Logger, "%s", auth.noProxiesLine)
+	})
+}
+
 // Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
 // product identifies the product/application owning the route (e.g. "midaz"); it is forwarded for normal-user flows, and for M2M (application)
 // flows when AUTH_M2M_PRODUCT_FORWARD_ENABLED is set, so the auth service can isolate permissions by product. M2M tokens are identified by their own subject claim.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
 func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
+	auth.warnMissingTrustedProxies()
+
 	return func(c fiber.Ctx) error {
 		// Inherit the ambient request context instead of extracting inbound trace
 		// context here. Whether a caller-supplied traceparent is honored is the
