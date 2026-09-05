@@ -1,3 +1,10 @@
+## [4.1.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v4.0.0...v4.1.0-beta.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **middleware:** log missing trusted proxies at error only when required ([041a6c3](https://github.com/LerianStudio/lib-auth/commit/041a6c3eece6f07eef469c49771c9d7ac52eebc2))
+
 ## [4.0.0](https://github.com/LerianStudio/lib-auth/compare/v3.6.0...v4.0.0) (2026-09-04)
 
 
