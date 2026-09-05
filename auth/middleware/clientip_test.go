@@ -1364,6 +1364,7 @@ func TestTrustedProxiesDegradation_LevelFollowsUse(t *testing.T) {
 		name           string
 		trustedProxies string
 		authEnabled    bool
+		addressless    bool
 		mountAuthorize int
 		wantLevels     []int
 		wantCause      string
@@ -1406,6 +1407,18 @@ func TestTrustedProxiesDegradation_LevelFollowsUse(t *testing.T) {
 			wantCause:      "TRUSTED_PROXIES is not set",
 		},
 		{
+			// The other half of the canAuthorize gate. Enabled, but with no address
+			// there is nowhere to send an authorize call, so no clientIp is ever
+			// omitted from anything either.
+			name:           "unset_and_authorize_mounted_on_an_addressless_client_is_not_an_error",
+			trustedProxies: "",
+			authEnabled:    true,
+			addressless:    true,
+			mountAuthorize: 1,
+			wantLevels:     []int{obs.LevelInfo},
+			wantCause:      "TRUSTED_PROXIES is not set",
+		},
+		{
 			// Set but unusable: each rejected entry already ERRORs on its own from
 			// parseTrustedProxies. The aggregate line follows the same rule as the
 			// unset one, and keeps its distinct cause so the operator knows to fix
@@ -1430,8 +1443,13 @@ func TestTrustedProxiesDegradation_LevelFollowsUse(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("TRUSTED_PROXIES", tt.trustedProxies)
 
+			address := ""
+			if !tt.addressless {
+				address = healthyAuthServer(t).URL
+			}
+
 			logger := &recordingLogger{}
-			client := NewAuthClient(healthyAuthServer(t).URL, tt.authEnabled, logger)
+			client := NewAuthClient(address, tt.authEnabled, logger)
 
 			for range tt.mountAuthorize {
 				require.NotNil(t, client.Authorize("midaz", "account", "get"))
