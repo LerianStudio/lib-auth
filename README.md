@@ -157,8 +157,13 @@ AUTH_RETRY_MAX=0
 # it cannot be rebased it is rejected, never stored in a form that would match
 # nothing. An unusable entry is logged at ERROR and dropped; the valid entries
 # still apply. Nothing here ever fails the boot: a missing or entirely unusable
-# value logs ONE ERROR line at startup naming cause and consequence, and the
-# service starts with no address to forward.
+# value leaves the service starting with no address to forward, and announces
+# that in ONE wording at two levels. At construction it is an INFO disclosure,
+# in every NewAuthClient. It becomes an ERROR — once per client — only when
+# Authorize is mounted on a client configured to call the authorization service
+# (auth enabled and an address set), because that is the only path in this
+# library that resolves a caller IP. A token-only or gRPC-only client never
+# reaches it and is not paged for a feature it does not use.
 #
 # LEAVING IT UNSET CAN LOCK YOUR CALLERS OUT. With no trusted proxies the derived
 # caller IP is empty and clientIp is omitted from the authorize call. What the
@@ -279,8 +284,8 @@ On the Fiber path, `Authorize` sends `clientIp` to `POST /v1/authorize`, enablin
 
   | when | level |
   | --- | --- |
-  | at construction, in every `NewAuthClient` | **INFO** — a disclosure, so the line is in the boot log either way |
-  | the first time `Authorize` is mounted on a client that can reach the authorization service | **ERROR**, once per client |
+  | at construction, in every `NewAuthClient` | **INFO** — a disclosure, visible when the consuming service logs at INFO or DEBUG |
+  | the first time `Authorize` is mounted on a client configured to call the authorization service (auth enabled and an address set) | **ERROR**, once per client |
 
   **Alert on the ERROR.** Mounting `Authorize` is what makes the caller address load-bearing: from that point every authorized request omits `clientIp` and the conditional outcome above starts applying. A client that never mounts it — one built only to mint tokens with `GetApplicationToken`, a gRPC-only client, a service that hand-rolls its own authorize call, or one whose auth is disabled or addressless — cannot experience that outcome, so it gets the INFO and is not paged for a feature it does not use.
 
