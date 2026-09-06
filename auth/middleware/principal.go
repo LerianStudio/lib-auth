@@ -94,3 +94,36 @@ func publishPrincipal(c fiber.Ctx, span trace.Span, p Principal) {
 		attribute.String("app.auth.principal.subject", p.Subject),
 	)
 }
+
+// RequireHuman rejects any request whose published Principal.Type is not
+// "normal-user" with 403; a missing Principal is 401. Mount AFTER Authorize.
+func RequireHuman() fiber.Handler {
+	return requirePrincipalType(normalUser)
+}
+
+// RequireApplication rejects any request whose published Principal.Type is not
+// "application" with 403; a missing Principal is 401. Mount AFTER Authorize.
+// Unlike RequireM2M it performs no signature verification: the Access Manager
+// round-trip behind Authorize is the trust anchor, as it is for every other route.
+func RequireApplication() fiber.Handler {
+	return requirePrincipalType(application)
+}
+
+// requirePrincipalType is the shared body of the two type guards. The split
+// between 401 and 403 is deliberate and load-bearing for the consuming rails:
+// 401 says no principal was identified at all (Authorize is missing, or ran
+// without deriving one), 403 says a known caller is of the wrong kind.
+func requirePrincipalType(want string) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		p, ok := PrincipalFromContext(c.Context())
+		if !ok {
+			return c.Status(http.StatusUnauthorized).SendString("Unauthorized")
+		}
+
+		if p.Type != want {
+			return c.Status(http.StatusForbidden).SendString("Forbidden")
+		}
+
+		return c.Next()
+	}
+}

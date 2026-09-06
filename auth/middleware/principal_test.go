@@ -2,10 +2,15 @@ package middleware
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -154,4 +159,139 @@ func TestPrincipalFromClaims(t *testing.T) {
 		assert.Equal(t, Principal{Type: normalUser, Subject: "admin/midaz-editor-role"},
 			principalFromClaims(claims, "admin/midaz-editor-role"))
 	})
+}
+
+// ---------------------------------------------------------------------------
+// RequireHuman / RequireApplication
+// ---------------------------------------------------------------------------
+
+// newGuardApp mounts a type guard on a route with no Authorize in front, and seeds
+// the request context with the given Principal when one is supplied. It isolates
+// the guard's own rules from the derivation that normally feeds it.
+func newGuardApp(guard fiber.Handler, seed *Principal) *fiber.App {
+	app := fiber.New()
+
+	app.Use(func(c fiber.Ctx) error {
+		if seed != nil {
+			c.SetContext(context.WithValue(c.Context(), principalContextKey{}, *seed))
+		}
+
+		return c.Next()
+	})
+	app.Get("/x", guard, func(c fiber.Ctx) error {
+		return c.SendString("reached handler")
+	})
+
+	return app
+}
+
+func guardResponse(t *testing.T, guard fiber.Handler, seed *Principal) *http.Response {
+	t.Helper()
+
+	resp, err := newGuardApp(guard, seed).Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+	require.NoError(t, err)
+
+	return resp
+}
+
+func TestRequireHuman(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing_principal_is_401", func(t *testing.T) {
+		t.Parallel()
+
+		resp := guardResponse(t, RequireHuman(), nil)
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+
+	t.Run("application_is_403", func(t *testing.T) {
+		t.Parallel()
+
+		resp := guardResponse(t, RequireHuman(), &Principal{
+			Type: application, Sub: "admin/robot", Subject: "admin/robot",
+		})
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+
+	t.Run("normal_user_reaches_the_handler", func(t *testing.T) {
+		t.Parallel()
+
+		resp := guardResponse(t, RequireHuman(), &Principal{
+			Type: normalUser, Owner: "acme-org", Sub: "user123", Subject: "acme-org/user123",
+		})
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, "reached handler", string(body))
+	})
+}
+
+func TestRequireApplication(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing_principal_is_401", func(t *testing.T) {
+		t.Parallel()
+
+		resp := guardResponse(t, RequireApplication(), nil)
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+
+	t.Run("normal_user_is_403", func(t *testing.T) {
+		t.Parallel()
+
+		resp := guardResponse(t, RequireApplication(), &Principal{
+			Type: normalUser, Owner: "acme-org", Sub: "user123", Subject: "acme-org/user123",
+		})
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+
+	t.Run("application_reaches_the_handler", func(t *testing.T) {
+		t.Parallel()
+
+		resp := guardResponse(t, RequireApplication(), &Principal{
+			Type: application, Sub: "admin/robot", Subject: "admin/robot",
+		})
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+}
+
+// TestRequireHuman_BehindAuthorize drives the real chain: Authorize derives and
+// publishes, RequireHuman decides. An application token that Authorize accepts is
+// still refused by the human-only guard mounted after it.
+func TestRequireHuman_BehindAuthorize(t *testing.T) {
+	t.Parallel()
+
+	auth := &AuthClient{
+		Enabled:                       false,
+		M2MInversionEnabled:           true,
+		PrincipalRequiredWhenDisabled: true,
+		Logger:                        &testLogger{},
+	}
+
+	app := fiber.New()
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), RequireHuman(), func(c fiber.Ctx) error {
+		return c.SendString("reached handler")
+	})
+
+	do := func(claims jwt.MapClaims) *http.Response {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+createTestJWT(claims))
+
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+
+		return resp
+	}
+
+	assert.Equal(t, http.StatusForbidden, do(jwt.MapClaims{
+		"type": application,
+		"sub":  "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc",
+	}).StatusCode, "a machine must not pass a human-only route")
+
+	assert.Equal(t, http.StatusOK, do(jwt.MapClaims{
+		"type":  normalUser,
+		"owner": "acme-org",
+		"sub":   "user123",
+	}).StatusCode)
 }
