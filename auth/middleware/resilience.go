@@ -55,11 +55,12 @@ type authzOutcome struct {
 
 // authzResolution is one authorization request resolved through whatever
 // resilience layers are configured. It carries BOTH the legacy (bool, int, error)
-// triple the Fiber path answers with and the fact that the authorization service
-// never answered at all, because the two cannot be collapsed: the legacy triple
-// renders an outage differently depending on configuration — 403 with no error
-// once retry or the breaker absorbed it, 500 with the transport error when
-// neither is configured — while Check must report every one of them as 503.
+// triple the gRPC interceptors answer with and the fact that the authorization
+// service never answered at all, because the two cannot be collapsed: the legacy
+// triple renders an outage differently depending on configuration — 403 with no
+// error once retry or the breaker absorbed it, 500 with the transport error when
+// neither is configured — while Check and Authorize must report every one of them
+// as 503.
 type authzResolution struct {
 	authorized bool
 	statusCode int
@@ -70,17 +71,19 @@ type authzResolution struct {
 	unavailableErr error
 }
 
-// legacyResult reproduces the pre-FC-4 contract unchanged, so Authorize, the gRPC
-// interceptors and every internal caller keep answering exactly what they
-// answered before — including the fail-closed deny an absorbed outage produces.
+// legacyResult reproduces the pre-FC-4 contract unchanged, so the gRPC
+// interceptors keep answering exactly what they answered before — including the
+// fail-closed deny an absorbed outage produces. The Fiber path no longer reads it:
+// Authorize answers on checkResult, so a rail behind it reports an outage as 503.
 func (r authzResolution) legacyResult() (bool, int, error) {
 	return r.authorized, r.statusCode, r.err
 }
 
-// checkResult maps the resolution onto Check's FC-4 contract: an outage stays
-// fail-closed (never authorized) but is reported as 503 with the error that
-// caused it, so a caller can tell "the Access Manager said no" from "the Access
-// Manager could not be reached" under every resilience configuration.
+// checkResult maps the resolution onto the contract Check and Authorize share: an
+// outage stays fail-closed (never authorized) but is reported as 503 with the error
+// that caused it, so a caller — and an operator reading the rail's status codes —
+// can tell "the Access Manager said no" from "the Access Manager could not be
+// reached" under every resilience configuration.
 func (r authzResolution) checkResult() (bool, int, error) {
 	if r.unavailableErr != nil {
 		return false, http.StatusServiceUnavailable, r.unavailableErr

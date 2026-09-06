@@ -270,6 +270,12 @@ anything else. When the authorization service answered a coded error body, the
 returned error also resolves to that `commons.Response` through `errors.As`, so a
 handler that knows lib-commons still renders the code, title and message it sent.
 
+`403 Forbidden` means the authorization service answered no. An authorization
+service that could not answer at all — unreachable, a 5xx, retries exhausted, or the
+circuit breaker open — is `503 Service Unavailable` instead. The request is refused
+either way (fail closed), but only the 503 tells an operator the outage apart from a
+policy denial, and only the 503 reaches a rail's 5xx alarms.
+
 ## 🪪 Principal on the request context
 
 Every path where `Authorize` reads a token and then calls `c.Next()` publishes the
@@ -408,10 +414,9 @@ resolved yourself through your own trusted-proxy configuration. Never pass Fiber
 `X-Forwarded-For` header, which lets a caller pick the address the allowlist matches
 it against.
 
-`Authorize` is unaffected by the 503 mapping: on the same outage it answers on the
-wire exactly what it always did — the fail-closed `403 Forbidden` once retry or the
-breaker absorbed the failure, `500 Internal Server Error` when neither is configured
-— since a route's caller has no use for the distinction `Check`'s caller needs.
+`Authorize` answers the same `503 Service Unavailable` on the wire for the same
+outage (see the refusal paragraph under **How It Works** above), so a rail's alarms
+can key on 503 across both surfaces.
 
 ## 📥 Example Request to Auth
 

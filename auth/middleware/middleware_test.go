@@ -2510,9 +2510,11 @@ func TestCheck_SendsTheSameBodyAsAuthorize(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // authorizeWireAnswer drives Authorize on the given client through a real Fiber app
-// and returns the status and body it wrote. Every outage subtest below holds the
-// new 503 Check reports against this, to prove the middleware path still answers on
-// the wire exactly what it answered before the distinction existed.
+// and returns the status and body it wrote. Every outage subtest below holds the 503
+// Check reports against this, to prove the middleware path answers the SAME word on
+// the wire (FC-10): an Access Manager that could not decide is a 503 under every
+// resilience configuration, never a 403 the caller reads as a policy denial and
+// never a 500 that names the wrong subsystem.
 func authorizeWireAnswer(t *testing.T, auth *AuthClient, token string) (int, string) {
 	t.Helper()
 
@@ -2558,11 +2560,11 @@ func TestCheck_AuthorizationServiceUnavailableIs503(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
 		assert.Contains(t, err.Error(), "failed to make request")
 
-		// Authorize is unchanged: a transport error with no resilience layer to
-		// absorb it is still the internal error it always was.
+		// Authorize agrees with Check: a transport error is the authorization service
+		// being unreachable, not this service failing internally.
 		status, body := authorizeWireAnswer(t, auth, token)
-		assert.Equal(t, http.StatusInternalServerError, status)
-		assert.Equal(t, http.StatusText(http.StatusInternalServerError), body)
+		assert.Equal(t, http.StatusServiceUnavailable, status)
+		assert.Equal(t, http.StatusText(http.StatusServiceUnavailable), body)
 	})
 
 	t.Run("retries_exhausted", func(t *testing.T) {
@@ -2586,10 +2588,11 @@ func TestCheck_AuthorizationServiceUnavailableIs503(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
 		assert.Equal(t, int64(2), hits.Load(), "the initial attempt plus one retry must both have been made")
 
-		// Authorize is unchanged: an absorbed outage is still the fail-closed deny.
+		// Authorize agrees with Check: the deny stays fail-closed, but an exhausted
+		// retry budget is reported as the outage it is.
 		status, body := authorizeWireAnswer(t, auth, token)
-		assert.Equal(t, http.StatusForbidden, status)
-		assert.Equal(t, "Forbidden", body)
+		assert.Equal(t, http.StatusServiceUnavailable, status)
+		assert.Equal(t, "Service Unavailable", body)
 	})
 
 	t.Run("breaker_open", func(t *testing.T) {
@@ -2619,10 +2622,11 @@ func TestCheck_AuthorizationServiceUnavailableIs503(t *testing.T) {
 		assert.False(t, authorized)
 		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
 
-		// Authorize is unchanged: an open breaker is still the fail-closed deny.
+		// Authorize agrees with Check: an open breaker denies fail-closed and says so
+		// as an outage.
 		status, body := authorizeWireAnswer(t, auth, token)
-		assert.Equal(t, http.StatusForbidden, status)
-		assert.Equal(t, "Forbidden", body)
+		assert.Equal(t, http.StatusServiceUnavailable, status)
+		assert.Equal(t, "Service Unavailable", body)
 
 		assert.Equal(t, int64(2), hits.Load(), "an open breaker must short-circuit, not reach the authz service")
 	})
