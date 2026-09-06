@@ -1,3 +1,34 @@
+## [4.1.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.1...v4.1.0-beta.2) (2026-09-06)
+
+
+### Features
+
+* **middleware:** add the human and application principal guards ([378b039](https://github.com/LerianStudio/lib-auth/commit/378b039ff69e2e2e1aa7329e885fb0b7ecc01627))
+* **middleware:** add the Principal type and its context accessor ([479664d](https://github.com/LerianStudio/lib-auth/commit/479664d301174e3f373b62c5ce97733c65485864))
+* **middleware:** demand a principal bearer when auth is disabled ([81cacd5](https://github.com/LerianStudio/lib-auth/commit/81cacd5586d300d4148716001022ad0aa705ed2d))
+* **middleware:** export Check for authorization outside the chain ([657c843](https://github.com/LerianStudio/lib-auth/commit/657c843c9b092d3f04c4e03536c4c820995240c5))
+* **middleware:** publish the derived principal on authorized requests ([0386fcb](https://github.com/LerianStudio/lib-auth/commit/0386fcbd5665841d27aceadb8e2078d209b09d3a))
+
+
+### Bug Fixes
+
+* apply the repair the steward validated on this head ([547c195](https://github.com/LerianStudio/lib-auth/commit/547c195bb8b98583b036c12824c57b06a1d3fd51))
+* apply the repair the steward validated on this head ([be647b8](https://github.com/LerianStudio/lib-auth/commit/be647b8c0b079022f5146ae513fb9a0f5a131a90))
+* apply the repair the steward validated on this head ([56da6ce](https://github.com/LerianStudio/lib-auth/commit/56da6ce266c08e12db007aae78b539672c238db8))
+* apply the repair the steward validated on this head ([bed729a](https://github.com/LerianStudio/lib-auth/commit/bed729a31f02a60b4ef51c6408c84b272f2b0505))
+* apply the repair the steward validated on this head ([331d0a2](https://github.com/LerianStudio/lib-auth/commit/331d0a240644b6a7ffdd2c2c7eaaa33d721c3432))
+* apply the repair the steward validated on this head ([864c685](https://github.com/LerianStudio/lib-auth/commit/864c685bfba5e19e50a27dae3dc2d258db80885c))
+* apply the repair the steward validated on this head ([d477176](https://github.com/LerianStudio/lib-auth/commit/d477176fb0c16f4737b4a8c3750d9c7ec9a7f3fa))
+* apply the repair the steward validated on this head ([a8738be](https://github.com/LerianStudio/lib-auth/commit/a8738be6f19498d340bae4933f2abfbf864ab43e))
+* apply the repair the steward validated on this head ([2f66ee8](https://github.com/LerianStudio/lib-auth/commit/2f66ee8227cfec52e7a72bf849aedb6ada570b7b))
+* apply the repair the steward validated on this head ([e7a78f6](https://github.com/LerianStudio/lib-auth/commit/e7a78f675a401ecd1b817737c5a1ece01beda015))
+* **middleware:** keep principal identifiers out of span attributes ([2fc5672](https://github.com/LerianStudio/lib-auth/commit/2fc56729b79b5a99b7d432abff5cc8285e3661f6))
+* **middleware:** redact the subject from the authorization span payload ([b275244](https://github.com/LerianStudio/lib-auth/commit/b2752447e6894c52f2301819adc32af2b55e4475))
+* **middleware:** refuse the principal path when enabled without an address ([c025847](https://github.com/LerianStudio/lib-auth/commit/c0258470e9db260f79b1d586cbe6d6132ccfea16))
+* **middleware:** reject whitespace-only identity claims ([7531d37](https://github.com/LerianStudio/lib-auth/commit/7531d37aab0a0f5ccf3c1f071ce058a51c4ab809))
+* **middleware:** report authorization outages from check as 503 ([32895b0](https://github.com/LerianStudio/lib-auth/commit/32895b0b0821ed127bc789cbcd134edf0de16adb))
+* **middleware:** return fiber errors from the principal guards ([7d694c1](https://github.com/LerianStudio/lib-auth/commit/7d694c1e8fe21c470fd170bacead7ffa4bed8665))
+
 ## [4.1.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v4.0.0...v4.1.0-beta.1) (2026-09-05)
 
 
