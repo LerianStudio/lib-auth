@@ -284,12 +284,13 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool)
 
 Publication covers the authorized decision, a decision-cache hit, and the
 `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` path below. A denied request publishes
-nothing, and neither does the default disabled pass-through. The principal attribute
-the span carries is `app.auth.principal.type` only; `Owner`, `Sub`, `Subject` and
-`ClientID` are not recorded as principal attributes, and the access token never
-reaches a span attribute or a log line. Note that the enabled path already records
-the body sent to the authorization service as `app.request.payload.*` attributes,
-subject included; that behavior predates the principal and is unchanged.
+nothing, and neither does the default disabled pass-through. The only identity attribute any of
+these spans carries is `app.auth.principal.type`. The span copy of the authorization
+payload omits `sub`, so `Owner`, `Sub`, `Subject` and `ClientID` are recorded nowhere,
+and neither the access token nor any caller identifier reaches a span attribute or a
+log line — the request id is what correlates a span with the service's own audit
+trail. The body sent to the authorization service is unchanged and still carries the
+subject, since it is the subject of the decision; only the telemetry copy is redacted.
 
 ### Bearer required while auth is disabled
 

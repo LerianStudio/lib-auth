@@ -1654,74 +1654,169 @@ func TestAuthorize_PublishesPrincipal(t *testing.T) {
 	})
 }
 
-// TestAuthorize_TracesPrincipalNotToken proves the attributes this package adds for
-// the principal carry only its TYPE, and that the bearer token never reaches any
-// span attribute. The pre-existing app.request.payload.* attributes (the body sent
-// to the authorization service, including its subject) are outside this contract.
+// TestAuthorize_TracesPrincipalNotToken proves the telemetry rule for the whole
+// authorization path: across EVERY span this package exports, the only identity
+// attribute is app.auth.principal.type, and neither the bearer token nor any caller
+// identifier — owner, subject, client id — reaches an attribute key or value. The
+// span copy of the authorization payload is redacted for that reason; the body sent
+// to the authorization service still carries the subject, and the round-trip subtest
+// captures it to prove only the telemetry copy changed.
 func TestAuthorize_TracesPrincipalNotToken(t *testing.T) {
 	t.Parallel()
 
-	exporter := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
-
-	server := mockAuthServer(t, true, http.StatusOK)
-	defer server.Close()
-
-	auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
-
-	app := fiber.New()
-	app.Use(func(c fiber.Ctx) error {
-		c.SetContext(observability.ContextWithTracer(c.Context(), tp.Tracer("test")))
-
-		return c.Next()
-	})
-	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
-		return c.SendStatus(http.StatusOK)
-	})
+	// Distinct sentinels, so an assertion that finds one names exactly which claim
+	// leaked. None appears verbatim in the token, whose claims are base64-encoded.
+	const (
+		sentinelOwner    = "sentinel-owner-77f1"
+		sentinelSubject  = "sentinel-subject-91ab"
+		sentinelClientID = "sentinel-client-3c2d"
+	)
 
 	token := createTestJWT(jwt.MapClaims{
 		"type":  "normal-user",
-		"owner": "acme-org",
-		"sub":   "user123",
-		"azp":   "client-app-42",
+		"owner": sentinelOwner,
+		"sub":   sentinelSubject,
+		"azp":   sentinelClientID,
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	assertOnlyPrincipalTypeIsRecorded := func(t *testing.T, spans tracetest.SpanStubs) {
+		t.Helper()
 
-	resp, err := app.Test(req)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+		require.NotEmpty(t, spans, "expected the authorization spans to be exported")
 
-	spans := exporter.GetSpans()
-	require.NotEmpty(t, spans, "expected the authorization spans to be exported")
+		var (
+			sawPrincipalType bool
+			identityKeys     []string
+		)
 
-	attrs := map[string]string{}
-	identifiers := []string{"acme-org", "user123", "client-app-42"}
+		for _, s := range spans {
+			for _, attr := range s.Attributes {
+				key := string(attr.Key)
+				value := attr.Value.AsString()
 
-	for _, s := range spans {
-		for _, attr := range s.Attributes {
-			key := string(attr.Key)
-			attrs[key] = attr.Value.AsString()
+				assert.NotContains(t, value, token,
+					"span %q leaks the access token in attribute %q", s.Name, key)
 
-			assert.NotContains(t, attr.Value.AsString(), token,
-				"span %q leaks the access token in attribute %q", s.Name, key)
+				for _, sentinel := range []string{sentinelOwner, sentinelSubject, sentinelClientID} {
+					assert.NotContains(t, key, sentinel,
+						"span %q leaks a caller identifier in the key %q", s.Name, key)
+					assert.NotContains(t, value, sentinel,
+						"span %q leaks a caller identifier in attribute %q", s.Name, key)
+				}
 
-			if !strings.HasPrefix(key, "app.auth.principal.") {
-				continue
-			}
+				if key == "app.auth.principal.type" {
+					sawPrincipalType = true
 
-			for _, id := range identifiers {
-				assert.NotContains(t, attr.Value.AsString(), id,
-					"span %q leaks a caller identifier in principal attribute %q", s.Name, key)
+					assert.Equal(t, "normal-user", value)
+
+					continue
+				}
+
+				if strings.HasPrefix(key, "app.auth.principal.") || strings.HasSuffix(key, ".sub") {
+					identityKeys = append(identityKeys, key)
+				}
 			}
 		}
+
+		assert.True(t, sawPrincipalType, "the principal type must be recorded")
+		assert.Empty(t, identityKeys,
+			"app.auth.principal.type must be the only identity attribute on any span")
 	}
 
-	assert.Equal(t, "normal-user", attrs["app.auth.principal.type"])
-	_, hasSubject := attrs["app.auth.principal.subject"]
-	assert.False(t, hasSubject, "the span must carry the principal type only, never its subject")
+	newTracedApp := func(t *testing.T, auth *AuthClient) (*fiber.App, *tracetest.InMemoryExporter) {
+		t.Helper()
+
+		exporter := tracetest.NewInMemoryExporter()
+		tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+		t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+
+		app := fiber.New()
+		app.Use(func(c fiber.Ctx) error {
+			c.SetContext(observability.ContextWithTracer(c.Context(), tp.Tracer("test")))
+
+			return c.Next()
+		})
+		app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+			return c.SendStatus(http.StatusOK)
+		})
+
+		return app, exporter
+	}
+
+	call := func(t *testing.T, app *fiber.App) {
+		t.Helper()
+
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	t.Run("round_trip_redacts_the_span_copy_only", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedBody map[string]string
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+			writeAuthorized(w, true)
+		}))
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		app, exporter := newTracedApp(t, auth)
+		call(t, app)
+
+		// The authorization service still decides on the subject: only the
+		// telemetry copy of the payload is redacted.
+		assert.Equal(t, sentinelOwner+"/"+sentinelSubject, capturedBody["sub"],
+			"the body sent to the authorization service must still carry the subject")
+
+		assertOnlyPrincipalTypeIsRecorded(t, exporter.GetSpans())
+	})
+
+	t.Run("cache_hit_carries_no_identity_either", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			writeAuthorized(w, true)
+		})
+
+		auth := &AuthClient{
+			Address: server.URL,
+			Enabled: true,
+			Logger:  &testLogger{},
+			cache:   newDecisionCache(time.Minute),
+		}
+
+		app, exporter := newTracedApp(t, auth)
+
+		call(t, app)
+		call(t, app)
+
+		require.Equal(t, int64(1), hits.Load(), "the second request must be served from the cache")
+
+		assertOnlyPrincipalTypeIsRecorded(t, exporter.GetSpans())
+	})
+
+	t.Run("principal_required_when_disabled_carries_no_identity_either", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		app, exporter := newTracedApp(t, auth)
+		call(t, app)
+
+		assertOnlyPrincipalTypeIsRecorded(t, exporter.GetSpans())
+	})
 }
 
 // ---------------------------------------------------------------------------

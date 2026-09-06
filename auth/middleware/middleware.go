@@ -829,14 +829,18 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, pro
 		requestBody["clientIp"] = clientIP
 	}
 
-	// The span payload omits clientIp: a caller IP is personal data, and traces
-	// are retained longer and read more widely than authz logs. Same split as
-	// getApplicationToken, which keeps the client secret out of the span while
-	// the wire body carries it. The wire body below is unchanged.
+	// The span payload omits sub and clientIp: the caller's subject and its IP are
+	// personal data, and traces are retained longer and read more widely than authz
+	// logs. The ONLY identity a span carries for this request is the principal type
+	// (app.auth.principal.type); the request id correlates the rest with the
+	// service's own audit trail. Same split as getApplicationToken, which keeps the
+	// client secret out of the span while the wire body carries it. The wire body
+	// below is unchanged — the Access Manager still receives sub, and must, since it
+	// is the subject of the decision.
 	tracePayload := make(map[string]string, len(requestBody))
 
 	for k, v := range requestBody {
-		if k == "clientIp" {
+		if k == "sub" || k == "clientIp" {
 			continue
 		}
 
