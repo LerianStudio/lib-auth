@@ -95,7 +95,22 @@ func (auth *AuthClient) derivePrincipalWithoutRoundTrip(ctx context.Context, spa
 		return Principal{}, http.StatusServiceUnavailable, err
 	}
 
-	return auth.derivePrincipal(ctx, span, accessToken, product)
+	principal, statusCode, err := auth.derivePrincipal(ctx, span, accessToken, product)
+	if err != nil {
+		return Principal{}, statusCode, err
+	}
+
+	// The legacy non-inversion derivation can authorize a fabricated role without
+	// a real sub claim. That remains compatible on the Access Manager-backed path,
+	// but it cannot satisfy this path's promise to require a named principal.
+	if principal.Sub == "" {
+		err := errors.New("missing sub claim in token")
+		tracing.HandleSpanError(span, "Missing sub claim in token", err)
+
+		return Principal{}, http.StatusUnauthorized, err
+	}
+
+	return principal, http.StatusOK, nil
 }
 
 // publishPrincipal stores the derived caller identity on the request Go context —

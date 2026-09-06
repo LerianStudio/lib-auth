@@ -298,10 +298,12 @@ default `false`) is for services that always want a named caller, even in a
 deployment that runs with the authorization service off. When it is `true` and the
 client cannot authorize, `Authorize` still extracts the token (401 when missing),
 parses the claims, derives the subject under the same fail-closed token-type rules,
-and publishes the `Principal`. The authorization round-trip is the only thing
-skipped. `AUTH_REQUIRED` takes precedence: a client that cannot authorize refuses
-with 503 regardless. Like `AUTH_M2M_INVERSION_ENABLED`, the field can be pinned in
-code after `NewAuthClient` instead of read from the environment.
+and publishes the `Principal`. A legacy fabricated-role token without a real `sub`
+is refused with 401 because it does not name a principal. The authorization
+round-trip is the only thing skipped. `AUTH_REQUIRED` takes precedence: a client
+that cannot authorize refuses with 503 regardless. Like
+`AUTH_M2M_INVERSION_ENABLED`, the field can be pinned in code after
+`NewAuthClient` instead of read from the environment.
 
 **This is a development mode, and its trust boundary is not the usual one.** There is
 no authorization round-trip on this path, so nothing external vouches for the caller.

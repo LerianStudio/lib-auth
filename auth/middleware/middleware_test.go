@@ -1842,12 +1842,12 @@ func TestAuthorize_Disabled(t *testing.T) {
 		assert.Equal(t, int64(0), hits.Load(), "the round-trip is the ONLY thing this path skips")
 	})
 
-	t.Run("required_when_disabled_keeps_the_legacy_fabrication", func(t *testing.T) {
+	t.Run("required_when_disabled_rejects_legacy_fabrication_without_a_principal", func(t *testing.T) {
 		t.Parallel()
 
-		// Inversion OFF (the Midaz default): a "service" token is still accepted
-		// under the fabricated "admin/<product>-editor-role" and still identifies
-		// nobody. Opting into the bearer requirement does not opt into inversion.
+		// Inversion OFF (the Midaz default) can derive a fabricated
+		// "admin/<product>-editor-role" without a real sub. With no Access Manager
+		// round-trip, that cannot satisfy the opt-in requirement for a named caller.
 		auth := &AuthClient{
 			Enabled:                       false,
 			PrincipalRequiredWhenDisabled: true,
@@ -1856,13 +1856,17 @@ func TestAuthorize_Disabled(t *testing.T) {
 
 		var reached atomic.Bool
 
-		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
-			"type": "service",
-		}))
+		token := createTestJWT(jwt.MapClaims{"type": "service"})
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), token)
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		assert.True(t, reached.Load())
-		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Empty(t, resp.Header.Get("X-P-Found"))
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+		require.Error(t, err)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusUnauthorized, statusCode)
 	})
 
 	t.Run("required_wins_over_the_principal_requirement", func(t *testing.T) {
