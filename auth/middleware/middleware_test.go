@@ -1227,6 +1227,8 @@ func captureAuthServer(t *testing.T, capturedBody *map[string]string) *httptest.
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(capturedBody); err != nil {
 			t.Errorf("mock server: failed to decode request body: %v", err)
+
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
