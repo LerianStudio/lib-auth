@@ -533,6 +533,64 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 	}
 }
 
+// errAuthorizationUnavailable is the error Check reports alongside 503 when
+// Required is set but the client cannot authorize. Authorize answers the same
+// condition with a bare 503 body; Check has no response to write, so it needs a
+// value to hand its caller.
+var errAuthorizationUnavailable = errors.New("authorization is required but the authorization service is disabled or misconfigured")
+
+// Check evaluates (product, resource, action) for the bearer token outside the
+// middleware chain, with the same derivation, decision cache, breaker and
+// fail-closed rules Authorize applies. It returns (true, 200, nil) when
+// authorized, (false, 403, nil) when denied, and (false, status, err) on a
+// token or transport failure. clientIP may be empty. It never publishes a
+// Principal; the caller already has one from Authorize.
+func (auth *AuthClient) Check(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error) {
+	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
+
+	ctx, span := tracer.Start(ctx, "lib_auth.check")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("app.request.request_id", reqID),
+	)
+
+	if auth.mustRefuse() {
+		tracing.HandleSpanError(span, "Authorization required but unavailable", errAuthorizationUnavailable)
+
+		return false, http.StatusServiceUnavailable, errAuthorizationUnavailable
+	}
+
+	if !auth.canAuthorize() {
+		if !auth.principalRequiredWhenDisabled() {
+			return true, http.StatusOK, nil
+		}
+
+		// Mirror Authorize's disabled path: the token must still name a principal
+		// under the same rules, and ONLY the round-trip is skipped. The derived
+		// identity is discarded here — the caller already holds the one Authorize
+		// published on the request context.
+		if _, statusCode, err := auth.derivePrincipal(ctx, span, accessToken, product); err != nil {
+			return false, statusCode, err
+		}
+
+		return true, http.StatusOK, nil
+	}
+
+	authorized, statusCode, _, err := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+	if err != nil {
+		return false, statusCode, err
+	}
+
+	if !authorized {
+		// A plain deny is an answer, not a failure: it carries no error, and it is
+		// reported as the 403 Authorize would have written.
+		return false, http.StatusForbidden, nil
+	}
+
+	return true, http.StatusOK, nil
+}
+
 // authorizeWithoutRoundTrip serves the PrincipalRequiredWhenDisabled path: the client
 // cannot authorize, so the Access Manager is never called, but the bearer token is
 // still demanded, parsed and derived with the SAME rules the enabled path applies and

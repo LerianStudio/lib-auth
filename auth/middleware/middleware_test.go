@@ -1882,3 +1882,169 @@ func TestNewAuthClient_ReadsPrincipalRequiredWhenDisabledFlag(t *testing.T) {
 	assert.False(t, NewAuthClient("", false, &testLogger{}).PrincipalRequiredWhenDisabled,
 		"the default preserves the historical pass-through")
 }
+
+// ---------------------------------------------------------------------------
+// Check - authorization outside the middleware chain
+// ---------------------------------------------------------------------------
+
+func TestCheck(t *testing.T) {
+	t.Parallel()
+
+	normalUserToken := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	t.Run("authorized", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
+		require.NoError(t, err)
+		assert.True(t, authorized)
+		assert.Equal(t, http.StatusOK, statusCode)
+	})
+
+	t.Run("denied_is_403_without_an_error", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, false, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
+		require.NoError(t, err, "a plain deny is an answer, not a failure")
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusForbidden, statusCode)
+	})
+
+	t.Run("unusable_token_is_401_with_an_error", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			writeAuthorized(w, true)
+		})
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, M2MInversionEnabled: true, Logger: &testLogger{}}
+
+		token := createTestJWT(jwt.MapClaims{"type": "application"}) // no sub
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+		require.Error(t, err)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusUnauthorized, statusCode)
+		assert.Equal(t, int64(0), hits.Load(), "an underivable token never reaches the authorization service")
+	})
+
+	t.Run("disabled_allows_without_calling_out", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			t.Error("a disabled client must not call the authorization service")
+			writeAuthorized(w, true)
+		})
+
+		auth := &AuthClient{Address: server.URL, Enabled: false, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", "", "")
+		require.NoError(t, err)
+		assert.True(t, authorized)
+		assert.Equal(t, http.StatusOK, statusCode)
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("disabled_with_principal_required_still_validates_the_token", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
+		require.NoError(t, err)
+		assert.True(t, authorized)
+		assert.Equal(t, http.StatusOK, statusCode)
+
+		// Same client, a token whose type it refuses: 401, not a silent allow.
+		bad := createTestJWT(jwt.MapClaims{"type": "service-account", "sub": "admin/robot"})
+
+		authorized, statusCode, err = auth.Check(context.Background(), "midaz", "resource", "get", bad, "")
+		require.Error(t, err)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusUnauthorized, statusCode)
+	})
+
+	t.Run("required_and_disabled_refuses_with_503", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{Enabled: false, Required: true, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
+		require.Error(t, err)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+	})
+}
+
+// TestCheck_SendsTheSameBodyAsAuthorize pins the two entry points to one wire
+// contract: for the same token, product, resource and action the authorization
+// service must not be able to tell which one asked.
+func TestCheck_SendsTheSameBodyAsAuthorize(t *testing.T) {
+	t.Parallel()
+
+	capture := func(t *testing.T) (*httptest.Server, *[]map[string]string) {
+		t.Helper()
+
+		var bodies []map[string]string
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]string
+
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+
+			bodies = append(bodies, body)
+			writeAuthorized(w, true)
+		}))
+		t.Cleanup(server.Close)
+
+		return server, &bodies
+	}
+
+	server, bodies := capture(t)
+
+	auth := &AuthClient{Address: server.URL, Enabled: true, M2MInversionEnabled: true, Logger: &testLogger{}}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"sub":  "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc",
+		"azp":  "66bac70fbea746daa760",
+	})
+
+	app := fiber.New()
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	authorized, _, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+	require.NoError(t, err)
+	assert.True(t, authorized)
+
+	require.Len(t, *bodies, 2)
+	assert.Equal(t, (*bodies)[0], (*bodies)[1])
+}
