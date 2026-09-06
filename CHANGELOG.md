@@ -1,3 +1,10 @@
+## [4.1.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.2...v4.1.0-beta.3) (2026-09-06)
+
+
+### Bug Fixes
+
+* **middleware:** return fiber errors from Authorize refusals ([63067c0](https://github.com/LerianStudio/lib-auth/commit/63067c09308af33c79ab2c5dc5d76fc196500a62))
+
 ## [4.1.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.1...v4.1.0-beta.2) (2026-09-06)
 
 
