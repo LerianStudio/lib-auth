@@ -68,6 +68,16 @@ type AuthClient struct {
 	// (fail-closed on token type under M2MInversionEnabled), the Principal published,
 	// and ONLY the Access Manager round-trip is skipped. Default false preserves the
 	// historical pass-through. Required (AUTH_REQUIRED) still wins: it refuses with 503.
+	//
+	// TRUST BOUNDARY: this is a DEVELOPMENT mode. No Access Manager round-trip happens
+	// on this branch, so nothing external vouches for the caller and the published
+	// identity is SELF-ASSERTED unless local verification is configured, either the
+	// AUTH_JWT_VERIFY_CERT / AUTH_JWT_VERIFY_CERT_PATH PEM or a JWKS source wired with
+	// WithKeySource. Because the branch runs the SAME extractClaims as the enabled
+	// path, configuring keys makes it refuse an invalid signature with 401 here too;
+	// with no keys the token is parsed unverified, so any caller able to reach the
+	// route can name any principal it likes. Do not treat a principal published by an
+	// unverified client as an authenticated caller on a network you do not control.
 	PrincipalRequiredWhenDisabled bool
 
 	// Required, when true, makes the middleware fail closed: if auth is disabled
@@ -543,8 +553,23 @@ var errAuthorizationUnavailable = errors.New("authorization is required but the 
 // middleware chain, with the same derivation, decision cache, breaker and
 // fail-closed rules Authorize applies. It returns (true, 200, nil) when
 // authorized, (false, 403, nil) when denied, and (false, status, err) on a
-// token or transport failure. clientIP may be empty. It never publishes a
-// Principal; the caller already has one from Authorize.
+// token or transport failure. It never publishes a Principal; the caller already
+// has one from Authorize.
+//
+// clientIP is CALLER-SUPPLIED and reaches the Access Manager decision as-is, where
+// it feeds the per-tenant IP allowlist. Pass it empty, which omits the field exactly
+// as the middleware path does when no address is attributable, or pass a value you
+// resolved yourself through your own trusted-proxy configuration. Never pass Fiber's
+// c.IP() raw: under a misconfigured proxy chain that is the attacker-chosen
+// X-Forwarded-For header, which lets the caller choose the address the allowlist
+// matches it against.
+//
+// A transport failure surfaces differently depending on the resilience settings.
+// With the breaker and retry disabled, which is the default, it returns
+// (false, 500, err). With AUTH_BREAKER_ENABLED or AUTH_RETRY_MAX set, an exhausted
+// failure surfaces as (false, 403, nil), indistinguishable from a policy deny. This
+// mirrors Authorize, and both shapes are fail-closed, so a caller that reads only
+// the boolean is safe either way.
 func (auth *AuthClient) Check(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
