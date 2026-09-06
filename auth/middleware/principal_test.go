@@ -87,6 +87,22 @@ func TestPrincipalFromContext(t *testing.T) {
 		assert.False(t, ok)
 		assert.Equal(t, Principal{}, got)
 	})
+
+	t.Run("absent_when_legacy_application_subject_is_a_fabricated_role", func(t *testing.T) {
+		t.Parallel()
+
+		stored := Principal{
+			Type:    application,
+			Sub:     "admin/robot",
+			Subject: "admin/midaz-editor-role",
+		}
+
+		ctx := context.WithValue(context.Background(), principalContextKey{}, stored)
+
+		got, ok := PrincipalFromContext(ctx)
+		assert.False(t, ok)
+		assert.Equal(t, Principal{}, got)
+	})
 }
 
 // ---------------------------------------------------------------------------

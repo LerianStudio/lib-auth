@@ -1633,6 +1633,28 @@ func TestAuthorize_PublishesPrincipal(t *testing.T) {
 		assert.Empty(t, resp.Header.Get("X-P-Subject"))
 	})
 
+	t.Run("legacy_application_with_sub_still_reports_absent", func(t *testing.T) {
+		t.Parallel()
+
+		// Inversion OFF authorizes every non-human token under the fabricated
+		// product role. A sub claim present on the token does not change the subject
+		// of that decision, so it must not turn the fabricated role into a published
+		// application identity.
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type": application,
+			"sub":  "admin/robot",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
+		assert.Empty(t, resp.Header.Get("X-P-Subject"))
+	})
+
 	t.Run("denied_request_publishes_nothing", func(t *testing.T) {
 		t.Parallel()
 

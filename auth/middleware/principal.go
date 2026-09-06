@@ -33,10 +33,27 @@ type Principal struct {
 type principalContextKey struct{}
 
 // PrincipalFromContext returns the Principal Authorize stored on the request Go
-// context, or (zero, false) when absent or when Sub is empty/whitespace-only.
+// context, or (zero, false) when absent or when the stored value does not describe
+// one of the real identities this API promises. In particular, a legacy
+// non-inversion M2M authorization uses a fabricated role as Subject; even when that
+// token happens to carry a sub claim, the role is not the application identity and
+// must not be exposed as one.
 func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(principalContextKey{}).(Principal)
 	if !ok || strings.TrimSpace(p.Sub) == "" {
+		return Principal{}, false
+	}
+
+	switch p.Type {
+	case normalUser:
+		if strings.TrimSpace(p.Owner) == "" || p.Subject != p.Owner+"/"+p.Sub {
+			return Principal{}, false
+		}
+	case application:
+		if p.Owner != "" || p.Subject != p.Sub {
+			return Principal{}, false
+		}
+	default:
 		return Principal{}, false
 	}
 
