@@ -43,6 +43,50 @@ type authzOutcome struct {
 	authorized bool
 	statusCode int
 	authErr    error
+
+	// transientErr is non-nil when the authorization service did not produce an
+	// authoritative answer — a network failure, a context timeout, or a 5xx. It is
+	// what the retry and breaker layers act on, and it is the same value
+	// doAuthorizeCall returns as its second result. Carrying it on the outcome is
+	// what lets a failure survive the branch where NO layer is configured to
+	// absorb it, so Check can still report the outage as such.
+	transientErr error
+}
+
+// authzResolution is one authorization request resolved through whatever
+// resilience layers are configured. It carries BOTH the legacy (bool, int, error)
+// triple the Fiber path answers with and the fact that the authorization service
+// never answered at all, because the two cannot be collapsed: the legacy triple
+// renders an outage differently depending on configuration — 403 with no error
+// once retry or the breaker absorbed it, 500 with the transport error when
+// neither is configured — while Check must report every one of them as 503.
+type authzResolution struct {
+	authorized bool
+	statusCode int
+	err        error
+
+	// unavailableErr is non-nil exactly when the authorization service did not
+	// answer: transport failure, timeout, 5xx, retries exhausted, breaker open.
+	unavailableErr error
+}
+
+// legacyResult reproduces the pre-FC-4 contract unchanged, so Authorize, the gRPC
+// interceptors and every internal caller keep answering exactly what they
+// answered before — including the fail-closed deny an absorbed outage produces.
+func (r authzResolution) legacyResult() (bool, int, error) {
+	return r.authorized, r.statusCode, r.err
+}
+
+// checkResult maps the resolution onto Check's FC-4 contract: an outage stays
+// fail-closed (never authorized) but is reported as 503 with the error that
+// caused it, so a caller can tell "the Access Manager said no" from "the Access
+// Manager could not be reached" under every resilience configuration.
+func (r authzResolution) checkResult() (bool, int, error) {
+	if r.unavailableErr != nil {
+		return false, http.StatusServiceUnavailable, r.unavailableErr
+	}
+
+	return r.authorized, r.statusCode, r.err
 }
 
 // requestTimeout is the per-request authorization deadline, falling back to the
@@ -56,29 +100,38 @@ func (auth *AuthClient) requestTimeout() time.Duration {
 }
 
 // resolveAuthz performs the authorization call through the configured resilience
-// layers and maps the result to checkAuthorization's contract. Every
-// non-authoritative outcome — transient failure exhausted, breaker open, timeout —
-// denies (fail closed): it returns (false, 403, nil), the same "not authorized"
-// path a normal denial takes, never failing open. A clean decision is cached (when
-// the cache is enabled) before being returned.
-func (auth *AuthClient) resolveAuthz(ctx context.Context, span trace.Span, accessToken string, body []byte, key cacheKey) (bool, int, error) {
+// layers. Every non-authoritative outcome — transient failure exhausted, breaker
+// open, timeout — denies (fail closed): the legacy triple is (false, 403, nil),
+// the same "not authorized" path a normal denial takes, never failing open. What
+// the resolution adds is unavailableErr, which keeps that outage distinguishable
+// from a policy denial for callers that need to tell them apart. A clean decision
+// is cached (when the cache is enabled) before being returned.
+func (auth *AuthClient) resolveAuthz(ctx context.Context, span trace.Span, accessToken string, body []byte, key cacheKey) authzResolution {
 	outcome, err := auth.invokeAuthz(ctx, span, accessToken, body)
 	if err != nil {
 		logErrorf(ctx, auth.Logger, "Authorization unavailable, denying (fail closed): %v", err)
 		tracing.HandleSpanError(span, "Authorization unavailable, denying", err)
 
-		return false, http.StatusForbidden, nil
+		return authzResolution{statusCode: http.StatusForbidden, unavailableErr: err}
 	}
 
 	if outcome.authErr != nil {
-		return false, outcome.statusCode, outcome.authErr
+		return authzResolution{statusCode: outcome.statusCode, err: outcome.authErr, unavailableErr: outcome.transientErr}
+	}
+
+	if outcome.transientErr != nil {
+		return authzResolution{
+			authorized:     outcome.authorized,
+			statusCode:     outcome.statusCode,
+			unavailableErr: outcome.transientErr,
+		}
 	}
 
 	if auth.cache != nil {
 		auth.cache.set(key, outcome.authorized)
 	}
 
-	return outcome.authorized, outcome.statusCode, nil
+	return authzResolution{authorized: outcome.authorized, statusCode: outcome.statusCode}
 }
 
 // invokeAuthz runs the authorization call under the resilience layers. Composition
@@ -97,6 +150,10 @@ func (auth *AuthClient) invokeAuthz(ctx context.Context, span trace.Span, access
 	}
 
 	if auth.breaker == nil && auth.retryMax == 0 {
+		// No layer to act on a transient failure, so it is not reported as one
+		// here: the outcome keeps the legacy (500, transport error) shape it always
+		// had, and carries transientErr for the caller that needs to know the
+		// service never answered.
 		outcome, _ := call()
 
 		return outcome, nil
@@ -153,7 +210,7 @@ func (auth *AuthClient) doAuthorizeCall(ctx context.Context, span trace.Span, ac
 
 		wrapped := fmt.Errorf("failed to make request: %w", err)
 
-		return authzOutcome{statusCode: http.StatusInternalServerError, authErr: wrapped}, wrapped
+		return authzOutcome{statusCode: http.StatusInternalServerError, authErr: wrapped, transientErr: wrapped}, wrapped
 	}
 	defer resp.Body.Close()
 
@@ -164,14 +221,16 @@ func (auth *AuthClient) doAuthorizeCall(ctx context.Context, span trace.Span, ac
 
 		wrapped := fmt.Errorf("failed to read response body: %w", err)
 
-		return authzOutcome{statusCode: http.StatusInternalServerError, authErr: wrapped}, wrapped
+		return authzOutcome{statusCode: http.StatusInternalServerError, authErr: wrapped, transientErr: wrapped}, wrapped
 	}
 
 	outcome := auth.classifyResponse(ctx, span, resp.StatusCode, respBody)
 
 	if resp.StatusCode >= http.StatusInternalServerError {
 		// 5xx is transient for the resilience layer regardless of how it is surfaced.
-		return outcome, fmt.Errorf("authz service returned status %d", resp.StatusCode)
+		outcome.transientErr = fmt.Errorf("authz service returned status %d", resp.StatusCode)
+
+		return outcome, outcome.transientErr
 	}
 
 	return outcome, nil

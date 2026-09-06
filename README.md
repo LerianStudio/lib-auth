@@ -97,6 +97,16 @@ AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
 # seeds are migrated.
 AUTH_M2M_INVERSION_ENABLED=false
 
+# Optional. When "true", Authorize keeps demanding a bearer token that names a
+# principal even while auth is disabled (PLUGIN_AUTH_ENABLED=false or an empty
+# PLUGIN_AUTH_ADDRESS): the token is extracted (401 when missing), its claims
+# parsed exactly as on the enabled path, the subject derived with the same
+# fail-closed token-type rules, and the Principal published on the request
+# context. ONLY the authorization round-trip is skipped. Defaults to false,
+# which preserves the historical pass-through. AUTH_REQUIRED still wins: with
+# it set, a client that cannot authorize refuses with 503 and never gets here.
+AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=false
+
 # Optional. Opt-in local JWT signature verification for the general authorization
 # path. When unset, tokens are parsed without signature verification (the
 # authorization service remains the trust anchor) — the previous behavior,
@@ -104,12 +114,22 @@ AUTH_M2M_INVERSION_ENABLED=false
 # expiry required, and issuer when AUTH_JWT_ISSUER is set) BEFORE its claims are
 # trusted; any failure denies the request (401, fail closed).
 #
+# One path is the exception to "the authorization service remains the trust
+# anchor": with AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=true no authorization call
+# is made at all, so with verification unset that path has NO trust anchor and
+# the caller identity is self-asserted. Setting a cert here restores one, because
+# the same claim extraction runs on both paths, and an invalid signature is then
+# refused with 401 on the disabled path too.
+#
 # AUTH_JWT_VERIFY_CERT holds the issuer's PEM certificate(s) or RSA public key(s).
 # Newline-join multiple PEMs to carry the old and new certs simultaneously across
 # a key rotation (zero-downtime: a token verified by ANY listed key is accepted).
 # AUTH_JWT_VERIFY_CERT_PATH points to a mounted PEM file instead (used only when
 # AUTH_JWT_VERIFY_CERT is empty). A configured-but-unparseable cert is logged at
-# ERROR and leaves verification disabled; it is never silently accepted.
+# ERROR and leaves verification disabled on the normal authorizing path, where the
+# authorization service remains the trust anchor. The no-round-trip principal path
+# refuses with 503 instead of accepting self-asserted claims when a configured key
+# source could not be loaded.
 AUTH_JWT_VERIFY_CERT=
 AUTH_JWT_VERIFY_CERT_PATH=
 AUTH_JWT_ISSUER=
@@ -129,8 +149,9 @@ AUTH_REQUIRED=false
 # (Go duration). Defaults to 30s (behavior-neutral). It also caps the retry budget.
 AUTH_TIMEOUT=30s
 # AUTH_CACHE_TTL enables a short-lived decision cache when > 0, keyed by
-# (subject, resource, action, product, clientIp) — never the token. Empty/0
-# disables it (default). Security tradeoff: a permission revocation takes up to
+# (SHA-256 digest of the bearer token, subject, resource, action, product,
+# clientIp) — never the raw token. Empty/0 disables it (default). Security
+# tradeoff: a permission revocation takes up to
 # the TTL to propagate, so keep it small (5–15s). It sheds load and, with the
 # breaker, survives brief authz outages by serving fresh positive decisions.
 # The clientIp is part of the key so an IP-dependent decision cached for one
@@ -238,6 +259,149 @@ The `Authorize` function:
 * On the Fiber path, derives the caller's client IP from `TRUSTED_PROXIES` and the socket peer — not from Fiber's `c.IP()` or `c.IPs()` — and sends it as the optional `clientIp` field, omitting it when no caller IP is attributable (see [Client IP forwarding](#-client-ip-forwarding)).
 * Checks if the response indicates that the user is authorized.
 * Allows the normal application flow or returns a 403 (Forbidden) error.
+
+## 🪪 Principal on the request context
+
+Every path where `Authorize` reads a token and then calls `c.Next()` publishes the
+caller identity it derived, so a handler never has to parse the token again. Read it
+back with `PrincipalFromContext`, which reports absent when no principal was
+published, when the stored `Sub` is empty or whitespace-only, and when the
+derivation produced no real subject (the legacy `M2MInversionEnabled=false` model,
+where the subject is a fabricated role).
+
+```go
+type Principal struct {
+    Type     string // token "type" claim: "normal-user" | "application"
+    Owner    string // "owner" claim; empty for application tokens
+    Sub      string // "sub" claim, verbatim
+    Subject  string // "<owner>/<sub>" for normal-user, "<sub>" for application
+    ClientID string // "azp" claim when present, else empty
+}
+
+func PrincipalFromContext(ctx context.Context) (Principal, bool)
+```
+
+An `owner` or `sub` claim that is empty or whitespace-only names nobody and is
+refused with 401 before any principal is published. Every other value is published
+verbatim: `Owner` and `Sub` are the claims as the token wrote them, edge whitespace
+included, with no normalization. `Subject` is the string sent to the authorization
+service.
+
+Publication covers the authorized decision, a decision-cache hit, and the
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` path below. A denied request publishes
+nothing, and neither does the default disabled pass-through. The only identity attribute any of
+these spans carries is `app.auth.principal.type`. The span copy of the authorization
+payload omits `sub`, so `Owner`, `Sub`, `Subject` and `ClientID` are recorded nowhere,
+and neither the access token nor any caller identifier reaches a span attribute or a
+log line — the request id is what correlates a span with the service's own audit
+trail. The body sent to the authorization service is unchanged and still carries the
+subject, since it is the subject of the decision; only the telemetry copy is redacted.
+
+### Bearer required while auth is disabled
+
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` (field `PrincipalRequiredWhenDisabled`,
+default `false`) is for services that always want a named caller, even in a
+deployment that runs with the authorization service off. When it is `true` and the
+client cannot authorize, `Authorize` still extracts the token (401 when missing),
+parses the claims, derives the subject under the same fail-closed token-type rules,
+and publishes the `Principal`. A legacy fabricated-role token without a real `sub`
+is refused with 401 because it does not name a principal, as is a token whose `sub`
+is empty or whitespace-only. The authorization round-trip is the only thing
+skipped. The branch is taken only when the client is
+disabled: a client that is enabled but has no address is an incomplete
+configuration and refuses with 503 in both `Authorize` and `Check`, never the
+no-round-trip path. `AUTH_REQUIRED` takes precedence: a client
+that cannot authorize refuses with 503 regardless. Like
+`AUTH_M2M_INVERSION_ENABLED`, the field can be pinned in code after
+`NewAuthClient` instead of read from the environment.
+
+**This is a development mode, and its trust boundary is not the usual one.** There is
+no authorization round-trip on this path, so nothing external vouches for the caller.
+Unless local verification is configured, with the `AUTH_JWT_VERIFY_CERT` /
+`AUTH_JWT_VERIFY_CERT_PATH` PEM or a JWKS source wired through `WithKeySource`, the
+published identity is **self-asserted**: anyone who can reach the route can present a
+token naming any principal, and the library will publish it. The branch runs the same
+claim extraction as the enabled path, so configuring keys does apply here: an invalid
+signature is refused with 401 on this path too. With no keys configured the token is
+parsed without verifying its signature. Do not rely on a principal published by an
+unverified client on a network you do not control.
+
+### Type guards
+
+`RequireHuman()` and `RequireApplication()` are `fiber.Handler`s that gate a route on
+the published `Principal.Type`. Mount them AFTER `Authorize`: a missing principal is
+401 (nobody was identified) and a principal of the wrong kind is 403 (a known caller
+of the wrong kind). Both **return** the corresponding Fiber error
+(`fiber.ErrUnauthorized`, `fiber.ErrForbidden`) instead of writing a response
+themselves. Under Fiber's default error handler the rendered bodies are unchanged —
+plain-text `Unauthorized` and `Forbidden`, matching `Authorize` — while a service that
+installs its own `ErrorHandler`, problem+json for instance, receives the error and
+keeps its own response envelope.
+
+`RequireApplication` is not `RequireM2M`. It performs no signature verification: the
+authorization round-trip behind `Authorize` is the trust anchor, as it is for every
+other route. `RequireM2M` stays a separate, self-verifying gate.
+
+The two do not substitute for each other in a chain either. A route gated only by
+`RequireM2M` publishes no `Principal`, because only `Authorize` publishes one, so a
+`RequireApplication()` mounted behind it answers 401 for every caller, valid M2M token
+included. Mount `Authorize` first whenever a type guard follows.
+
+```go
+f.Post("/v1/emissions/:id/approve",
+    auth.Authorize(applicationName, "emission", "approve"),
+    authMiddleware.RequireHuman(),      // 403 for a machine caller
+    emissionHandler.Approve)
+
+f.Post("/v1/operations/:id/resolution",
+    auth.Authorize(applicationName, "operation", "resolve"),
+    authMiddleware.RequireApplication(), // 403 for a human caller
+    operationHandler.Resolve)
+```
+
+### Authorization outside the chain
+
+When the resource or action is only known inside the handler, `Check` runs the same
+decision the middleware would, with the same derivation, decision cache, breaker and
+fail-closed rules:
+
+```go
+func (auth *AuthClient) Check(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error)
+```
+
+It returns:
+
+* `(true, 200, nil)` when authorized;
+* `(false, 403, nil)` on a plain authoritative denial from the authorization service —
+  a plain deny is an answer, not a failure;
+* `(false, status, err)` when the authorization service answers with a coded error
+  body;
+* `(false, 401, err)` on a local token failure: a missing or invalid token, an
+  unsupported token type, an `owner` or `sub` claim that is missing, empty or
+  whitespace-only;
+* `(false, 503, err)` whenever the authorization service is unavailable: a connection
+  refused or other transport error, retries exhausted, or an open breaker. A client
+  with `AUTH_REQUIRED` set that cannot authorize answers the same way, without
+  evaluating the token.
+
+The unavailable result stays fail-closed — never authorized — but remains
+distinguishable from an authoritative denial, including when `AUTH_RETRY_MAX` or
+`AUTH_BREAKER_ENABLED` is set. `Check` publishes no principal: the caller already
+holds the one `Authorize` published.
+
+`clientIP` is **caller-supplied** and reaches the authorization decision as-is, where
+it feeds the per-tenant IP allowlist described in
+[Client IP forwarding](#-client-ip-forwarding). Pass it empty, in which case it is
+omitted from the request body exactly as on the middleware path, or pass a value you
+resolved yourself through your own trusted-proxy configuration. Never pass Fiber's
+`c.IP()` raw: under a misconfigured proxy chain that value is the attacker-chosen
+`X-Forwarded-For` header, which lets a caller pick the address the allowlist matches
+it against.
+
+`Authorize` is unaffected by the 503 mapping: on the same outage it answers on the
+wire exactly what it always did — the fail-closed `403 Forbidden` once retry or the
+breaker absorbed the failure, `500 Internal Server Error` when neither is configured
+— since a route's caller has no use for the distinction `Check`'s caller needs.
 
 ## 📥 Example Request to Auth
 

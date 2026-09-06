@@ -62,6 +62,27 @@ type AuthClient struct {
 	// the inversion without a code change in consumers.
 	M2MInversionEnabled bool
 
+	// PrincipalRequiredWhenDisabled keeps Authorize demanding a bearer token that
+	// names a principal when Enabled is false: the token is extracted (401 when
+	// missing), the claims parsed exactly as in the enabled path, the subject derived
+	// (fail-closed on token type under M2MInversionEnabled), the Principal published,
+	// and ONLY the Access Manager round-trip is skipped. Default false preserves the
+	// historical pass-through. Required (AUTH_REQUIRED) still wins: it refuses with 503.
+	// The branch is taken only when Enabled is false: an Enabled client with no
+	// Address is an incomplete configuration and refuses with 503 instead, in both
+	// Authorize and Check.
+	//
+	// TRUST BOUNDARY: this is a DEVELOPMENT mode. No Access Manager round-trip happens
+	// on this branch, so nothing external vouches for the caller and the published
+	// identity is SELF-ASSERTED unless local verification is configured, either the
+	// AUTH_JWT_VERIFY_CERT / AUTH_JWT_VERIFY_CERT_PATH PEM or a JWKS source wired with
+	// WithKeySource. Because the branch runs the SAME extractClaims as the enabled
+	// path, configuring keys makes it refuse an invalid signature with 401 here too;
+	// with no keys the token is parsed unverified, so any caller able to reach the
+	// route can name any principal it likes. Do not treat a principal published by an
+	// unverified client as an authenticated caller on a network you do not control.
+	PrincipalRequiredWhenDisabled bool
+
 	// Required, when true, makes the middleware fail closed: if auth is disabled
 	// or misconfigured (!Enabled || Address == ""), every protected route refuses
 	// to serve (HTTP 503 / gRPC Unavailable) instead of passing through with
@@ -112,6 +133,11 @@ type AuthClient struct {
 	// verifyIssuer, when non-empty, pins the accepted token "iss" claim during local
 	// verification. Read once from AUTH_JWT_ISSUER; inert when verifyKeys is empty.
 	verifyIssuer string
+	// staticVerificationConfigured records that a PEM source was explicitly set at
+	// construction. If loading that source failed, verifyKeys is empty; the normal
+	// authorizing path may still use Access Manager as its trust anchor, but the
+	// no-round-trip path must refuse rather than trust self-asserted claims.
+	staticVerificationConfigured bool
 
 	// source, when non-nil, supplies verification keys dynamically from a JWKS-backed
 	// KeySource — the SAME dynamic path the M2M gate uses (serve-stale cache + forced
@@ -296,6 +322,8 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 	l := resolveLogger(logger)
 
 	verifyKeys, verifyIssuer := loadVerification(l)
+	staticVerificationConfigured := strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT")) != "" ||
+		strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT_PATH")) != ""
 
 	// AUTH_M2M_PRODUCT_FORWARD_ENABLED is read with LookupEnv, not Getenv, so that
 	// "unset" and an explicit "false" are two distinguishable states. Both resolve
@@ -312,20 +340,22 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 	// Build the client once with all env-derived config, then return it from every
 	// path below; the health check only logs, it never changes these fields.
 	c := &AuthClient{
-		Address:             address,
-		Enabled:             enabled,
-		Logger:              l,
-		ForwardM2MProduct:   forwardM2MProduct,
-		M2MInversionEnabled: os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true",
-		Required:            os.Getenv("AUTH_REQUIRED") == "true",
-		timeout:             parseAuthTimeout(),
-		cache:               newDecisionCacheFromEnv(),
-		breaker:             newBreakerFromEnv(),
-		retryMax:            parseRetryMax(),
-		verifyKeys:          verifyKeys,
-		verifyIssuer:        verifyIssuer,
-		trustedProxies:      trustedProxies,
-		noProxiesLine:       noProxiesLine,
+		Address:                       address,
+		Enabled:                       enabled,
+		Logger:                        l,
+		ForwardM2MProduct:             forwardM2MProduct,
+		M2MInversionEnabled:           os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true",
+		Required:                      os.Getenv("AUTH_REQUIRED") == "true",
+		PrincipalRequiredWhenDisabled: os.Getenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED") == "true",
+		timeout:                       parseAuthTimeout(),
+		cache:                         newDecisionCacheFromEnv(),
+		breaker:                       newBreakerFromEnv(),
+		retryMax:                      parseRetryMax(),
+		verifyKeys:                    verifyKeys,
+		verifyIssuer:                  verifyIssuer,
+		staticVerificationConfigured:  staticVerificationConfigured,
+		trustedProxies:                trustedProxies,
+		noProxiesLine:                 noProxiesLine,
 	}
 
 	if !enabled || address == "" {
@@ -386,6 +416,14 @@ func (auth *AuthClient) canAuthorize() bool {
 // authorize (disabled or no address). This is the fail-closed switch from #107.
 func (auth *AuthClient) mustRefuse() bool {
 	return auth != nil && auth.Required && !auth.canAuthorize()
+}
+
+// principalRequiredWhenDisabled reports whether a client that cannot authorize must
+// still demand a bearer token naming a principal instead of passing the request
+// through. A nil receiver is safe and reports false, so a nil client keeps the
+// historical pass-through.
+func (auth *AuthClient) principalRequiredWhenDisabled() bool {
+	return auth != nil && auth.PrincipalRequiredWhenDisabled
 }
 
 // warnMissingTrustedProxies raises the missing-trusted-proxies degradation at
@@ -451,7 +489,17 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 		}
 
 		if !auth.canAuthorize() {
-			return c.Next()
+			if !auth.principalRequiredWhenDisabled() {
+				return c.Next()
+			}
+
+			if auth.Enabled {
+				// Enabled but addressless is an incomplete configuration, not a
+				// deliberate "auth off": it never earns the no-round-trip branch.
+				return c.Status(http.StatusServiceUnavailable).SendString("Service Unavailable")
+			}
+
+			return auth.authorizeWithoutRoundTrip(c, product)
 		}
 
 		ctx, span := tracer.Start(ctx, "lib_auth.authorize")
@@ -487,7 +535,9 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 		// would forward the ingress address and could produce a false ALLOW.
 		clientIP := auth.resolveClientIP(c)
 
-		if authorized, statusCode, err := auth.checkAuthorization(ctx, product, resource, action, accessToken, clientIP); err != nil {
+		resolution, principal := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+
+		if authorized, statusCode, err := resolution.legacyResult(); err != nil {
 			var commonsErr commons.Response
 			if errors.As(err, &commonsErr) {
 				span.End()
@@ -499,6 +549,8 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 
 			return c.Status(statusCode).SendString(http.StatusText(statusCode))
 		} else if authorized {
+			publishPrincipal(c, span, principal)
+
 			span.End()
 
 			return c.Next()
@@ -508,6 +560,137 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 
 		return c.Status(http.StatusForbidden).SendString("Forbidden")
 	}
+}
+
+// errAuthorizationUnavailable is the error Check reports alongside 503 when
+// Required is set but the client cannot authorize. Authorize answers the same
+// condition with a bare 503 body; Check has no response to write, so it needs a
+// value to hand its caller.
+var errAuthorizationUnavailable = errors.New("authorization is required but the authorization service is disabled or misconfigured")
+
+// Check evaluates (product, resource, action) for the bearer token outside the
+// middleware chain, with the same derivation, decision cache, breaker and
+// fail-closed rules Authorize applies. It returns:
+//
+//   - (true, 200, nil) when authorized;
+//   - (false, 403, nil) on a plain authoritative denial from the Access Manager;
+//   - (false, status, err) when the Access Manager answers with a coded error body;
+//   - (false, 401, err) on a local token failure — a missing or invalid token, an
+//     unsupported token type, a missing owner or sub claim;
+//   - (false, 503, err) whenever the authorization service is unavailable: a
+//     connection refused or other transport error, retries exhausted, or an open
+//     breaker.
+//
+// The unavailable result stays fail-closed but remains distinguishable from an
+// authoritative denial, including when retry or breaker support is enabled.
+//
+// It never publishes a Principal; the caller already has one from Authorize.
+//
+// clientIP is CALLER-SUPPLIED and reaches the Access Manager decision as-is, where
+// it feeds the per-tenant IP allowlist. Pass it empty, which omits the field exactly
+// as the middleware path does when no address is attributable, or pass a value you
+// resolved yourself through your own trusted-proxy configuration. Never pass Fiber's
+// c.IP() raw: under a misconfigured proxy chain that is the attacker-chosen
+// X-Forwarded-For header, which lets the caller choose the address the allowlist
+// matches it against.
+//
+// Authorize is unaffected by the 503 mapping: on the same outage it answers on the
+// wire exactly what it always did, since the caller of a Fiber route has no use for
+// the distinction Check's caller needs.
+func (auth *AuthClient) Check(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error) {
+	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
+
+	ctx, span := tracer.Start(ctx, "lib_auth.check")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("app.request.request_id", reqID),
+	)
+
+	if auth.mustRefuse() {
+		tracing.HandleSpanError(span, "Authorization required but unavailable", errAuthorizationUnavailable)
+
+		return false, http.StatusServiceUnavailable, errAuthorizationUnavailable
+	}
+
+	if !auth.canAuthorize() {
+		if !auth.principalRequiredWhenDisabled() {
+			return true, http.StatusOK, nil
+		}
+
+		if auth.Enabled {
+			// Enabled but addressless: incomplete configuration, same refusal as
+			// Authorize. The no-round-trip branch is for a deliberate "auth off" only.
+			tracing.HandleSpanError(span, "Authorization enabled without an address", errAuthorizationUnavailable)
+
+			return false, http.StatusServiceUnavailable, errAuthorizationUnavailable
+		}
+
+		// Mirror Authorize's disabled path: the token must still name a principal
+		// under the same rules, and ONLY the round-trip is skipped. The derived
+		// identity is discarded here — the caller already holds the one Authorize
+		// published on the request context.
+		if _, statusCode, err := auth.derivePrincipalWithoutRoundTrip(ctx, span, accessToken, product); err != nil {
+			return false, statusCode, err
+		}
+
+		return true, http.StatusOK, nil
+	}
+
+	resolution, _ := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+
+	authorized, statusCode, err := resolution.checkResult()
+	if err != nil {
+		return false, statusCode, err
+	}
+
+	if !authorized {
+		// A plain deny is an answer, not a failure: it carries no error, and it is
+		// reported as the 403 Authorize would have written.
+		return false, http.StatusForbidden, nil
+	}
+
+	return true, http.StatusOK, nil
+}
+
+// authorizeWithoutRoundTrip serves the PrincipalRequiredWhenDisabled path: the client
+// cannot authorize, so the Access Manager is never called, but the bearer token is
+// still demanded, parsed and derived with the SAME rules the enabled path applies and
+// the resulting Principal is published. A deployment running with auth off therefore
+// still refuses an anonymous request and a token it cannot make sense of, instead of
+// passing either through. The span is ended before c.Next() so it covers only the
+// derivation, matching the enabled path.
+func (auth *AuthClient) authorizeWithoutRoundTrip(c fiber.Ctx, product string) error {
+	ctx := c.Context()
+
+	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
+
+	ctx, span := tracer.Start(ctx, "lib_auth.authorize")
+
+	span.SetAttributes(
+		attribute.String("app.request.request_id", reqID),
+	)
+
+	accessToken := libHTTP.ExtractTokenFromHeader(c)
+
+	if commons.IsNilOrEmpty(&accessToken) {
+		span.End()
+
+		return c.Status(http.StatusUnauthorized).SendString("Missing Token")
+	}
+
+	principal, statusCode, err := auth.derivePrincipalWithoutRoundTrip(ctx, span, accessToken, product)
+	if err != nil {
+		span.End()
+
+		return c.Status(statusCode).SendString(http.StatusText(statusCode))
+	}
+
+	publishPrincipal(c, span, principal)
+
+	span.End()
+
+	return c.Next()
 }
 
 // deriveSubject builds the authorization subject from the token claims based on
@@ -539,7 +722,7 @@ func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, clai
 	switch userType {
 	case normalUser:
 		owner, _ := claims["owner"].(string)
-		if owner == "" {
+		if strings.TrimSpace(owner) == "" {
 			logErrorf(ctx, auth.Logger, "Missing owner claim in token")
 
 			err := errors.New("missing owner claim in token")
@@ -550,7 +733,7 @@ func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, clai
 		}
 
 		userID, _ := claims["sub"].(string)
-		if userID == "" {
+		if strings.TrimSpace(userID) == "" {
 			logErrorf(ctx, auth.Logger, "Missing sub claim in token")
 
 			err := errors.New("missing sub claim in token")
@@ -563,7 +746,7 @@ func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, clai
 		return fmt.Sprintf("%s/%s", owner, userID), http.StatusOK, nil
 	case application:
 		sub, _ := claims["sub"].(string)
-		if sub == "" {
+		if strings.TrimSpace(sub) == "" {
 			logErrorf(ctx, auth.Logger, "Missing sub claim in application token")
 
 			err := errors.New("missing sub claim in token")
@@ -605,6 +788,20 @@ func shouldForwardProduct(userType, product string, forwardM2MProduct bool) bool
 // the pre-IP behavior for every deployed access-manager. The auth service
 // interprets the IP; this layer never parses or validates it.
 func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error) {
+	resolution, _ := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+
+	return resolution.legacyResult()
+}
+
+// checkAuthorizationWithPrincipal is checkAuthorization plus the caller identity it
+// derived on the way to the decision, so the Fiber middleware can publish it on the
+// request context. The identity is built BEFORE the decision cache is consulted, so
+// a cache hit carries the same principal a round-trip would have.
+//
+// It returns the full authzResolution rather than the legacy triple: callers that
+// answer on the wire read legacyResult and behave exactly as before, while Check
+// reads checkResult and can tell an outage from a denial.
+func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, product, resource, action, accessToken, clientIP string) (authzResolution, Principal) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -620,17 +817,14 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
 	defer cancel()
 
-	claims, statusCode, err := auth.extractClaims(ctx, span, accessToken)
+	principal, statusCode, err := auth.derivePrincipal(ctx, span, accessToken, product)
 	if err != nil {
-		return false, statusCode, err
+		// A local token failure: the request never reaches the Access Manager, so
+		// this is never an outage.
+		return authzResolution{statusCode: statusCode, err: err}, Principal{}
 	}
 
-	userType, _ := claims["type"].(string)
-
-	sub, statusCode, err := auth.deriveSubject(ctx, span, claims, userType, product)
-	if err != nil {
-		return false, statusCode, err
-	}
+	userType, sub := principal.Type, principal.Subject
 
 	requestBody := map[string]string{
 		"sub":      sub,
@@ -652,14 +846,18 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		requestBody["clientIp"] = clientIP
 	}
 
-	// The span payload omits clientIp: a caller IP is personal data, and traces
-	// are retained longer and read more widely than authz logs. Same split as
-	// getApplicationToken, which keeps the client secret out of the span while
-	// the wire body carries it. The wire body below is unchanged.
+	// The span payload omits sub and clientIp: the caller's subject and its IP are
+	// personal data, and traces are retained longer and read more widely than authz
+	// logs. The ONLY identity a span carries for this request is the principal type
+	// (app.auth.principal.type); the request id correlates the rest with the
+	// service's own audit trail. Same split as getApplicationToken, which keeps the
+	// client secret out of the span while the wire body carries it. The wire body
+	// below is unchanged — the Access Manager still receives sub, and must, since it
+	// is the subject of the decision.
 	tracePayload := make(map[string]string, len(requestBody))
 
 	for k, v := range requestBody {
-		if k == "clientIp" {
+		if k == "sub" || k == "clientIp" {
 			continue
 		}
 
@@ -670,7 +868,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 	if err != nil {
 		tracing.HandleSpanError(span, "Failed to convert request body to JSON string", err)
 
-		return false, http.StatusInternalServerError, err
+		return authzResolution{statusCode: http.StatusInternalServerError, err: err}, Principal{}
 	}
 
 	requestBodyJSON, err := json.Marshal(requestBody)
@@ -679,7 +877,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 
 		tracing.HandleSpanError(span, "Failed to marshal request body", err)
 
-		return false, http.StatusInternalServerError, err
+		return authzResolution{statusCode: http.StatusInternalServerError, err: err}, Principal{}
 	}
 
 	// Cache key = the authz request inputs PLUS a digest of the bearer token they were
@@ -704,11 +902,11 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 	// serving a stale grant).
 	if auth.cache != nil {
 		if authorized, hit := auth.cache.get(key); hit {
-			return authorized, http.StatusOK, nil
+			return authzResolution{authorized: authorized, statusCode: http.StatusOK}, principal
 		}
 	}
 
-	return auth.resolveAuthz(ctx, span, accessToken, requestBodyJSON, key)
+	return auth.resolveAuthz(ctx, span, accessToken, requestBodyJSON, key), principal
 }
 
 // GetApplicationToken sends a POST request to the authorization service to get a token for the application.

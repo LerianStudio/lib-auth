@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/sony/gobreaker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -1225,6 +1227,8 @@ func captureAuthServer(t *testing.T, capturedBody *map[string]string) *httptest.
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(capturedBody); err != nil {
 			t.Errorf("mock server: failed to decode request body: %v", err)
+
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1484,5 +1488,1142 @@ func TestNewAuthClient_ReadsM2MInversionFlag(t *testing.T) {
 
 		client := NewAuthClient("", false, logger)
 		assert.False(t, client.M2MInversionEnabled)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Authorize - Principal publication
+// ---------------------------------------------------------------------------
+
+// newPrincipalEchoApp builds a Fiber app whose single route is gated by Authorize
+// and echoes the published Principal back through response headers. The handler
+// reads it from the framework-agnostic Go context (c.Context()), the same path
+// humafiber-derived handlers rely on, and reports whether it ran at all.
+func newPrincipalEchoApp(auth *AuthClient, product string, reached *atomic.Bool) *fiber.App {
+	app := fiber.New()
+
+	app.Get("/x", auth.Authorize(product, "resource", "get"), func(c fiber.Ctx) error {
+		if reached != nil {
+			reached.Store(true)
+		}
+
+		p, ok := PrincipalFromContext(c.Context())
+
+		c.Set("X-P-Found", strconv.FormatBool(ok))
+		c.Set("X-P-Type", p.Type)
+		c.Set("X-P-Owner", p.Owner)
+		c.Set("X-P-Sub", p.Sub)
+		c.Set("X-P-Subject", p.Subject)
+		c.Set("X-P-Client-Id", p.ClientID)
+
+		return c.SendStatus(http.StatusOK)
+	})
+
+	return app
+}
+
+func authorizedRequest(t *testing.T, app *fiber.App, token string) *http.Response {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+
+	return resp
+}
+
+func TestAuthorize_PublishesPrincipal(t *testing.T) {
+	t.Parallel()
+
+	t.Run("normal_user_carries_owner_sub_and_derived_subject", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+			"sub":   "user123",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "true", resp.Header.Get("X-P-Found"))
+		assert.Equal(t, "normal-user", resp.Header.Get("X-P-Type"))
+		assert.Equal(t, "acme-org", resp.Header.Get("X-P-Owner"))
+		assert.Equal(t, "user123", resp.Header.Get("X-P-Sub"))
+		assert.Equal(t, "acme-org/user123", resp.Header.Get("X-P-Subject"))
+	})
+
+	t.Run("application_under_inversion_carries_real_sub_and_azp", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, M2MInversionEnabled: true, Logger: &testLogger{}}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"sub":  "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc",
+			"azp":  "66bac70fbea746daa760",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "true", resp.Header.Get("X-P-Found"))
+		assert.Equal(t, "application", resp.Header.Get("X-P-Type"))
+		assert.Empty(t, resp.Header.Get("X-P-Owner"))
+		assert.Equal(t, "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc", resp.Header.Get("X-P-Sub"))
+		// For an application token the Access Manager subject IS the real sub.
+		assert.Equal(t, resp.Header.Get("X-P-Sub"), resp.Header.Get("X-P-Subject"))
+		assert.Equal(t, "66bac70fbea746daa760", resp.Header.Get("X-P-Client-Id"))
+	})
+
+	t.Run("decision_cache_hit_still_publishes", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			writeAuthorized(w, true)
+		})
+
+		auth := &AuthClient{
+			Address: server.URL,
+			Enabled: true,
+			Logger:  &testLogger{},
+			cache:   newDecisionCache(time.Minute),
+		}
+		app := newPrincipalEchoApp(auth, "midaz", nil)
+
+		token := createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+			"sub":   "user123",
+		})
+
+		for i := range 2 {
+			resp := authorizedRequest(t, app, token)
+
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.Equal(t, "true", resp.Header.Get("X-P-Found"), "request %d must carry a principal", i+1)
+			assert.Equal(t, "acme-org/user123", resp.Header.Get("X-P-Subject"), "request %d", i+1)
+		}
+
+		assert.Equal(t, int64(1), hits.Load(), "the second request must be served from the decision cache")
+	})
+
+	t.Run("legacy_fabricated_role_reports_absent", func(t *testing.T) {
+		t.Parallel()
+
+		// Inversion OFF: a "service" token authorizes under the fabricated
+		// "admin/<product>-editor-role" and carries no real sub, so the request
+		// proceeds but no principal is identified.
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type": "service",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
+		assert.Empty(t, resp.Header.Get("X-P-Subject"))
+	})
+
+	t.Run("legacy_application_with_sub_still_reports_absent", func(t *testing.T) {
+		t.Parallel()
+
+		// Inversion OFF authorizes every non-human token under the fabricated
+		// product role. A sub claim present on the token does not change the subject
+		// of that decision, so it must not turn the fabricated role into a published
+		// application identity.
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type": application,
+			"sub":  "admin/robot",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
+		assert.Empty(t, resp.Header.Get("X-P-Subject"))
+	})
+
+	t.Run("denied_request_publishes_nothing", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, false, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+			"sub":   "user123",
+		}))
+
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+		assert.False(t, reached.Load(), "a denied request must never reach the handler, so nothing is published")
+	})
+}
+
+// TestAuthorize_WhitespaceOnlyIdentityClaimsAreRefused pins the fail-closed half of
+// the identity contract on the authorizing path: a claim made only of whitespace
+// names nobody, so it is refused with 401 BEFORE the round-trip. The hit count is
+// the load-bearing assertion — the Access Manager is never asked to decide for a
+// caller that has no name, and no principal reaches the handler.
+func TestAuthorize_WhitespaceOnlyIdentityClaimsAreRefused(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		claims jwt.MapClaims
+	}{
+		{
+			name:   "normal_user_blank_owner",
+			claims: jwt.MapClaims{"type": "normal-user", "owner": "  ", "sub": "user123"},
+		},
+		{
+			name:   "normal_user_blank_sub",
+			claims: jwt.MapClaims{"type": "normal-user", "owner": "acme-org", "sub": "  "},
+		},
+		{
+			name:   "application_blank_sub",
+			claims: jwt.MapClaims{"type": "application", "sub": " \t "},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+				writeAuthorized(w, true)
+			})
+
+			auth := &AuthClient{
+				Address:             server.URL,
+				Enabled:             true,
+				M2MInversionEnabled: true,
+				Logger:              &testLogger{},
+			}
+
+			var reached atomic.Bool
+
+			resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(tt.claims))
+
+			assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.False(t, reached.Load(), "a nameless caller must never reach the handler")
+			assert.Empty(t, resp.Header.Get("X-P-Found"), "no principal may be published")
+			assert.Equal(t, int64(0), hits.Load(), "the authorization service must never be asked to decide")
+		})
+	}
+}
+
+// TestAuthorize_TracesPrincipalNotToken proves the telemetry rule for the whole
+// authorization path: across EVERY span this package exports, the only identity
+// attribute is app.auth.principal.type, and neither the bearer token nor any caller
+// identifier — owner, subject, client id — reaches an attribute key or value. The
+// span copy of the authorization payload is redacted for that reason; the body sent
+// to the authorization service still carries the subject, and the round-trip subtest
+// captures it to prove only the telemetry copy changed.
+func TestAuthorize_TracesPrincipalNotToken(t *testing.T) {
+	t.Parallel()
+
+	// Distinct sentinels, so an assertion that finds one names exactly which claim
+	// leaked. None appears verbatim in the token, whose claims are base64-encoded.
+	const (
+		sentinelOwner    = "sentinel-owner-77f1"
+		sentinelSubject  = "sentinel-subject-91ab"
+		sentinelClientID = "sentinel-client-3c2d"
+	)
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": sentinelOwner,
+		"sub":   sentinelSubject,
+		"azp":   sentinelClientID,
+	})
+
+	assertOnlyPrincipalTypeIsRecorded := func(t *testing.T, spans tracetest.SpanStubs) {
+		t.Helper()
+
+		require.NotEmpty(t, spans, "expected the authorization spans to be exported")
+
+		var (
+			sawPrincipalType bool
+			identityKeys     []string
+		)
+
+		for _, s := range spans {
+			for _, attr := range s.Attributes {
+				key := string(attr.Key)
+				value := attr.Value.AsString()
+
+				assert.NotContains(t, value, token,
+					"span %q leaks the access token in attribute %q", s.Name, key)
+
+				for _, sentinel := range []string{sentinelOwner, sentinelSubject, sentinelClientID} {
+					assert.NotContains(t, key, sentinel,
+						"span %q leaks a caller identifier in the key %q", s.Name, key)
+					assert.NotContains(t, value, sentinel,
+						"span %q leaks a caller identifier in attribute %q", s.Name, key)
+				}
+
+				if key == "app.auth.principal.type" {
+					sawPrincipalType = true
+
+					assert.Equal(t, "normal-user", value)
+
+					continue
+				}
+
+				if strings.HasPrefix(key, "app.auth.principal.") || strings.HasSuffix(key, ".sub") {
+					identityKeys = append(identityKeys, key)
+				}
+			}
+		}
+
+		assert.True(t, sawPrincipalType, "the principal type must be recorded")
+		assert.Empty(t, identityKeys,
+			"app.auth.principal.type must be the only identity attribute on any span")
+	}
+
+	newTracedApp := func(t *testing.T, auth *AuthClient) (*fiber.App, *tracetest.InMemoryExporter) {
+		t.Helper()
+
+		exporter := tracetest.NewInMemoryExporter()
+		tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+		t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+
+		app := fiber.New()
+		app.Use(func(c fiber.Ctx) error {
+			c.SetContext(observability.ContextWithTracer(c.Context(), tp.Tracer("test")))
+
+			return c.Next()
+		})
+		app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+			return c.SendStatus(http.StatusOK)
+		})
+
+		return app, exporter
+	}
+
+	call := func(t *testing.T, app *fiber.App) {
+		t.Helper()
+
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	t.Run("round_trip_redacts_the_span_copy_only", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedBody map[string]string
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+				t.Errorf("mock server: failed to decode request body: %v", err)
+
+				return
+			}
+
+			writeAuthorized(w, true)
+		}))
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		app, exporter := newTracedApp(t, auth)
+		call(t, app)
+
+		// The authorization service still decides on the subject: only the
+		// telemetry copy of the payload is redacted.
+		assert.Equal(t, sentinelOwner+"/"+sentinelSubject, capturedBody["sub"],
+			"the body sent to the authorization service must still carry the subject")
+
+		assertOnlyPrincipalTypeIsRecorded(t, exporter.GetSpans())
+	})
+
+	t.Run("cache_hit_carries_no_identity_either", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			writeAuthorized(w, true)
+		})
+
+		auth := &AuthClient{
+			Address: server.URL,
+			Enabled: true,
+			Logger:  &testLogger{},
+			cache:   newDecisionCache(time.Minute),
+		}
+
+		app, exporter := newTracedApp(t, auth)
+
+		call(t, app)
+		call(t, app)
+
+		require.Equal(t, int64(1), hits.Load(), "the second request must be served from the cache")
+
+		assertOnlyPrincipalTypeIsRecorded(t, exporter.GetSpans())
+	})
+
+	t.Run("principal_required_when_disabled_carries_no_identity_either", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		app, exporter := newTracedApp(t, auth)
+		call(t, app)
+
+		assertOnlyPrincipalTypeIsRecorded(t, exporter.GetSpans())
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Authorize - PrincipalRequiredWhenDisabled
+// ---------------------------------------------------------------------------
+
+// TestAuthorize_Disabled covers the branch taken when the client cannot authorize
+// (disabled or addressless). The default is the historical pass-through every
+// current consumer relies on; PrincipalRequiredWhenDisabled opts into demanding a
+// bearer token that names a principal, skipping ONLY the round-trip.
+func TestAuthorize_Disabled(t *testing.T) {
+	t.Parallel()
+
+	// unreachableServer stands in for the Access Manager and fails the test if the
+	// disabled path ever calls it. Address is set on the client so a wrongly-taken
+	// round-trip would reach a real endpoint instead of erroring on an empty URL.
+	unreachableServer := func(t *testing.T) (*httptest.Server, *atomic.Int64) {
+		t.Helper()
+
+		return countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			t.Error("the disabled path must not call the authorization service")
+			writeAuthorized(w, true)
+		})
+	}
+
+	t.Run("default_passes_through_without_a_token", func(t *testing.T) {
+		t.Parallel()
+
+		// This is the Midaz default: auth off, no opt-in, no Authorization header.
+		// The request reaches the handler and no principal is published.
+		auth := &AuthClient{Enabled: false, Logger: &testLogger{}}
+
+		var reached atomic.Bool
+
+		resp, err := newPrincipalEchoApp(auth, "midaz", &reached).
+			Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.True(t, reached.Load())
+		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
+	})
+
+	t.Run("nil_receiver_passes_through_without_a_token", func(t *testing.T) {
+		t.Parallel()
+
+		// A nil client is the historical "auth not wired" shape. Authorize keeps its
+		// pass-through instead of dereferencing the receiver: no panic, the request
+		// reaches the handler, and no principal is published.
+		var auth *AuthClient
+
+		var reached atomic.Bool
+
+		resp, err := newPrincipalEchoApp(auth, "midaz", &reached).
+			Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.True(t, reached.Load())
+		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
+	})
+
+	t.Run("required_when_disabled_rejects_a_missing_token", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp, err := newPrincipalEchoApp(auth, "midaz", &reached).
+			Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("required_when_disabled_fails_closed_on_token_type", func(t *testing.T) {
+		t.Parallel()
+
+		// Inversion ON: "service-account" is outside {normal-user, application} and
+		// is refused with 401 by the same rule the enabled path applies — with no
+		// authorization call made.
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type": "service-account",
+			"sub":  "admin/robot",
+		}))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("required_when_disabled_publishes_an_application_principal", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"sub":  "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc",
+			"azp":  "66bac70fbea746daa760",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "true", resp.Header.Get("X-P-Found"))
+		assert.Equal(t, "application", resp.Header.Get("X-P-Type"))
+		assert.Equal(t, "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc", resp.Header.Get("X-P-Subject"))
+		assert.Equal(t, "66bac70fbea746daa760", resp.Header.Get("X-P-Client-Id"))
+		assert.Equal(t, int64(0), hits.Load(), "the round-trip is the ONLY thing this path skips")
+	})
+
+	t.Run("required_when_disabled_rejects_legacy_fabrication_without_a_principal", func(t *testing.T) {
+		t.Parallel()
+
+		// Inversion OFF (the Midaz default) can derive a fabricated
+		// "admin/<product>-editor-role" without a real sub. With no Access Manager
+		// round-trip, that cannot satisfy the opt-in requirement for a named caller.
+		auth := &AuthClient{
+			Enabled:                       false,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		token := createTestJWT(jwt.MapClaims{"type": "service"})
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), token)
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Empty(t, resp.Header.Get("X-P-Found"))
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+		require.Error(t, err)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusUnauthorized, statusCode)
+	})
+
+	t.Run("required_when_disabled_rejects_legacy_fabrication_even_with_a_sub", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		token := createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"sub":  "admin/robot",
+		})
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), token)
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Empty(t, resp.Header.Get("X-P-Found"))
+	})
+
+	t.Run("required_wins_over_the_principal_requirement", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			Required:                      true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+			"sub":   "user123",
+		}))
+
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	})
+
+	t.Run("required_when_disabled_rejects_a_non_string_sub", func(t *testing.T) {
+		t.Parallel()
+
+		// A JSON number decodes to float64, never to a string, so the application
+		// branch of deriveSubject sees an empty sub and refuses with 401 by the
+		// SAME rule the enabled path applies. Nothing is published and the handler
+		// never runs, so a malformed claim can never reach one as an identity.
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"sub":  12345,
+		}))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("required_when_disabled_rejects_a_missing_owner", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type": "normal-user",
+			"sub":  "user123",
+		}))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("required_when_disabled_rejects_a_missing_sub", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+		}))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("required_when_disabled_rejects_a_whitespace_only_sub", func(t *testing.T) {
+		t.Parallel()
+
+		// A sub made only of whitespace names nobody, so this path refuses it with
+		// 401 by the SAME rule the enabled path applies — and, as everywhere here,
+		// with no authorization call made.
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"sub":  " \t ",
+		}))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Empty(t, resp.Header.Get("X-P-Found"), "no principal may be published")
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	// The next two pin the trust boundary the field's godoc describes: the disabled
+	// path runs the same extractClaims as the enabled one, so local verification is
+	// live here. Configure keys and a forged signature is refused with 401 even
+	// though no authorization call is made; without keys the token would be parsed
+	// unverified and the same forgery would be published as an identity.
+	t.Run("required_when_disabled_rejects_a_signature_from_another_key", func(t *testing.T) {
+		t.Parallel()
+
+		attackerKey, _ := newTestRSAKeyPEM(t)
+
+		_, trustedPEM := newTestRSAKeyPEM(t)
+
+		trustedKeys, err := parseRSAPublicKeys([]byte(trustedPEM))
+		require.NoError(t, err)
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			PrincipalRequiredWhenDisabled: true,
+			verifyKeys:                    trustedKeys,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached),
+			signRS256(t, attackerKey, normalUserClaims()))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+	})
+
+	t.Run("required_when_disabled_publishes_a_verified_principal", func(t *testing.T) {
+		t.Parallel()
+
+		key, pubPEM := newTestRSAKeyPEM(t)
+
+		trustedKeys, err := parseRSAPublicKeys([]byte(pubPEM))
+		require.NoError(t, err)
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			PrincipalRequiredWhenDisabled: true,
+			verifyKeys:                    trustedKeys,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached),
+			signRS256(t, key, normalUserClaims()))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.True(t, reached.Load())
+		assert.Equal(t, "true", resp.Header.Get("X-P-Found"))
+		assert.Equal(t, "normal-user", resp.Header.Get("X-P-Type"))
+		assert.Equal(t, "acme-org", resp.Header.Get("X-P-Owner"))
+		assert.Equal(t, "user-123", resp.Header.Get("X-P-Sub"))
+		assert.Equal(t, "acme-org/user-123", resp.Header.Get("X-P-Subject"))
+	})
+}
+
+func TestNewAuthClient_ReadsPrincipalRequiredWhenDisabledFlag(t *testing.T) {
+	t.Setenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED", "true")
+	assert.True(t, NewAuthClient("", false, &testLogger{}).PrincipalRequiredWhenDisabled)
+
+	t.Setenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED", "TRUE")
+	assert.False(t, NewAuthClient("", false, &testLogger{}).PrincipalRequiredWhenDisabled,
+		"only the exact string \"true\" opts in")
+
+	os.Unsetenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED")
+	assert.False(t, NewAuthClient("", false, &testLogger{}).PrincipalRequiredWhenDisabled,
+		"the default preserves the historical pass-through")
+}
+
+func TestAuthorize_EnabledWithoutAddressRefusesThePrincipalPath(t *testing.T) {
+	t.Parallel()
+
+	auth := &AuthClient{Address: "", Enabled: true, PrincipalRequiredWhenDisabled: true, Logger: &testLogger{}}
+	token := createTestJWT(normalUserClaims())
+
+	resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), token)
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode,
+		"enabled but addressless is an incomplete configuration, never the no-round-trip branch")
+	assert.Empty(t, resp.Header.Get("X-P-Found"))
+
+	authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+}
+
+func TestAuthorize_DisabledRefusesWhenConfiguredVerificationCannotLoad(t *testing.T) {
+	t.Setenv("AUTH_JWT_VERIFY_CERT", "not a PEM")
+	t.Setenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED", "true")
+
+	auth := NewAuthClient("", false, &testLogger{})
+	resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(normalUserClaims()))
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get("X-P-Found"))
+
+	authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", createTestJWT(normalUserClaims()), "")
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+}
+
+// ---------------------------------------------------------------------------
+// Check - authorization outside the middleware chain
+// ---------------------------------------------------------------------------
+
+func TestCheck(t *testing.T) {
+	t.Parallel()
+
+	normalUserToken := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	t.Run("authorized", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
+		require.NoError(t, err)
+		assert.True(t, authorized)
+		assert.Equal(t, http.StatusOK, statusCode)
+	})
+
+	t.Run("nil_receiver_reports_authorized", func(t *testing.T) {
+		t.Parallel()
+
+		// A nil client keeps the unavailable-client pass-through result Authorize has
+		// always had, without dereferencing the receiver.
+		var auth *AuthClient
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
+		require.NoError(t, err)
+		assert.True(t, authorized)
+		assert.Equal(t, http.StatusOK, statusCode)
+	})
+
+	t.Run("denied_is_403_without_an_error", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, false, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
+		require.NoError(t, err, "a plain deny is an answer, not a failure")
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusForbidden, statusCode)
+	})
+
+	t.Run("unusable_token_is_401_with_an_error", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			writeAuthorized(w, true)
+		})
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, M2MInversionEnabled: true, Logger: &testLogger{}}
+
+		token := createTestJWT(jwt.MapClaims{"type": "application"}) // no sub
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+		require.Error(t, err)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusUnauthorized, statusCode)
+		assert.Equal(t, int64(0), hits.Load(), "an underivable token never reaches the authorization service")
+	})
+
+	t.Run("disabled_allows_without_calling_out", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			t.Error("a disabled client must not call the authorization service")
+			writeAuthorized(w, true)
+		})
+
+		auth := &AuthClient{Address: server.URL, Enabled: false, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", "", "")
+		require.NoError(t, err)
+		assert.True(t, authorized)
+		assert.Equal(t, http.StatusOK, statusCode)
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("disabled_with_principal_required_still_validates_the_token", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
+		require.NoError(t, err)
+		assert.True(t, authorized)
+		assert.Equal(t, http.StatusOK, statusCode)
+
+		// Same client, a token whose type it refuses: 401, not a silent allow.
+		bad := createTestJWT(jwt.MapClaims{"type": "service-account", "sub": "admin/robot"})
+
+		authorized, statusCode, err = auth.Check(context.Background(), "midaz", "resource", "get", bad, "")
+		require.Error(t, err)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusUnauthorized, statusCode)
+	})
+
+	t.Run("required_and_disabled_refuses_with_503", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{Enabled: false, Required: true, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
+		require.Error(t, err)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+	})
+}
+
+// TestCheck_SendsTheSameBodyAsAuthorize pins the two entry points to one wire
+// contract: for the same token, product, resource and action the authorization
+// service must not be able to tell which one asked.
+func TestCheck_SendsTheSameBodyAsAuthorize(t *testing.T) {
+	t.Parallel()
+
+	capture := func(t *testing.T) (*httptest.Server, *[]map[string]string) {
+		t.Helper()
+
+		var bodies []map[string]string
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]string
+
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("mock server: failed to decode request body: %v", err)
+
+				return
+			}
+
+			bodies = append(bodies, body)
+			writeAuthorized(w, true)
+		}))
+		t.Cleanup(server.Close)
+
+		return server, &bodies
+	}
+
+	server, bodies := capture(t)
+
+	auth := &AuthClient{Address: server.URL, Enabled: true, M2MInversionEnabled: true, Logger: &testLogger{}}
+
+	token := createTestJWT(jwt.MapClaims{
+		"type": "application",
+		"sub":  "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc",
+		"azp":  "66bac70fbea746daa760",
+	})
+
+	app := fiber.New()
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	authorized, _, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+	require.NoError(t, err)
+	assert.True(t, authorized)
+
+	require.Len(t, *bodies, 2)
+	assert.Equal(t, (*bodies)[0], (*bodies)[1])
+}
+
+// ---------------------------------------------------------------------------
+// Check - authorization-service outages are 503, never a denial (FC-4)
+// ---------------------------------------------------------------------------
+
+// authorizeWireAnswer drives Authorize on the given client through a real Fiber app
+// and returns the status and body it wrote. Every outage subtest below holds the
+// new 503 Check reports against this, to prove the middleware path still answers on
+// the wire exactly what it answered before the distinction existed.
+func authorizeWireAnswer(t *testing.T, auth *AuthClient, token string) (int, string) {
+	t.Helper()
+
+	app := fiber.New()
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+		return c.SendString("reached handler")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	// The retry subtest outlives Fiber's 1s default test deadline.
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second, FailOnTimeout: true})
+	require.NoError(t, err)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	return resp.StatusCode, string(body)
+}
+
+func TestCheck_AuthorizationServiceUnavailableIs503(t *testing.T) {
+	t.Parallel()
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	t.Run("connection_refused_without_retry_or_breaker", func(t *testing.T) {
+		t.Parallel()
+
+		// A server closed before use: nobody is listening on its address.
+		server := mockAuthServer(t, true, http.StatusOK)
+		server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+		require.Error(t, err)
+		assert.False(t, authorized, "an unreachable authorization service must stay fail-closed")
+		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+		assert.Contains(t, err.Error(), "failed to make request")
+
+		// Authorize is unchanged: a transport error with no resilience layer to
+		// absorb it is still the internal error it always was.
+		status, body := authorizeWireAnswer(t, auth, token)
+		assert.Equal(t, http.StatusInternalServerError, status)
+		assert.Equal(t, http.StatusText(http.StatusInternalServerError), body)
+	})
+
+	t.Run("retries_exhausted", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+
+		auth := &AuthClient{
+			Address:  server.URL,
+			Enabled:  true,
+			Logger:   &testLogger{},
+			timeout:  5 * time.Second,
+			retryMax: 1,
+		}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+		require.Error(t, err)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+		assert.Equal(t, int64(2), hits.Load(), "the initial attempt plus one retry must both have been made")
+
+		// Authorize is unchanged: an absorbed outage is still the fail-closed deny.
+		status, body := authorizeWireAnswer(t, auth, token)
+		assert.Equal(t, http.StatusForbidden, status)
+		assert.Equal(t, "Forbidden", body)
+	})
+
+	t.Run("breaker_open", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+
+		auth := &AuthClient{
+			Address: server.URL,
+			Enabled: true,
+			Logger:  &testLogger{},
+			breaker: newAuthBreaker(2, time.Minute),
+		}
+
+		// Two consecutive transient failures trip the breaker.
+		for i := 0; i < 2; i++ {
+			_, _, err := auth.checkAuthorization(context.Background(), "midaz", "resource", "get", token, "")
+			require.NoError(t, err, "an absorbed outage denies without surfacing an error on the legacy path")
+		}
+
+		require.Equal(t, int64(2), hits.Load())
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+		require.ErrorIs(t, err, gobreaker.ErrOpenState)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+
+		// Authorize is unchanged: an open breaker is still the fail-closed deny.
+		status, body := authorizeWireAnswer(t, auth, token)
+		assert.Equal(t, http.StatusForbidden, status)
+		assert.Equal(t, "Forbidden", body)
+
+		assert.Equal(t, int64(2), hits.Load(), "an open breaker must short-circuit, not reach the authz service")
 	})
 }
