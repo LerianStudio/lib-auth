@@ -573,8 +573,8 @@ var errAuthorizationUnavailable = errors.New("authorization is required but the 
 // fail-closed rules Authorize applies. It returns:
 //
 //   - (true, 200, nil) when authorized;
-//   - (false, 403, nil) on an authoritative denial from the Access Manager, or the
-//     status the Access Manager refused with when it answered with a coded body;
+//   - (false, 403, nil) on a plain authoritative denial from the Access Manager;
+//   - (false, status, err) when the Access Manager answers with a coded error body;
 //   - (false, 401, err) on a local token failure — a missing or invalid token, an
 //     unsupported token type, a missing owner or sub claim;
 //   - (false, 503, err) whenever the authorization service is unavailable: a

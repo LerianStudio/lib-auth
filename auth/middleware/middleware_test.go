@@ -1760,7 +1760,12 @@ func TestAuthorize_TracesPrincipalNotToken(t *testing.T) {
 		var capturedBody map[string]string
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+			if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+				t.Errorf("mock server: failed to decode request body: %v", err)
+
+				return
+			}
+
 			writeAuthorized(w, true)
 		}))
 		defer server.Close()

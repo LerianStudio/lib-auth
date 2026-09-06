@@ -119,11 +119,19 @@ func (auth *AuthClient) resolveAuthz(ctx context.Context, span trace.Span, acces
 		return authzResolution{statusCode: outcome.statusCode, err: outcome.authErr, unavailableErr: outcome.transientErr}
 	}
 
+	if outcome.transientErr != nil {
+		return authzResolution{
+			authorized:     outcome.authorized,
+			statusCode:     outcome.statusCode,
+			unavailableErr: outcome.transientErr,
+		}
+	}
+
 	if auth.cache != nil {
 		auth.cache.set(key, outcome.authorized)
 	}
 
-	return authzResolution{authorized: outcome.authorized, statusCode: outcome.statusCode, unavailableErr: outcome.transientErr}
+	return authzResolution{authorized: outcome.authorized, statusCode: outcome.statusCode}
 }
 
 // invokeAuthz runs the authorization call under the resilience layers. Composition
