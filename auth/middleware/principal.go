@@ -53,6 +53,7 @@ func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 	owner, _ := claims["owner"].(string)
 	sub, _ := claims["sub"].(string)
 	clientID, _ := claims["azp"].(string)
+
 	if userType == application {
 		owner = ""
 	}
