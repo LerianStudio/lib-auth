@@ -62,6 +62,14 @@ type AuthClient struct {
 	// the inversion without a code change in consumers.
 	M2MInversionEnabled bool
 
+	// PrincipalRequiredWhenDisabled keeps Authorize demanding a bearer token that
+	// names a principal when Enabled is false: the token is extracted (401 when
+	// missing), the claims parsed exactly as in the enabled path, the subject derived
+	// (fail-closed on token type under M2MInversionEnabled), the Principal published,
+	// and ONLY the Access Manager round-trip is skipped. Default false preserves the
+	// historical pass-through. Required (AUTH_REQUIRED) still wins: it refuses with 503.
+	PrincipalRequiredWhenDisabled bool
+
 	// Required, when true, makes the middleware fail closed: if auth is disabled
 	// or misconfigured (!Enabled || Address == ""), every protected route refuses
 	// to serve (HTTP 503 / gRPC Unavailable) instead of passing through with
@@ -312,20 +320,21 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 	// Build the client once with all env-derived config, then return it from every
 	// path below; the health check only logs, it never changes these fields.
 	c := &AuthClient{
-		Address:             address,
-		Enabled:             enabled,
-		Logger:              l,
-		ForwardM2MProduct:   forwardM2MProduct,
-		M2MInversionEnabled: os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true",
-		Required:            os.Getenv("AUTH_REQUIRED") == "true",
-		timeout:             parseAuthTimeout(),
-		cache:               newDecisionCacheFromEnv(),
-		breaker:             newBreakerFromEnv(),
-		retryMax:            parseRetryMax(),
-		verifyKeys:          verifyKeys,
-		verifyIssuer:        verifyIssuer,
-		trustedProxies:      trustedProxies,
-		noProxiesLine:       noProxiesLine,
+		Address:                       address,
+		Enabled:                       enabled,
+		Logger:                        l,
+		ForwardM2MProduct:             forwardM2MProduct,
+		M2MInversionEnabled:           os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true",
+		Required:                      os.Getenv("AUTH_REQUIRED") == "true",
+		PrincipalRequiredWhenDisabled: os.Getenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED") == "true",
+		timeout:                       parseAuthTimeout(),
+		cache:                         newDecisionCacheFromEnv(),
+		breaker:                       newBreakerFromEnv(),
+		retryMax:                      parseRetryMax(),
+		verifyKeys:                    verifyKeys,
+		verifyIssuer:                  verifyIssuer,
+		trustedProxies:                trustedProxies,
+		noProxiesLine:                 noProxiesLine,
 	}
 
 	if !enabled || address == "" {
@@ -386,6 +395,14 @@ func (auth *AuthClient) canAuthorize() bool {
 // authorize (disabled or no address). This is the fail-closed switch from #107.
 func (auth *AuthClient) mustRefuse() bool {
 	return auth != nil && auth.Required && !auth.canAuthorize()
+}
+
+// principalRequiredWhenDisabled reports whether a client that cannot authorize must
+// still demand a bearer token naming a principal instead of passing the request
+// through. A nil receiver is safe and reports false, so a nil client keeps the
+// historical pass-through.
+func (auth *AuthClient) principalRequiredWhenDisabled() bool {
+	return auth != nil && auth.PrincipalRequiredWhenDisabled
 }
 
 // warnMissingTrustedProxies raises the missing-trusted-proxies degradation at
@@ -451,7 +468,11 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 		}
 
 		if !auth.canAuthorize() {
-			return c.Next()
+			if !auth.principalRequiredWhenDisabled() {
+				return c.Next()
+			}
+
+			return auth.authorizeWithoutRoundTrip(c, product)
 		}
 
 		ctx, span := tracer.Start(ctx, "lib_auth.authorize")
@@ -510,6 +531,46 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 
 		return c.Status(http.StatusForbidden).SendString("Forbidden")
 	}
+}
+
+// authorizeWithoutRoundTrip serves the PrincipalRequiredWhenDisabled path: the client
+// cannot authorize, so the Access Manager is never called, but the bearer token is
+// still demanded, parsed and derived with the SAME rules the enabled path applies and
+// the resulting Principal is published. A deployment running with auth off therefore
+// still refuses an anonymous request and a token it cannot make sense of, instead of
+// passing either through. The span is ended before c.Next() so it covers only the
+// derivation, matching the enabled path.
+func (auth *AuthClient) authorizeWithoutRoundTrip(c fiber.Ctx, product string) error {
+	ctx := c.Context()
+
+	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
+
+	ctx, span := tracer.Start(ctx, "lib_auth.authorize")
+
+	span.SetAttributes(
+		attribute.String("app.request.request_id", reqID),
+	)
+
+	accessToken := libHTTP.ExtractTokenFromHeader(c)
+
+	if commons.IsNilOrEmpty(&accessToken) {
+		span.End()
+
+		return c.Status(http.StatusUnauthorized).SendString("Missing Token")
+	}
+
+	principal, statusCode, err := auth.derivePrincipal(ctx, span, accessToken, product)
+	if err != nil {
+		span.End()
+
+		return c.Status(statusCode).SendString(http.StatusText(statusCode))
+	}
+
+	publishPrincipal(c, span, principal)
+
+	span.End()
+
+	return c.Next()
 }
 
 // deriveSubject builds the authorization subject from the token claims based on

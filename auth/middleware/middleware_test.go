@@ -1707,3 +1707,178 @@ func TestAuthorize_TracesPrincipalNotToken(t *testing.T) {
 	assert.Equal(t, "normal-user", attrs["app.auth.principal.type"])
 	assert.Equal(t, "acme-org/user123", attrs["app.auth.principal.subject"])
 }
+
+// ---------------------------------------------------------------------------
+// Authorize - PrincipalRequiredWhenDisabled
+// ---------------------------------------------------------------------------
+
+// TestAuthorize_Disabled covers the branch taken when the client cannot authorize
+// (disabled or addressless). The default is the historical pass-through every
+// current consumer relies on; PrincipalRequiredWhenDisabled opts into demanding a
+// bearer token that names a principal, skipping ONLY the round-trip.
+func TestAuthorize_Disabled(t *testing.T) {
+	t.Parallel()
+
+	// unreachableServer stands in for the Access Manager and fails the test if the
+	// disabled path ever calls it. Address is set on the client so a wrongly-taken
+	// round-trip would reach a real endpoint instead of erroring on an empty URL.
+	unreachableServer := func(t *testing.T) (*httptest.Server, *atomic.Int64) {
+		t.Helper()
+
+		return countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			t.Error("the disabled path must not call the authorization service")
+			writeAuthorized(w, true)
+		})
+	}
+
+	t.Run("default_passes_through_without_a_token", func(t *testing.T) {
+		t.Parallel()
+
+		// This is the Midaz default: auth off, no opt-in, no Authorization header.
+		// The request reaches the handler and no principal is published.
+		auth := &AuthClient{Enabled: false, Logger: &testLogger{}}
+
+		var reached atomic.Bool
+
+		resp, err := newPrincipalEchoApp(auth, "midaz", &reached).
+			Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.True(t, reached.Load())
+		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
+	})
+
+	t.Run("required_when_disabled_rejects_a_missing_token", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp, err := newPrincipalEchoApp(auth, "midaz", &reached).
+			Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("required_when_disabled_fails_closed_on_token_type", func(t *testing.T) {
+		t.Parallel()
+
+		// Inversion ON: "service-account" is outside {normal-user, application} and
+		// is refused with 401 by the same rule the enabled path applies — with no
+		// authorization call made.
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type": "service-account",
+			"sub":  "admin/robot",
+		}))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("required_when_disabled_publishes_an_application_principal", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"sub":  "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc",
+			"azp":  "66bac70fbea746daa760",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "true", resp.Header.Get("X-P-Found"))
+		assert.Equal(t, "application", resp.Header.Get("X-P-Type"))
+		assert.Equal(t, "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc", resp.Header.Get("X-P-Subject"))
+		assert.Equal(t, "66bac70fbea746daa760", resp.Header.Get("X-P-Client-Id"))
+		assert.Equal(t, int64(0), hits.Load(), "the round-trip is the ONLY thing this path skips")
+	})
+
+	t.Run("required_when_disabled_keeps_the_legacy_fabrication", func(t *testing.T) {
+		t.Parallel()
+
+		// Inversion OFF (the Midaz default): a "service" token is still accepted
+		// under the fabricated "admin/<product>-editor-role" and still identifies
+		// nobody. Opting into the bearer requirement does not opt into inversion.
+		auth := &AuthClient{
+			Enabled:                       false,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type": "service",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.True(t, reached.Load())
+		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
+	})
+
+	t.Run("required_wins_over_the_principal_requirement", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			Required:                      true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+			"sub":   "user123",
+		}))
+
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	})
+}
+
+func TestNewAuthClient_ReadsPrincipalRequiredWhenDisabledFlag(t *testing.T) {
+	t.Setenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED", "true")
+	assert.True(t, NewAuthClient("", false, &testLogger{}).PrincipalRequiredWhenDisabled)
+
+	t.Setenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED", "TRUE")
+	assert.False(t, NewAuthClient("", false, &testLogger{}).PrincipalRequiredWhenDisabled,
+		"only the exact string \"true\" opts in")
+
+	os.Unsetenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED")
+	assert.False(t, NewAuthClient("", false, &testLogger{}).PrincipalRequiredWhenDisabled,
+		"the default preserves the historical pass-through")
+}
