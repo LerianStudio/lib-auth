@@ -487,7 +487,7 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 		// would forward the ingress address and could produce a false ALLOW.
 		clientIP := auth.resolveClientIP(c)
 
-		if authorized, statusCode, err := auth.checkAuthorization(ctx, product, resource, action, accessToken, clientIP); err != nil {
+		if authorized, statusCode, principal, err := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP); err != nil {
 			var commonsErr commons.Response
 			if errors.As(err, &commonsErr) {
 				span.End()
@@ -499,6 +499,8 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 
 			return c.Status(statusCode).SendString(http.StatusText(statusCode))
 		} else if authorized {
+			publishPrincipal(c, span, principal)
+
 			span.End()
 
 			return c.Next()
@@ -605,6 +607,16 @@ func shouldForwardProduct(userType, product string, forwardM2MProduct bool) bool
 // the pre-IP behavior for every deployed access-manager. The auth service
 // interprets the IP; this layer never parses or validates it.
 func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error) {
+	authorized, statusCode, _, err := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+
+	return authorized, statusCode, err
+}
+
+// checkAuthorizationWithPrincipal is checkAuthorization plus the caller identity it
+// derived on the way to the decision, so the Fiber middleware can publish it on the
+// request context. The identity is built BEFORE the decision cache is consulted, so
+// a cache hit carries the same principal a round-trip would have.
+func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, Principal, error) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -620,17 +632,12 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
 	defer cancel()
 
-	claims, statusCode, err := auth.extractClaims(ctx, span, accessToken)
+	principal, statusCode, err := auth.derivePrincipal(ctx, span, accessToken, product)
 	if err != nil {
-		return false, statusCode, err
+		return false, statusCode, Principal{}, err
 	}
 
-	userType, _ := claims["type"].(string)
-
-	sub, statusCode, err := auth.deriveSubject(ctx, span, claims, userType, product)
-	if err != nil {
-		return false, statusCode, err
-	}
+	userType, sub := principal.Type, principal.Subject
 
 	requestBody := map[string]string{
 		"sub":      sub,
@@ -670,7 +677,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 	if err != nil {
 		tracing.HandleSpanError(span, "Failed to convert request body to JSON string", err)
 
-		return false, http.StatusInternalServerError, err
+		return false, http.StatusInternalServerError, Principal{}, err
 	}
 
 	requestBodyJSON, err := json.Marshal(requestBody)
@@ -679,7 +686,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 
 		tracing.HandleSpanError(span, "Failed to marshal request body", err)
 
-		return false, http.StatusInternalServerError, err
+		return false, http.StatusInternalServerError, Principal{}, err
 	}
 
 	// Cache key = the authz request inputs PLUS a digest of the bearer token they were
@@ -704,11 +711,13 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 	// serving a stale grant).
 	if auth.cache != nil {
 		if authorized, hit := auth.cache.get(key); hit {
-			return authorized, http.StatusOK, nil
+			return authorized, http.StatusOK, principal, nil
 		}
 	}
 
-	return auth.resolveAuthz(ctx, span, accessToken, requestBodyJSON, key)
+	authorized, statusCode, err := auth.resolveAuthz(ctx, span, accessToken, requestBodyJSON, key)
+
+	return authorized, statusCode, principal, err
 }
 
 // GetApplicationToken sends a POST request to the authorization service to get a token for the application.

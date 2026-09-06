@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1485,4 +1486,224 @@ func TestNewAuthClient_ReadsM2MInversionFlag(t *testing.T) {
 		client := NewAuthClient("", false, logger)
 		assert.False(t, client.M2MInversionEnabled)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Authorize - Principal publication
+// ---------------------------------------------------------------------------
+
+// newPrincipalEchoApp builds a Fiber app whose single route is gated by Authorize
+// and echoes the published Principal back through response headers. The handler
+// reads it from the framework-agnostic Go context (c.Context()), the same path
+// humafiber-derived handlers rely on, and reports whether it ran at all.
+func newPrincipalEchoApp(auth *AuthClient, product string, reached *atomic.Bool) *fiber.App {
+	app := fiber.New()
+
+	app.Get("/x", auth.Authorize(product, "resource", "get"), func(c fiber.Ctx) error {
+		if reached != nil {
+			reached.Store(true)
+		}
+
+		p, ok := PrincipalFromContext(c.Context())
+
+		c.Set("X-P-Found", strconv.FormatBool(ok))
+		c.Set("X-P-Type", p.Type)
+		c.Set("X-P-Owner", p.Owner)
+		c.Set("X-P-Sub", p.Sub)
+		c.Set("X-P-Subject", p.Subject)
+		c.Set("X-P-Client-Id", p.ClientID)
+
+		return c.SendStatus(http.StatusOK)
+	})
+
+	return app
+}
+
+func authorizedRequest(t *testing.T, app *fiber.App, token string) *http.Response {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+
+	return resp
+}
+
+func TestAuthorize_PublishesPrincipal(t *testing.T) {
+	t.Parallel()
+
+	t.Run("normal_user_carries_owner_sub_and_derived_subject", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+			"sub":   "user123",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "true", resp.Header.Get("X-P-Found"))
+		assert.Equal(t, "normal-user", resp.Header.Get("X-P-Type"))
+		assert.Equal(t, "acme-org", resp.Header.Get("X-P-Owner"))
+		assert.Equal(t, "user123", resp.Header.Get("X-P-Sub"))
+		assert.Equal(t, "acme-org/user123", resp.Header.Get("X-P-Subject"))
+	})
+
+	t.Run("application_under_inversion_carries_real_sub_and_azp", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, M2MInversionEnabled: true, Logger: &testLogger{}}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"sub":  "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc",
+			"azp":  "66bac70fbea746daa760",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "true", resp.Header.Get("X-P-Found"))
+		assert.Equal(t, "application", resp.Header.Get("X-P-Type"))
+		assert.Empty(t, resp.Header.Get("X-P-Owner"))
+		assert.Equal(t, "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc", resp.Header.Get("X-P-Sub"))
+		// For an application token the Access Manager subject IS the real sub.
+		assert.Equal(t, resp.Header.Get("X-P-Sub"), resp.Header.Get("X-P-Subject"))
+		assert.Equal(t, "66bac70fbea746daa760", resp.Header.Get("X-P-Client-Id"))
+	})
+
+	t.Run("decision_cache_hit_still_publishes", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			writeAuthorized(w, true)
+		})
+
+		auth := &AuthClient{
+			Address: server.URL,
+			Enabled: true,
+			Logger:  &testLogger{},
+			cache:   newDecisionCache(time.Minute),
+		}
+		app := newPrincipalEchoApp(auth, "midaz", nil)
+
+		token := createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+			"sub":   "user123",
+		})
+
+		for i := range 2 {
+			resp := authorizedRequest(t, app, token)
+
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.Equal(t, "true", resp.Header.Get("X-P-Found"), "request %d must carry a principal", i+1)
+			assert.Equal(t, "acme-org/user123", resp.Header.Get("X-P-Subject"), "request %d", i+1)
+		}
+
+		assert.Equal(t, int64(1), hits.Load(), "the second request must be served from the decision cache")
+	})
+
+	t.Run("legacy_fabricated_role_reports_absent", func(t *testing.T) {
+		t.Parallel()
+
+		// Inversion OFF: a "service" token authorizes under the fabricated
+		// "admin/<product>-editor-role" and carries no real sub, so the request
+		// proceeds but no principal is identified.
+		server := mockAuthServer(t, true, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(jwt.MapClaims{
+			"type": "service",
+		}))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
+		assert.Empty(t, resp.Header.Get("X-P-Subject"))
+	})
+
+	t.Run("denied_request_publishes_nothing", func(t *testing.T) {
+		t.Parallel()
+
+		server := mockAuthServer(t, false, http.StatusOK)
+		defer server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+			"sub":   "user123",
+		}))
+
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+		assert.False(t, reached.Load(), "a denied request must never reach the handler, so nothing is published")
+	})
+}
+
+// TestAuthorize_TracesPrincipalNotToken proves the derived identity reaches the
+// span as its two agreed attributes and that the bearer token itself never does.
+func TestAuthorize_TracesPrincipalNotToken(t *testing.T) {
+	t.Parallel()
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+
+	server := mockAuthServer(t, true, http.StatusOK)
+	defer server.Close()
+
+	auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(observability.ContextWithTracer(c.Context(), tp.Tracer("test")))
+
+		return c.Next()
+	})
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	spans := exporter.GetSpans()
+	require.NotEmpty(t, spans, "expected the authorization spans to be exported")
+
+	attrs := map[string]string{}
+
+	for _, s := range spans {
+		for _, attr := range s.Attributes {
+			attrs[string(attr.Key)] = attr.Value.AsString()
+
+			assert.NotContains(t, attr.Value.AsString(), token,
+				"span %q leaks the access token in attribute %q", s.Name, attr.Key)
+		}
+	}
+
+	assert.Equal(t, "normal-user", attrs["app.auth.principal.type"])
+	assert.Equal(t, "acme-org/user123", attrs["app.auth.principal.subject"])
 }

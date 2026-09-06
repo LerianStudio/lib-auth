@@ -2,8 +2,12 @@ package middleware
 
 import (
 	"context"
+	"net/http"
 
+	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Principal is the caller identity Authorize derived from the bearer token and
@@ -53,4 +57,40 @@ func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 		Subject:  subject,
 		ClientID: clientID,
 	}
+}
+
+// derivePrincipal parses the bearer token and derives the caller identity with the
+// SINGLE set of rules the authorizing path applies: extractClaims for the claims
+// (locally verified or not, per configuration) and deriveSubject for the Access
+// Manager subject and its fail-closed token-type rules. Every caller that needs an
+// identity goes through here — the authorizing path and the
+// PrincipalRequiredWhenDisabled path alike — so the two can never drift apart.
+// It returns the status code to answer with when derivation fails.
+func (auth *AuthClient) derivePrincipal(ctx context.Context, span trace.Span, accessToken, product string) (Principal, int, error) {
+	claims, statusCode, err := auth.extractClaims(ctx, span, accessToken)
+	if err != nil {
+		return Principal{}, statusCode, err
+	}
+
+	userType, _ := claims["type"].(string)
+
+	subject, statusCode, err := auth.deriveSubject(ctx, span, claims, userType, product)
+	if err != nil {
+		return Principal{}, statusCode, err
+	}
+
+	return principalFromClaims(claims, subject), http.StatusOK, nil
+}
+
+// publishPrincipal stores the derived caller identity on the request Go context —
+// derived from c.Context(), NOT the tracing ctx, so it adds only the identity value
+// without altering span topology — and records its non-secret shape on the span.
+// The bearer token itself never reaches a span attribute or a log line.
+func publishPrincipal(c fiber.Ctx, span trace.Span, p Principal) {
+	c.SetContext(context.WithValue(c.Context(), principalContextKey{}, p))
+
+	span.SetAttributes(
+		attribute.String("app.auth.principal.type", p.Type),
+		attribute.String("app.auth.principal.subject", p.Subject),
+	)
 }
