@@ -130,6 +130,11 @@ type AuthClient struct {
 	// verifyIssuer, when non-empty, pins the accepted token "iss" claim during local
 	// verification. Read once from AUTH_JWT_ISSUER; inert when verifyKeys is empty.
 	verifyIssuer string
+	// staticVerificationConfigured records that a PEM source was explicitly set at
+	// construction. If loading that source failed, verifyKeys is empty; the normal
+	// authorizing path may still use Access Manager as its trust anchor, but the
+	// no-round-trip path must refuse rather than trust self-asserted claims.
+	staticVerificationConfigured bool
 
 	// source, when non-nil, supplies verification keys dynamically from a JWKS-backed
 	// KeySource — the SAME dynamic path the M2M gate uses (serve-stale cache + forced
@@ -314,6 +319,8 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 	l := resolveLogger(logger)
 
 	verifyKeys, verifyIssuer := loadVerification(l)
+	staticVerificationConfigured := strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT")) != "" ||
+		strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT_PATH")) != ""
 
 	// AUTH_M2M_PRODUCT_FORWARD_ENABLED is read with LookupEnv, not Getenv, so that
 	// "unset" and an explicit "false" are two distinguishable states. Both resolve
@@ -343,6 +350,7 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 		retryMax:                      parseRetryMax(),
 		verifyKeys:                    verifyKeys,
 		verifyIssuer:                  verifyIssuer,
+		staticVerificationConfigured:  staticVerificationConfigured,
 		trustedProxies:                trustedProxies,
 		noProxiesLine:                 noProxiesLine,
 	}
@@ -595,7 +603,7 @@ func (auth *AuthClient) Check(ctx context.Context, product, resource, action, ac
 		// under the same rules, and ONLY the round-trip is skipped. The derived
 		// identity is discarded here — the caller already holds the one Authorize
 		// published on the request context.
-		if _, statusCode, err := auth.derivePrincipal(ctx, span, accessToken, product); err != nil {
+		if _, statusCode, err := auth.derivePrincipalWithoutRoundTrip(ctx, span, accessToken, product); err != nil {
 			return false, statusCode, err
 		}
 
@@ -642,7 +650,7 @@ func (auth *AuthClient) authorizeWithoutRoundTrip(c fiber.Ctx, product string) e
 		return c.Status(http.StatusUnauthorized).SendString("Missing Token")
 	}
 
-	principal, statusCode, err := auth.derivePrincipal(ctx, span, accessToken, product)
+	principal, statusCode, err := auth.derivePrincipalWithoutRoundTrip(ctx, span, accessToken, product)
 	if err != nil {
 		span.End()
 

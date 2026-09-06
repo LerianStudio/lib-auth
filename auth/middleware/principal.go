@@ -2,8 +2,10 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
+	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel/attribute"
@@ -80,6 +82,20 @@ func (auth *AuthClient) derivePrincipal(ctx context.Context, span trace.Span, ac
 	}
 
 	return principalFromClaims(claims, subject), http.StatusOK, nil
+}
+
+// derivePrincipalWithoutRoundTrip applies the extra fail-closed rule required when
+// Access Manager is not available to anchor trust. An explicitly configured static
+// key source that failed to load must not degrade this path to ParseUnverified.
+func (auth *AuthClient) derivePrincipalWithoutRoundTrip(ctx context.Context, span trace.Span, accessToken, product string) (Principal, int, error) {
+	if auth.staticVerificationConfigured && len(auth.verifyKeys) == 0 && auth.source == nil {
+		err := errors.New("local JWT verification is configured but unavailable")
+		tracing.HandleSpanError(span, "Local JWT verification unavailable", err)
+
+		return Principal{}, http.StatusServiceUnavailable, err
+	}
+
+	return auth.derivePrincipal(ctx, span, accessToken, product)
 }
 
 // publishPrincipal stores the derived caller identity on the request Go context —

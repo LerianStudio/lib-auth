@@ -2022,6 +2022,22 @@ func TestNewAuthClient_ReadsPrincipalRequiredWhenDisabledFlag(t *testing.T) {
 		"the default preserves the historical pass-through")
 }
 
+func TestAuthorize_DisabledRefusesWhenConfiguredVerificationCannotLoad(t *testing.T) {
+	t.Setenv("AUTH_JWT_VERIFY_CERT", "not a PEM")
+	t.Setenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED", "true")
+
+	auth := NewAuthClient("", false, &testLogger{})
+	resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), createTestJWT(normalUserClaims()))
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get("X-P-Found"))
+
+	authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", createTestJWT(normalUserClaims()), "")
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+}
+
 // ---------------------------------------------------------------------------
 // Check - authorization outside the middleware chain
 // ---------------------------------------------------------------------------

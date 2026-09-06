@@ -126,7 +126,10 @@ AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=false
 # a key rotation (zero-downtime: a token verified by ANY listed key is accepted).
 # AUTH_JWT_VERIFY_CERT_PATH points to a mounted PEM file instead (used only when
 # AUTH_JWT_VERIFY_CERT is empty). A configured-but-unparseable cert is logged at
-# ERROR and leaves verification disabled; it is never silently accepted.
+# ERROR and leaves verification disabled on the normal authorizing path, where the
+# authorization service remains the trust anchor. The no-round-trip principal path
+# refuses with 503 instead of accepting self-asserted claims when a configured key
+# source could not be loaded.
 AUTH_JWT_VERIFY_CERT=
 AUTH_JWT_VERIFY_CERT_PATH=
 AUTH_JWT_ISSUER=
