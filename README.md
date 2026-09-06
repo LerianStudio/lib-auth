@@ -97,6 +97,16 @@ AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
 # seeds are migrated.
 AUTH_M2M_INVERSION_ENABLED=false
 
+# Optional. When "true", Authorize keeps demanding a bearer token that names a
+# principal even while auth is disabled (PLUGIN_AUTH_ENABLED=false or an empty
+# PLUGIN_AUTH_ADDRESS): the token is extracted (401 when missing), its claims
+# parsed exactly as on the enabled path, the subject derived with the same
+# fail-closed token-type rules, and the Principal published on the request
+# context. ONLY the authorization round-trip is skipped. Defaults to false,
+# which preserves the historical pass-through. AUTH_REQUIRED still wins: with
+# it set, a client that cannot authorize refuses with 503 and never gets here.
+AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=false
+
 # Optional. Opt-in local JWT signature verification for the general authorization
 # path. When unset, tokens are parsed without signature verification (the
 # authorization service remains the trust anchor) — the previous behavior,
@@ -238,6 +248,87 @@ The `Authorize` function:
 * On the Fiber path, derives the caller's client IP from `TRUSTED_PROXIES` and the socket peer — not from Fiber's `c.IP()` or `c.IPs()` — and sends it as the optional `clientIp` field, omitting it when no caller IP is attributable (see [Client IP forwarding](#-client-ip-forwarding)).
 * Checks if the response indicates that the user is authorized.
 * Allows the normal application flow or returns a 403 (Forbidden) error.
+
+## 🪪 Principal on the request context
+
+Every path where `Authorize` reads a token and then calls `c.Next()` publishes the
+caller identity it derived, so a handler never has to parse the token again. Read it
+back with `PrincipalFromContext`, which reports absent when no principal was
+published and when the derivation produced no real subject (the legacy
+`M2MInversionEnabled=false` model, where the subject is a fabricated role).
+
+```go
+type Principal struct {
+    Type     string // token "type" claim: "normal-user" | "application"
+    Owner    string // "owner" claim; empty for application tokens
+    Sub      string // "sub" claim, verbatim
+    Subject  string // "<owner>/<sub>" for normal-user, "<sub>" for application
+    ClientID string // "azp" claim when present, else empty
+}
+
+func PrincipalFromContext(ctx context.Context) (Principal, bool)
+```
+
+`Owner` and `Sub` are the claims verbatim, with no trimming or normalization.
+`Subject` is the string sent to the authorization service.
+
+Publication covers the authorized decision, a decision-cache hit, and the
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` path below. A denied request publishes
+nothing, and neither does the default disabled pass-through. The access token never
+reaches a log line or a span attribute; the span carries only
+`app.auth.principal.type` and `app.auth.principal.subject`.
+
+### Bearer required while auth is disabled
+
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` (field `PrincipalRequiredWhenDisabled`,
+default `false`) is for services that always want a named caller, even in a
+deployment that runs with the authorization service off. When it is `true` and the
+client cannot authorize, `Authorize` still extracts the token (401 when missing),
+parses the claims, derives the subject under the same fail-closed token-type rules,
+and publishes the `Principal`. The authorization round-trip is the only thing
+skipped. `AUTH_REQUIRED` takes precedence: a client that cannot authorize refuses
+with 503 regardless. Like `AUTH_M2M_INVERSION_ENABLED`, the field can be pinned in
+code after `NewAuthClient` instead of read from the environment.
+
+### Type guards
+
+`RequireHuman()` and `RequireApplication()` are `fiber.Handler`s that gate a route on
+the published `Principal.Type`. Mount them AFTER `Authorize`: a missing principal is
+401 (nobody was identified) and a principal of the wrong kind is 403 (a known caller
+of the wrong kind). Both answer in plain text, matching `Authorize`; a service that
+speaks problem+json wraps them in its own error handler.
+
+`RequireApplication` is not `RequireM2M`. It performs no signature verification: the
+authorization round-trip behind `Authorize` is the trust anchor, as it is for every
+other route. `RequireM2M` stays a separate, self-verifying gate.
+
+```go
+f.Post("/v1/emissions/:id/approve",
+    auth.Authorize(applicationName, "emission", "approve"),
+    authMiddleware.RequireHuman(),      // 403 for a machine caller
+    emissionHandler.Approve)
+
+f.Post("/v1/operations/:id/resolution",
+    auth.Authorize(applicationName, "operation", "resolve"),
+    authMiddleware.RequireApplication(), // 403 for a human caller
+    operationHandler.Resolve)
+```
+
+### Authorization outside the chain
+
+When the resource or action is only known inside the handler, `Check` runs the same
+decision the middleware would, with the same derivation, decision cache, breaker and
+fail-closed rules:
+
+```go
+func (auth *AuthClient) Check(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error)
+```
+
+It returns `(true, 200, nil)` when authorized, `(false, 403, nil)` when denied (a
+plain deny is an answer, not a failure), and `(false, status, err)` on a token or
+transport failure. `clientIP` may be empty, in which case it is omitted from the
+request body exactly as on the middleware path. `Check` publishes no principal: the
+caller already holds the one `Authorize` published.
 
 ## 📥 Example Request to Auth
 
