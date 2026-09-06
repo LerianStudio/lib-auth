@@ -125,9 +125,17 @@ func (auth *AuthClient) derivePrincipalWithoutRoundTrip(ctx context.Context, spa
 		return Principal{}, statusCode, err
 	}
 
-	// The legacy non-inversion derivation can authorize a fabricated role without
-	// a real sub claim. That remains compatible on the Access Manager-backed path,
-	// but it cannot satisfy this path's promise to require a named principal.
+	// The legacy non-inversion derivation authorizes every non-human token under a
+	// fabricated role rather than its own identity. Even when such a token happens
+	// to carry a sub claim, the derived Subject is not that principal, so the
+	// no-round-trip path cannot publish it as an identified caller.
+	if !auth.M2MInversionEnabled && principal.Type != normalUser {
+		err := errors.New("legacy token derivation does not identify a principal")
+		tracing.HandleSpanError(span, "Legacy token derivation does not identify a principal", err)
+
+		return Principal{}, http.StatusUnauthorized, err
+	}
+
 	if strings.TrimSpace(principal.Sub) == "" {
 		err := errors.New("missing sub claim in token")
 		tracing.HandleSpanError(span, "Missing sub claim in token", err)

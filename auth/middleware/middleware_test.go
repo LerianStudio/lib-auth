@@ -2066,6 +2066,28 @@ func TestAuthorize_Disabled(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, statusCode)
 	})
 
+	t.Run("required_when_disabled_rejects_legacy_fabrication_even_with_a_sub", func(t *testing.T) {
+		t.Parallel()
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		token := createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"sub":  "admin/robot",
+		})
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), token)
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Empty(t, resp.Header.Get("X-P-Found"))
+	})
+
 	t.Run("required_wins_over_the_principal_requirement", func(t *testing.T) {
 		t.Parallel()
 
