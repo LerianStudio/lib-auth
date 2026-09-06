@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -311,6 +312,86 @@ func TestRequireApplication(t *testing.T) {
 			Type: application, Sub: "admin/robot", Subject: "admin/robot",
 		})
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+}
+
+// TestRequirePrincipalType_ReturnsFiberErrors proves the guards hand the error to
+// the service's own ErrorHandler instead of writing a body past it. A rail that
+// answers problem+json therefore keeps its envelope on a guard rejection; under
+// Fiber's default handler the rendered 401/403 is unchanged.
+func TestRequirePrincipalType_ReturnsFiberErrors(t *testing.T) {
+	t.Parallel()
+
+	// The sentinel handler stands in for a service error handler: it records what
+	// it received and writes an envelope of its own, which a guard that wrote the
+	// response itself would never let it do.
+	newSentinelApp := func(guard fiber.Handler, seed *Principal) *fiber.App {
+		app := fiber.New(fiber.Config{
+			ErrorHandler: func(c fiber.Ctx, err error) error {
+				var fiberErr *fiber.Error
+				if !errors.As(err, &fiberErr) {
+					return c.Status(http.StatusTeapot).SendString("error handler got a non-fiber error")
+				}
+
+				c.Set("X-Sentinel-Error", fiberErr.Message)
+
+				return c.Status(fiberErr.Code).SendString("service envelope")
+			},
+		})
+
+		app.Use(func(c fiber.Ctx) error {
+			if seed != nil {
+				c.SetContext(context.WithValue(c.Context(), principalContextKey{}, *seed))
+			}
+
+			return c.Next()
+		})
+		app.Get("/x", guard, func(c fiber.Ctx) error {
+			return c.SendString("reached handler")
+		})
+
+		return app
+	}
+
+	do := func(t *testing.T, guard fiber.Handler, seed *Principal) *http.Response {
+		t.Helper()
+
+		resp, err := newSentinelApp(guard, seed).Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+
+		return resp
+	}
+
+	assertEnvelope := func(t *testing.T, resp *http.Response, wantStatus int, wantMessage string) {
+		t.Helper()
+
+		assert.Equal(t, wantStatus, resp.StatusCode)
+		assert.Equal(t, wantMessage, resp.Header.Get("X-Sentinel-Error"),
+			"the service error handler must receive the fiber error the guard returned")
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, "service envelope", string(body),
+			"the guard must not write its own body past the service error handler")
+	}
+
+	t.Run("missing_principal_returns_fiber_err_unauthorized", func(t *testing.T) {
+		t.Parallel()
+
+		assertEnvelope(t, do(t, RequireHuman(), nil), http.StatusUnauthorized, fiber.ErrUnauthorized.Message)
+		assertEnvelope(t, do(t, RequireApplication(), nil), http.StatusUnauthorized, fiber.ErrUnauthorized.Message)
+	})
+
+	t.Run("wrong_type_returns_fiber_err_forbidden", func(t *testing.T) {
+		t.Parallel()
+
+		assertEnvelope(t, do(t, RequireHuman(), &Principal{
+			Type: application, Sub: "admin/robot", Subject: "admin/robot",
+		}), http.StatusForbidden, fiber.ErrForbidden.Message)
+
+		assertEnvelope(t, do(t, RequireApplication(), &Principal{
+			Type: normalUser, Owner: "acme-org", Sub: "user123", Subject: "acme-org/user123",
+		}), http.StatusForbidden, fiber.ErrForbidden.Message)
 	})
 }
 

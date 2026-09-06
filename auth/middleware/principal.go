@@ -132,13 +132,17 @@ func publishPrincipal(c fiber.Ctx, span trace.Span, p Principal) {
 }
 
 // RequireHuman rejects any request whose published Principal.Type is not
-// "normal-user" with 403; a missing Principal is 401. Mount AFTER Authorize.
+// "normal-user" with 403; a missing Principal is 401. The handler returns the
+// corresponding Fiber error so the service error handler can preserve its
+// response envelope. Mount AFTER Authorize.
 func RequireHuman() fiber.Handler {
 	return requirePrincipalType(normalUser)
 }
 
 // RequireApplication rejects any request whose published Principal.Type is not
-// "application" with 403; a missing Principal is 401. Mount AFTER Authorize.
+// "application" with 403; a missing Principal is 401. The handler returns the
+// corresponding Fiber error so the service error handler can preserve its
+// response envelope. Mount AFTER Authorize.
 // Unlike RequireM2M it performs no signature verification: the Access Manager
 // round-trip behind Authorize is the trust anchor, as it is for every other route.
 func RequireApplication() fiber.Handler {
@@ -149,15 +153,22 @@ func RequireApplication() fiber.Handler {
 // between 401 and 403 is deliberate and load-bearing for the consuming rails:
 // 401 says no principal was identified at all (Authorize is missing, or ran
 // without deriving one), 403 says a known caller is of the wrong kind.
+//
+// Both are RETURNED as fiber errors rather than written here. Under Fiber's
+// default error handler that renders the same 401 "Unauthorized" / 403
+// "Forbidden" a written response would have produced, so nothing changes for a
+// service that has not customized it; a service that installs its own
+// ErrorHandler (problem+json, say) receives the error and keeps its envelope
+// instead of having a bare plain-text body written past it.
 func requirePrincipalType(want string) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		p, ok := PrincipalFromContext(c.Context())
 		if !ok {
-			return c.Status(http.StatusUnauthorized).SendString("Unauthorized")
+			return fiber.ErrUnauthorized
 		}
 
 		if p.Type != want {
-			return c.Status(http.StatusForbidden).SendString("Forbidden")
+			return fiber.ErrForbidden
 		}
 
 		return c.Next()

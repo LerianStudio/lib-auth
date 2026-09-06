@@ -321,8 +321,12 @@ unverified client on a network you do not control.
 `RequireHuman()` and `RequireApplication()` are `fiber.Handler`s that gate a route on
 the published `Principal.Type`. Mount them AFTER `Authorize`: a missing principal is
 401 (nobody was identified) and a principal of the wrong kind is 403 (a known caller
-of the wrong kind). Both answer in plain text, matching `Authorize`; a service that
-speaks problem+json wraps them in its own error handler.
+of the wrong kind). Both **return** the corresponding Fiber error
+(`fiber.ErrUnauthorized`, `fiber.ErrForbidden`) instead of writing a response
+themselves. Under Fiber's default error handler the rendered bodies are unchanged —
+plain-text `Unauthorized` and `Forbidden`, matching `Authorize` — while a service that
+installs its own `ErrorHandler`, problem+json for instance, receives the error and
+keeps its own response envelope.
 
 `RequireApplication` is not `RequireM2M`. It performs no signature verification: the
 authorization round-trip behind `Authorize` is the trust anchor, as it is for every
