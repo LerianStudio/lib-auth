@@ -301,7 +301,10 @@ client cannot authorize, `Authorize` still extracts the token (401 when missing)
 parses the claims, derives the subject under the same fail-closed token-type rules,
 and publishes the `Principal`. A legacy fabricated-role token without a real `sub`
 is refused with 401 because it does not name a principal. The authorization
-round-trip is the only thing skipped. `AUTH_REQUIRED` takes precedence: a client
+round-trip is the only thing skipped. The branch is taken only when the client is
+disabled: a client that is enabled but has no address is an incomplete
+configuration and refuses with 503 in both `Authorize` and `Check`, never the
+no-round-trip path. `AUTH_REQUIRED` takes precedence: a client
 that cannot authorize refuses with 503 regardless. Like
 `AUTH_M2M_INVERSION_ENABLED`, the field can be pinned in code after
 `NewAuthClient` instead of read from the environment.

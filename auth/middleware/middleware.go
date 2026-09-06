@@ -68,6 +68,9 @@ type AuthClient struct {
 	// (fail-closed on token type under M2MInversionEnabled), the Principal published,
 	// and ONLY the Access Manager round-trip is skipped. Default false preserves the
 	// historical pass-through. Required (AUTH_REQUIRED) still wins: it refuses with 503.
+	// The branch is taken only when Enabled is false: an Enabled client with no
+	// Address is an incomplete configuration and refuses with 503 instead, in both
+	// Authorize and Check.
 	//
 	// TRUST BOUNDARY: this is a DEVELOPMENT mode. No Access Manager round-trip happens
 	// on this branch, so nothing external vouches for the caller and the published
@@ -490,6 +493,12 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 				return c.Next()
 			}
 
+			if auth.Enabled {
+				// Enabled but addressless is an incomplete configuration, not a
+				// deliberate "auth off": it never earns the no-round-trip branch.
+				return c.Status(http.StatusServiceUnavailable).SendString("Service Unavailable")
+			}
+
 			return auth.authorizeWithoutRoundTrip(c, product)
 		}
 
@@ -607,6 +616,14 @@ func (auth *AuthClient) Check(ctx context.Context, product, resource, action, ac
 	if !auth.canAuthorize() {
 		if !auth.principalRequiredWhenDisabled() {
 			return true, http.StatusOK, nil
+		}
+
+		if auth.Enabled {
+			// Enabled but addressless: incomplete configuration, same refusal as
+			// Authorize. The no-round-trip branch is for a deliberate "auth off" only.
+			tracing.HandleSpanError(span, "Authorization enabled without an address", errAuthorizationUnavailable)
+
+			return false, http.StatusServiceUnavailable, errAuthorizationUnavailable
 		}
 
 		// Mirror Authorize's disabled path: the token must still name a principal

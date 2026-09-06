@@ -2137,6 +2137,23 @@ func TestNewAuthClient_ReadsPrincipalRequiredWhenDisabledFlag(t *testing.T) {
 		"the default preserves the historical pass-through")
 }
 
+func TestAuthorize_EnabledWithoutAddressRefusesThePrincipalPath(t *testing.T) {
+	t.Parallel()
+
+	auth := &AuthClient{Address: "", Enabled: true, PrincipalRequiredWhenDisabled: true, Logger: &testLogger{}}
+	token := createTestJWT(normalUserClaims())
+
+	resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", nil), token)
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode,
+		"enabled but addressless is an incomplete configuration, never the no-round-trip branch")
+	assert.Empty(t, resp.Header.Get("X-P-Found"))
+
+	authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+}
+
 func TestAuthorize_DisabledRefusesWhenConfiguredVerificationCannotLoad(t *testing.T) {
 	t.Setenv("AUTH_JWT_VERIFY_CERT", "not a PEM")
 	t.Setenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED", "true")
