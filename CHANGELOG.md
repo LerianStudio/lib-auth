@@ -1,3 +1,10 @@
+## [4.1.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.3...v4.1.0-beta.4) (2026-09-06)
+
+
+### Bug Fixes
+
+* **middleware:** answer 503 when the authorization service cannot decide ([a5e3226](https://github.com/LerianStudio/lib-auth/commit/a5e32264d966cc42e2d0c4bda2b19a1fe33668b9))
+
 ## [4.1.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.2...v4.1.0-beta.3) (2026-09-06)
 
 
