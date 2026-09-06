@@ -161,6 +161,63 @@ func TestPrincipalFromClaims(t *testing.T) {
 	})
 }
 
+// TestPrincipalFromClaims_MalformedShapes walks the JSON shapes a decoded JWT can
+// actually carry for a claim that is supposed to be a string: a number (every JSON
+// number decodes to float64), an array, an explicit null, a bool. None of them is a
+// string, so each degrades to the empty string in its own field and none may panic.
+// The subject is the caller's, already derived, and is copied through untouched.
+func TestPrincipalFromClaims_MalformedShapes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		claims  jwt.MapClaims
+		subject string
+		want    Principal
+	}{
+		{
+			name:    "type_is_a_number",
+			claims:  jwt.MapClaims{"type": float64(7), "owner": "acme-org", "sub": "user123"},
+			subject: "acme-org/user123",
+			want:    Principal{Owner: "acme-org", Sub: "user123", Subject: "acme-org/user123"},
+		},
+		{
+			name:    "sub_is_an_array",
+			claims:  jwt.MapClaims{"type": normalUser, "owner": "acme-org", "sub": []any{"user123"}},
+			subject: "acme-org/",
+			want:    Principal{Type: normalUser, Owner: "acme-org", Subject: "acme-org/"},
+		},
+		{
+			name:    "owner_is_nil",
+			claims:  jwt.MapClaims{"type": normalUser, "owner": nil, "sub": "user123"},
+			subject: "/user123",
+			want:    Principal{Type: normalUser, Sub: "user123", Subject: "/user123"},
+		},
+		{
+			name:    "azp_is_a_bool",
+			claims:  jwt.MapClaims{"type": application, "sub": "admin/robot", "azp": true},
+			subject: "admin/robot",
+			want:    Principal{Type: application, Sub: "admin/robot", Subject: "admin/robot"},
+		},
+		{
+			name:    "every_claim_malformed_at_once",
+			claims:  jwt.MapClaims{"type": float64(7), "owner": nil, "sub": []any{1}, "azp": false},
+			subject: "",
+			want:    Principal{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.NotPanics(t, func() {
+				assert.Equal(t, tt.want, principalFromClaims(tt.claims, tt.subject))
+			})
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // RequireHuman / RequireApplication
 // ---------------------------------------------------------------------------

@@ -1868,6 +1868,145 @@ func TestAuthorize_Disabled(t *testing.T) {
 
 		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 	})
+
+	t.Run("required_when_disabled_rejects_a_non_string_sub", func(t *testing.T) {
+		t.Parallel()
+
+		// A JSON number decodes to float64, never to a string, so the application
+		// branch of deriveSubject sees an empty sub and refuses with 401 by the
+		// SAME rule the enabled path applies. Nothing is published and the handler
+		// never runs, so a malformed claim can never reach one as an identity.
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"sub":  12345,
+		}))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("required_when_disabled_rejects_a_missing_owner", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type": "normal-user",
+			"sub":  "user123",
+		}))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("required_when_disabled_rejects_a_missing_sub", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type":  "normal-user",
+			"owner": "acme-org",
+		}))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	// The next two pin the trust boundary the field's godoc describes: the disabled
+	// path runs the same extractClaims as the enabled one, so local verification is
+	// live here. Configure keys and a forged signature is refused with 401 even
+	// though no authorization call is made; without keys the token would be parsed
+	// unverified and the same forgery would be published as an identity.
+	t.Run("required_when_disabled_rejects_a_signature_from_another_key", func(t *testing.T) {
+		t.Parallel()
+
+		attackerKey, _ := newTestRSAKeyPEM(t)
+
+		_, trustedPEM := newTestRSAKeyPEM(t)
+
+		trustedKeys, err := parseRSAPublicKeys([]byte(trustedPEM))
+		require.NoError(t, err)
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			PrincipalRequiredWhenDisabled: true,
+			verifyKeys:                    trustedKeys,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached),
+			signRS256(t, attackerKey, normalUserClaims()))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+	})
+
+	t.Run("required_when_disabled_publishes_a_verified_principal", func(t *testing.T) {
+		t.Parallel()
+
+		key, pubPEM := newTestRSAKeyPEM(t)
+
+		trustedKeys, err := parseRSAPublicKeys([]byte(pubPEM))
+		require.NoError(t, err)
+
+		auth := &AuthClient{
+			Enabled:                       false,
+			PrincipalRequiredWhenDisabled: true,
+			verifyKeys:                    trustedKeys,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached),
+			signRS256(t, key, normalUserClaims()))
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.True(t, reached.Load())
+		assert.Equal(t, "true", resp.Header.Get("X-P-Found"))
+		assert.Equal(t, "normal-user", resp.Header.Get("X-P-Type"))
+		assert.Equal(t, "acme-org", resp.Header.Get("X-P-Owner"))
+		assert.Equal(t, "user-123", resp.Header.Get("X-P-Sub"))
+		assert.Equal(t, "acme-org/user-123", resp.Header.Get("X-P-Subject"))
+	})
 }
 
 func TestNewAuthClient_ReadsPrincipalRequiredWhenDisabledFlag(t *testing.T) {
