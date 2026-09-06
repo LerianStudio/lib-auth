@@ -2164,7 +2164,11 @@ func TestCheck_SendsTheSameBodyAsAuthorize(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var body map[string]string
 
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("mock server: failed to decode request body: %v", err)
+
+				return
+			}
 
 			bodies = append(bodies, body)
 			writeAuthorized(w, true)

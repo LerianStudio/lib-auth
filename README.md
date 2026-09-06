@@ -356,8 +356,10 @@ func (auth *AuthClient) Check(ctx context.Context, product, resource, action, ac
 
 It returns `(true, 200, nil)` when authorized, `(false, 403, nil)` when denied (a
 plain deny is an answer, not a failure), and `(false, status, err)` on a token or
-transport failure. `Check` publishes no principal: the caller already holds the one
-`Authorize` published.
+transport failure. When `AUTH_REQUIRED` is set and the client cannot authorize, it
+returns `(false, 503, err)` without evaluating the token, mirroring `Authorize`.
+`Check` publishes no principal: the caller already holds the one `Authorize`
+published.
 
 `clientIP` is **caller-supplied** and reaches the authorization decision as-is, where
 it feeds the per-tenant IP allowlist described in
