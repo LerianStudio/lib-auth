@@ -459,7 +459,9 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // Authorize is a middleware function for the Fiber framework that checks if a user is authorized to perform a specific action on a resource.
 // product identifies the product/application owning the route (e.g. "midaz"); it is forwarded for normal-user flows, and for M2M (application)
 // flows when AUTH_M2M_PRODUCT_FORWARD_ENABLED is set, so the auth service can isolate permissions by product. M2M tokens are identified by their own subject claim.
-// If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
+// If the user is authorized, the request is passed to the next handler. Otherwise the request is refused: 403 Forbidden when the
+// authorization service answered no, and 503 Service Unavailable when it could not answer at all (unreachable, 5xx, retries
+// exhausted, breaker open) — fail-closed either way, but only the 503 reads as an outage.
 //
 // Every refusal — 401 missing token, 403 denied, 503 unavailable, and the status
 // the Access Manager itself answered — is RETURNED as a *fiber.Error and never
@@ -545,7 +547,12 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 
 		resolution, principal := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
 
-		if authorized, statusCode, err := resolution.legacyResult(); err != nil {
+		// checkResult, not legacyResult: an Access Manager that never produced an
+		// answer must be refused as 503, not rendered as a 403 the caller reads as
+		// "you are Forbidden" or a 500 that names the wrong subsystem. Fail-closed
+		// is unchanged — the request is still refused — only the word is corrected,
+		// which is what puts the outage in the rail's 5xx alarms.
+		if authorized, statusCode, err := resolution.checkResult(); err != nil {
 			var commonsErr commons.Response
 			if errors.As(err, &commonsErr) {
 				span.End()
@@ -845,9 +852,9 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 // request context. The identity is built BEFORE the decision cache is consulted, so
 // a cache hit carries the same principal a round-trip would have.
 //
-// It returns the full authzResolution rather than the legacy triple: callers that
-// answer on the wire read legacyResult and behave exactly as before, while Check
-// reads checkResult and can tell an outage from a denial.
+// It returns the full authzResolution rather than the legacy triple: Authorize and
+// Check read checkResult, so both tell an outage from a denial, while the gRPC
+// interceptors still read legacyResult and behave exactly as before.
 func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, product, resource, action, accessToken, clientIP string) (authzResolution, Principal) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
