@@ -1653,8 +1653,10 @@ func TestAuthorize_PublishesPrincipal(t *testing.T) {
 	})
 }
 
-// TestAuthorize_TracesPrincipalNotToken proves the derived identity reaches the
-// span as its two agreed attributes and that the bearer token itself never does.
+// TestAuthorize_TracesPrincipalNotToken proves the attributes this package adds for
+// the principal carry only its TYPE, and that the bearer token never reaches any
+// span attribute. The pre-existing app.request.payload.* attributes (the body sent
+// to the authorization service, including its subject) are outside this contract.
 func TestAuthorize_TracesPrincipalNotToken(t *testing.T) {
 	t.Parallel()
 
@@ -1681,6 +1683,7 @@ func TestAuthorize_TracesPrincipalNotToken(t *testing.T) {
 		"type":  "normal-user",
 		"owner": "acme-org",
 		"sub":   "user123",
+		"azp":   "client-app-42",
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -1694,18 +1697,30 @@ func TestAuthorize_TracesPrincipalNotToken(t *testing.T) {
 	require.NotEmpty(t, spans, "expected the authorization spans to be exported")
 
 	attrs := map[string]string{}
+	identifiers := []string{"acme-org", "user123", "client-app-42"}
 
 	for _, s := range spans {
 		for _, attr := range s.Attributes {
-			attrs[string(attr.Key)] = attr.Value.AsString()
+			key := string(attr.Key)
+			attrs[key] = attr.Value.AsString()
 
 			assert.NotContains(t, attr.Value.AsString(), token,
-				"span %q leaks the access token in attribute %q", s.Name, attr.Key)
+				"span %q leaks the access token in attribute %q", s.Name, key)
+
+			if !strings.HasPrefix(key, "app.auth.principal.") {
+				continue
+			}
+
+			for _, id := range identifiers {
+				assert.NotContains(t, attr.Value.AsString(), id,
+					"span %q leaks a caller identifier in principal attribute %q", s.Name, key)
+			}
 		}
 	}
 
 	assert.Equal(t, "normal-user", attrs["app.auth.principal.type"])
-	assert.Equal(t, "acme-org/user123", attrs["app.auth.principal.subject"])
+	_, hasSubject := attrs["app.auth.principal.subject"]
+	assert.False(t, hasSubject, "the span must carry the principal type only, never its subject")
 }
 
 // ---------------------------------------------------------------------------

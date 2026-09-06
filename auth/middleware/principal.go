@@ -100,15 +100,14 @@ func (auth *AuthClient) derivePrincipalWithoutRoundTrip(ctx context.Context, spa
 
 // publishPrincipal stores the derived caller identity on the request Go context —
 // derived from c.Context(), NOT the tracing ctx, so it adds only the identity value
-// without altering span topology — and records its non-secret shape on the span.
-// The bearer token itself never reaches a span attribute or a log line.
+// without altering span topology — and records only the principal TYPE on the span.
+// Neither the bearer token nor any identifier of the caller (Owner, Sub, Subject,
+// ClientID) reaches a span attribute or a log line: the type says what kind of
+// caller this was, the request id correlates it with the service's own audit trail.
 func publishPrincipal(c fiber.Ctx, span trace.Span, p Principal) {
 	c.SetContext(context.WithValue(c.Context(), principalContextKey{}, p))
 
-	span.SetAttributes(
-		attribute.String("app.auth.principal.type", p.Type),
-		attribute.String("app.auth.principal.subject", p.Subject),
-	)
+	span.SetAttributes(attribute.String("app.auth.principal.type", p.Type))
 }
 
 // RequireHuman rejects any request whose published Principal.Type is not
