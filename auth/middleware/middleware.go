@@ -460,6 +460,14 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // product identifies the product/application owning the route (e.g. "midaz"); it is forwarded for normal-user flows, and for M2M (application)
 // flows when AUTH_M2M_PRODUCT_FORWARD_ENABLED is set, so the auth service can isolate permissions by product. M2M tokens are identified by their own subject claim.
 // If the user is authorized, the request is passed to the next handler; otherwise, a 403 Forbidden status is returned.
+//
+// Every refusal — 401 missing token, 403 denied, 503 unavailable, and the status
+// the Access Manager itself answered — is RETURNED as a *fiber.Error and never
+// written to the response here, so the service's own ErrorHandler renders it and
+// keeps its response envelope. Under Fiber's default handler the status and the
+// message are the ones a written body carried, so an app that never customized it
+// sees no change. When the Access Manager answered a coded error body, the
+// returned error also resolves to that commons.Response through errors.As.
 func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
 	auth.warnMissingTrustedProxies()
 
@@ -485,7 +493,7 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 		if auth.mustRefuse() {
 			// AUTH_REQUIRED opted in but auth is disabled/misconfigured: refuse to
 			// serve (fail closed) instead of silently passing the request through.
-			return c.Status(http.StatusServiceUnavailable).SendString("Service Unavailable")
+			return fiber.NewError(http.StatusServiceUnavailable, "Service Unavailable")
 		}
 
 		if !auth.canAuthorize() {
@@ -496,7 +504,7 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 			if auth.Enabled {
 				// Enabled but addressless is an incomplete configuration, not a
 				// deliberate "auth off": it never earns the no-round-trip branch.
-				return c.Status(http.StatusServiceUnavailable).SendString("Service Unavailable")
+				return fiber.NewError(http.StatusServiceUnavailable, "Service Unavailable")
 			}
 
 			return auth.authorizeWithoutRoundTrip(c, product)
@@ -513,7 +521,7 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 		if commons.IsNilOrEmpty(&accessToken) {
 			span.End()
 
-			return c.Status(http.StatusUnauthorized).SendString("Missing Token")
+			return fiber.NewError(http.StatusUnauthorized, "Missing Token")
 		}
 
 		// Derive the caller IP HERE, from this library's own TRUSTED_PROXIES list —
@@ -542,12 +550,15 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 			if errors.As(err, &commonsErr) {
 				span.End()
 
-				return c.Status(statusCode).JSON(commonsErr)
+				return accessManagerRefusal{
+					fiberErr: fiber.NewError(statusCode, refusalMessage(commonsErr, statusCode)),
+					response: commonsErr,
+				}
 			}
 
 			span.End()
 
-			return c.Status(statusCode).SendString(http.StatusText(statusCode))
+			return fiber.NewError(statusCode, http.StatusText(statusCode))
 		} else if authorized {
 			publishPrincipal(c, span, principal)
 
@@ -558,13 +569,49 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 
 		span.End()
 
-		return c.Status(http.StatusForbidden).SendString("Forbidden")
+		return fiber.NewError(http.StatusForbidden, "Forbidden")
 	}
 }
 
+// accessManagerRefusal is the single value Authorize returns when the Access
+// Manager answered with a coded error body. It serves two consumers at once:
+// errors.As resolves the *fiber.Error — which Fiber's DefaultErrorHandler reads
+// for the status, and a service's own ErrorHandler reads for its envelope — and
+// errors.As resolves the commons.Response, so a consumer that knows lib-commons
+// still recovers the code, title and message the Access Manager sent.
+//
+// errors.Join would resolve both too, but its Error() concatenates every joined
+// message with a newline, and the default handler renders err.Error() as the
+// response body — a caller would read the same message twice. Error() here is the
+// Fiber message alone, so the rendered body stays one line.
+type accessManagerRefusal struct {
+	fiberErr *fiber.Error
+	response commons.Response
+}
+
+func (e accessManagerRefusal) Error() string { return e.fiberErr.Error() }
+
+func (e accessManagerRefusal) Unwrap() []error { return []error{e.fiberErr, e.response} }
+
+// refusalMessage is the text a decoded Access Manager error renders as: its
+// business message, else its title, else the status text. A body carrying only a
+// code has an empty Message, and falling through to the status text keeps such a
+// refusal from rendering an empty response.
+func refusalMessage(response commons.Response, statusCode int) string {
+	if response.Message != "" {
+		return response.Message
+	}
+
+	if response.Title != "" {
+		return response.Title
+	}
+
+	return http.StatusText(statusCode)
+}
+
 // errAuthorizationUnavailable is the error Check reports alongside 503 when
-// Required is set but the client cannot authorize. Authorize answers the same
-// condition with a bare 503 body; Check has no response to write, so it needs a
+// Required is set but the client cannot authorize. Authorize returns the same
+// condition as a 503 *fiber.Error; Check has no response to write, so it needs a
 // value to hand its caller.
 var errAuthorizationUnavailable = errors.New("authorization is required but the authorization service is disabled or misconfigured")
 
@@ -676,14 +723,14 @@ func (auth *AuthClient) authorizeWithoutRoundTrip(c fiber.Ctx, product string) e
 	if commons.IsNilOrEmpty(&accessToken) {
 		span.End()
 
-		return c.Status(http.StatusUnauthorized).SendString("Missing Token")
+		return fiber.NewError(http.StatusUnauthorized, "Missing Token")
 	}
 
 	principal, statusCode, err := auth.derivePrincipalWithoutRoundTrip(ctx, span, accessToken, product)
 	if err != nil {
 		span.End()
 
-		return c.Status(statusCode).SendString(http.StatusText(statusCode))
+		return fiber.NewError(statusCode, http.StatusText(statusCode))
 	}
 
 	publishPrincipal(c, span, principal)

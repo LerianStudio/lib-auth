@@ -260,6 +260,16 @@ The `Authorize` function:
 * Checks if the response indicates that the user is authorized.
 * Allows the normal application flow or returns a 403 (Forbidden) error.
 
+Every refusal is **returned** as a `*fiber.Error`, never written to the response by
+the middleware, so the application's own `ErrorHandler` renders it and keeps its
+response envelope (RFC 9457 problem+json, say) instead of having a plain-text body
+written past it. The status and the message are the ones the written body carried, so
+a service running Fiber's `DefaultErrorHandler` gets identical responses: 401
+`Missing Token`, 403 `Forbidden`, 503 `Service Unavailable`, and the status text for
+anything else. When the authorization service answered a coded error body, the
+returned error also resolves to that `commons.Response` through `errors.As`, so a
+handler that knows lib-commons still renders the code, title and message it sent.
+
 ## 🪪 Principal on the request context
 
 Every path where `Authorize` reads a token and then calls `c.Next()` publishes the
