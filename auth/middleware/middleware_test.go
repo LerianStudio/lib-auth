@@ -1918,6 +1918,25 @@ func TestAuthorize_Disabled(t *testing.T) {
 		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
 	})
 
+	t.Run("nil_receiver_passes_through_without_a_token", func(t *testing.T) {
+		t.Parallel()
+
+		// A nil client is the historical "auth not wired" shape. Authorize keeps its
+		// pass-through instead of dereferencing the receiver: no panic, the request
+		// reaches the handler, and no principal is published.
+		var auth *AuthClient
+
+		var reached atomic.Bool
+
+		resp, err := newPrincipalEchoApp(auth, "midaz", &reached).
+			Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.True(t, reached.Load())
+		assert.Equal(t, "false", resp.Header.Get("X-P-Found"))
+	})
+
 	t.Run("required_when_disabled_rejects_a_missing_token", func(t *testing.T) {
 		t.Parallel()
 
@@ -2277,6 +2296,19 @@ func TestCheck(t *testing.T) {
 		defer server.Close()
 
 		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
+		require.NoError(t, err)
+		assert.True(t, authorized)
+		assert.Equal(t, http.StatusOK, statusCode)
+	})
+
+	t.Run("nil_receiver_reports_authorized", func(t *testing.T) {
+		t.Parallel()
+
+		// A nil client keeps the unavailable-client pass-through result Authorize has
+		// always had, without dereferencing the receiver.
+		var auth *AuthClient
 
 		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", normalUserToken, "")
 		require.NoError(t, err)
