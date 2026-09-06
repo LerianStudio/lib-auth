@@ -149,8 +149,9 @@ AUTH_REQUIRED=false
 # (Go duration). Defaults to 30s (behavior-neutral). It also caps the retry budget.
 AUTH_TIMEOUT=30s
 # AUTH_CACHE_TTL enables a short-lived decision cache when > 0, keyed by
-# (subject, resource, action, product, clientIp) — never the token. Empty/0
-# disables it (default). Security tradeoff: a permission revocation takes up to
+# (SHA-256 digest of the bearer token, subject, resource, action, product,
+# clientIp) — never the raw token. Empty/0 disables it (default). Security
+# tradeoff: a permission revocation takes up to
 # the TTL to propagate, so keep it small (5–15s). It sheds load and, with the
 # breaker, survives brief authz outages by serving fresh positive decisions.
 # The clientIp is part of the key so an IP-dependent decision cached for one
