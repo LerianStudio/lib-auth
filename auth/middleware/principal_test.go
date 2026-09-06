@@ -62,6 +62,22 @@ func TestPrincipalFromContext(t *testing.T) {
 		assert.Equal(t, Principal{}, got)
 	})
 
+	t.Run("absent_when_sub_is_whitespace_only", func(t *testing.T) {
+		t.Parallel()
+
+		// A sub made only of whitespace names nobody. Spaces and tabs/newlines
+		// alike must read as absent, exactly as an empty sub does.
+		for _, blank := range []string{"   ", "\t\n"} {
+			stored := Principal{Type: normalUser, Owner: "acme-org", Sub: blank}
+
+			ctx := context.WithValue(context.Background(), principalContextKey{}, stored)
+
+			got, ok := PrincipalFromContext(ctx)
+			assert.False(t, ok, "sub %q must read as absent", blank)
+			assert.Equal(t, Principal{}, got)
+		}
+	})
+
 	t.Run("absent_when_value_is_of_another_type", func(t *testing.T) {
 		t.Parallel()
 
@@ -146,6 +162,25 @@ func TestPrincipalFromClaims(t *testing.T) {
 			Subject:  "  acme-org  / user123 ",
 			ClientID: " client ",
 		}, principalFromClaims(claims, "  acme-org  / user123 "))
+	})
+
+	t.Run("normal_user_keeps_edge_whitespace_verbatim", func(t *testing.T) {
+		t.Parallel()
+
+		// Blank is the only bar the identity claims must clear. A padded but real
+		// claim is published exactly as the token wrote it, edge whitespace included.
+		claims := jwt.MapClaims{
+			"type":  normalUser,
+			"owner": " alice ",
+			"sub":   " u1 ",
+		}
+
+		assert.Equal(t, Principal{
+			Type:    normalUser,
+			Owner:   " alice ",
+			Sub:     " u1 ",
+			Subject: " alice / u1 ",
+		}, principalFromClaims(claims, " alice / u1 "))
 	})
 
 	t.Run("non_string_claims_degrade_to_empty", func(t *testing.T) {

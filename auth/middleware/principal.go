@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
@@ -14,9 +15,10 @@ import (
 
 // Principal is the caller identity Authorize derived from the bearer token and
 // published on the request context. Owner and Sub are the token claims VERBATIM
-// (no trimming, no normalization); Subject is the string sent to the Access
-// Manager. Under the legacy derivation (M2MInversionEnabled=false) Subject is the
-// fabricated role and Sub may be empty; PrincipalFromContext then reports absent.
+// (no normalization after rejecting empty or whitespace-only identity claims);
+// Subject is the string sent to the Access Manager. Under the legacy derivation
+// (M2MInversionEnabled=false) Subject is the fabricated role and Sub may be empty;
+// PrincipalFromContext then reports absent.
 type Principal struct {
 	Type     string // token "type" claim: "normal-user" | "application"
 	Owner    string // "owner" claim; empty for application tokens
@@ -31,10 +33,10 @@ type Principal struct {
 type principalContextKey struct{}
 
 // PrincipalFromContext returns the Principal Authorize stored on the request Go
-// context, or (zero, false) when absent or when Sub is empty.
+// context, or (zero, false) when absent or when Sub is empty/whitespace-only.
 func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(principalContextKey{}).(Principal)
-	if !ok || p.Sub == "" {
+	if !ok || strings.TrimSpace(p.Sub) == "" {
 		return Principal{}, false
 	}
 
@@ -46,8 +48,8 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 // claim is copied verbatim except that application principals never expose an
 // owner: their identity is the sub claim alone. A claim that is absent or not a
 // string becomes the empty string, never an error, because the claim-level rules
-// that DO fail closed (missing owner, missing sub) live in deriveSubject and have
-// already run.
+// that DO fail closed (missing or whitespace-only owner, missing or whitespace-only
+// sub) live in deriveSubject and have already run.
 func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 	userType, _ := claims["type"].(string)
 	owner, _ := claims["owner"].(string)
@@ -109,7 +111,7 @@ func (auth *AuthClient) derivePrincipalWithoutRoundTrip(ctx context.Context, spa
 	// The legacy non-inversion derivation can authorize a fabricated role without
 	// a real sub claim. That remains compatible on the Access Manager-backed path,
 	// but it cannot satisfy this path's promise to require a named principal.
-	if principal.Sub == "" {
+	if strings.TrimSpace(principal.Sub) == "" {
 		err := errors.New("missing sub claim in token")
 		tracing.HandleSpanError(span, "Missing sub claim in token", err)
 

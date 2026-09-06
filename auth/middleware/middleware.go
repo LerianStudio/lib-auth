@@ -722,7 +722,7 @@ func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, clai
 	switch userType {
 	case normalUser:
 		owner, _ := claims["owner"].(string)
-		if owner == "" {
+		if strings.TrimSpace(owner) == "" {
 			logErrorf(ctx, auth.Logger, "Missing owner claim in token")
 
 			err := errors.New("missing owner claim in token")
@@ -733,7 +733,7 @@ func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, clai
 		}
 
 		userID, _ := claims["sub"].(string)
-		if userID == "" {
+		if strings.TrimSpace(userID) == "" {
 			logErrorf(ctx, auth.Logger, "Missing sub claim in token")
 
 			err := errors.New("missing sub claim in token")
@@ -746,7 +746,7 @@ func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, clai
 		return fmt.Sprintf("%s/%s", owner, userID), http.StatusOK, nil
 	case application:
 		sub, _ := claims["sub"].(string)
-		if sub == "" {
+		if strings.TrimSpace(sub) == "" {
 			logErrorf(ctx, auth.Logger, "Missing sub claim in application token")
 
 			err := errors.New("missing sub claim in token")

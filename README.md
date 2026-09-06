@@ -264,8 +264,9 @@ The `Authorize` function:
 Every path where `Authorize` reads a token and then calls `c.Next()` publishes the
 caller identity it derived, so a handler never has to parse the token again. Read it
 back with `PrincipalFromContext`, which reports absent when no principal was
-published and when the derivation produced no real subject (the legacy
-`M2MInversionEnabled=false` model, where the subject is a fabricated role).
+published, when the stored `Sub` is empty or whitespace-only, and when the
+derivation produced no real subject (the legacy `M2MInversionEnabled=false` model,
+where the subject is a fabricated role).
 
 ```go
 type Principal struct {
@@ -279,8 +280,11 @@ type Principal struct {
 func PrincipalFromContext(ctx context.Context) (Principal, bool)
 ```
 
-`Owner` and `Sub` are the claims verbatim, with no trimming or normalization.
-`Subject` is the string sent to the authorization service.
+An `owner` or `sub` claim that is empty or whitespace-only names nobody and is
+refused with 401 before any principal is published. Every other value is published
+verbatim: `Owner` and `Sub` are the claims as the token wrote them, edge whitespace
+included, with no normalization. `Subject` is the string sent to the authorization
+service.
 
 Publication covers the authorized decision, a decision-cache hit, and the
 `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` path below. A denied request publishes
@@ -300,8 +304,9 @@ deployment that runs with the authorization service off. When it is `true` and t
 client cannot authorize, `Authorize` still extracts the token (401 when missing),
 parses the claims, derives the subject under the same fail-closed token-type rules,
 and publishes the `Principal`. A legacy fabricated-role token without a real `sub`
-is refused with 401 because it does not name a principal. The authorization
-round-trip is the only thing skipped. The branch is taken only when the client is
+is refused with 401 because it does not name a principal, as is a token whose `sub`
+is empty or whitespace-only. The authorization round-trip is the only thing
+skipped. The branch is taken only when the client is
 disabled: a client that is enabled but has no address is an incomplete
 configuration and refuses with 503 in both `Authorize` and `Check`, never the
 no-round-trip path. `AUTH_REQUIRED` takes precedence: a client
@@ -371,7 +376,8 @@ It returns:
 * `(false, status, err)` when the authorization service answers with a coded error
   body;
 * `(false, 401, err)` on a local token failure: a missing or invalid token, an
-  unsupported token type, a missing `owner` or `sub` claim;
+  unsupported token type, an `owner` or `sub` claim that is missing, empty or
+  whitespace-only;
 * `(false, 503, err)` whenever the authorization service is unavailable: a connection
   refused or other transport error, retries exhausted, or an open breaker. A client
   with `AUTH_REQUIRED` set that cannot authorize answers the same way, without

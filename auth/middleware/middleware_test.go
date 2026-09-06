@@ -1654,6 +1654,59 @@ func TestAuthorize_PublishesPrincipal(t *testing.T) {
 	})
 }
 
+// TestAuthorize_WhitespaceOnlyIdentityClaimsAreRefused pins the fail-closed half of
+// the identity contract on the authorizing path: a claim made only of whitespace
+// names nobody, so it is refused with 401 BEFORE the round-trip. The hit count is
+// the load-bearing assertion — the Access Manager is never asked to decide for a
+// caller that has no name, and no principal reaches the handler.
+func TestAuthorize_WhitespaceOnlyIdentityClaimsAreRefused(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		claims jwt.MapClaims
+	}{
+		{
+			name:   "normal_user_blank_owner",
+			claims: jwt.MapClaims{"type": "normal-user", "owner": "  ", "sub": "user123"},
+		},
+		{
+			name:   "normal_user_blank_sub",
+			claims: jwt.MapClaims{"type": "normal-user", "owner": "acme-org", "sub": "  "},
+		},
+		{
+			name:   "application_blank_sub",
+			claims: jwt.MapClaims{"type": "application", "sub": " \t "},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+				writeAuthorized(w, true)
+			})
+
+			auth := &AuthClient{
+				Address:             server.URL,
+				Enabled:             true,
+				M2MInversionEnabled: true,
+				Logger:              &testLogger{},
+			}
+
+			var reached atomic.Bool
+
+			resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(tt.claims))
+
+			assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.False(t, reached.Load(), "a nameless caller must never reach the handler")
+			assert.Empty(t, resp.Header.Get("X-P-Found"), "no principal may be published")
+			assert.Equal(t, int64(0), hits.Load(), "the authorization service must never be asked to decide")
+		})
+	}
+}
+
 // TestAuthorize_TracesPrincipalNotToken proves the telemetry rule for the whole
 // authorization path: across EVERY span this package exports, the only identity
 // attribute is app.auth.principal.type, and neither the bearer token nor any caller
@@ -2065,6 +2118,35 @@ func TestAuthorize_Disabled(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 		assert.False(t, reached.Load())
+		assert.Equal(t, int64(0), hits.Load())
+	})
+
+	t.Run("required_when_disabled_rejects_a_whitespace_only_sub", func(t *testing.T) {
+		t.Parallel()
+
+		// A sub made only of whitespace names nobody, so this path refuses it with
+		// 401 by the SAME rule the enabled path applies — and, as everywhere here,
+		// with no authorization call made.
+		server, hits := unreachableServer(t)
+
+		auth := &AuthClient{
+			Address:                       server.URL,
+			Enabled:                       false,
+			M2MInversionEnabled:           true,
+			PrincipalRequiredWhenDisabled: true,
+			Logger:                        &testLogger{},
+		}
+
+		var reached atomic.Bool
+
+		resp := authorizedRequest(t, newPrincipalEchoApp(auth, "midaz", &reached), createTestJWT(jwt.MapClaims{
+			"type": "application",
+			"sub":  " \t ",
+		}))
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.False(t, reached.Load())
+		assert.Empty(t, resp.Header.Get("X-P-Found"), "no principal may be published")
 		assert.Equal(t, int64(0), hits.Load())
 	})
 
