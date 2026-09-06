@@ -43,14 +43,19 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 
 // principalFromClaims assembles the caller identity from the already-parsed token
 // claims plus the subject deriveSubject produced for the authorization call. Each
-// claim is copied verbatim: a claim that is absent or not a string becomes the
-// empty string, never an error, because the claim-level rules that DO fail closed
-// (missing owner, missing sub) live in deriveSubject and have already run.
+// claim is copied verbatim except that application principals never expose an
+// owner: their identity is the sub claim alone. A claim that is absent or not a
+// string becomes the empty string, never an error, because the claim-level rules
+// that DO fail closed (missing owner, missing sub) live in deriveSubject and have
+// already run.
 func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 	userType, _ := claims["type"].(string)
 	owner, _ := claims["owner"].(string)
 	sub, _ := claims["sub"].(string)
 	clientID, _ := claims["azp"].(string)
+	if userType == application {
+		owner = ""
+	}
 
 	return Principal{
 		Type:     userType,

@@ -102,9 +102,10 @@ func TestPrincipalFromClaims(t *testing.T) {
 		t.Parallel()
 
 		claims := jwt.MapClaims{
-			"type": application,
-			"sub":  "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc",
-			"azp":  "66bac70fbea746daa760",
+			"type":  application,
+			"owner": "must-not-be-published",
+			"sub":   "admin/3a09ac44-1faf-4e66-843c-5152b09b19dc",
+			"azp":   "66bac70fbea746daa760",
 		}
 
 		assert.Equal(t, Principal{
