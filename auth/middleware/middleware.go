@@ -526,7 +526,9 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 		// would forward the ingress address and could produce a false ALLOW.
 		clientIP := auth.resolveClientIP(c)
 
-		if authorized, statusCode, principal, err := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP); err != nil {
+		resolution, principal := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+
+		if authorized, statusCode, err := resolution.legacyResult(); err != nil {
 			var commonsErr commons.Response
 			if errors.As(err, &commonsErr) {
 				span.End()
@@ -559,10 +561,21 @@ var errAuthorizationUnavailable = errors.New("authorization is required but the 
 
 // Check evaluates (product, resource, action) for the bearer token outside the
 // middleware chain, with the same derivation, decision cache, breaker and
-// fail-closed rules Authorize applies. It returns (true, 200, nil) when
-// authorized, (false, 403, nil) when denied, and (false, status, err) on a
-// token or transport failure. It never publishes a Principal; the caller already
-// has one from Authorize.
+// fail-closed rules Authorize applies. It returns:
+//
+//   - (true, 200, nil) when authorized;
+//   - (false, 403, nil) on an authoritative denial from the Access Manager, or the
+//     status the Access Manager refused with when it answered with a coded body;
+//   - (false, 401, err) on a local token failure — a missing or invalid token, an
+//     unsupported token type, a missing owner or sub claim;
+//   - (false, 503, err) whenever the authorization service is unavailable: a
+//     connection refused or other transport error, retries exhausted, or an open
+//     breaker.
+//
+// The unavailable result stays fail-closed but remains distinguishable from an
+// authoritative denial, including when retry or breaker support is enabled.
+//
+// It never publishes a Principal; the caller already has one from Authorize.
 //
 // clientIP is CALLER-SUPPLIED and reaches the Access Manager decision as-is, where
 // it feeds the per-tenant IP allowlist. Pass it empty, which omits the field exactly
@@ -572,12 +585,9 @@ var errAuthorizationUnavailable = errors.New("authorization is required but the 
 // X-Forwarded-For header, which lets the caller choose the address the allowlist
 // matches it against.
 //
-// A transport failure surfaces differently depending on the resilience settings.
-// With the breaker and retry disabled, which is the default, it returns
-// (false, 500, err). With AUTH_BREAKER_ENABLED or AUTH_RETRY_MAX set, an exhausted
-// failure surfaces as (false, 403, nil), indistinguishable from a policy deny. This
-// mirrors Authorize, and both shapes are fail-closed, so a caller that reads only
-// the boolean is safe either way.
+// Authorize is unaffected by the 503 mapping: on the same outage it answers on the
+// wire exactly what it always did, since the caller of a Fiber route has no use for
+// the distinction Check's caller needs.
 func (auth *AuthClient) Check(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
@@ -610,7 +620,9 @@ func (auth *AuthClient) Check(ctx context.Context, product, resource, action, ac
 		return true, http.StatusOK, nil
 	}
 
-	authorized, statusCode, _, err := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+	resolution, _ := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+
+	authorized, statusCode, err := resolution.checkResult()
 	if err != nil {
 		return false, statusCode, err
 	}
@@ -759,16 +771,20 @@ func shouldForwardProduct(userType, product string, forwardM2MProduct bool) bool
 // the pre-IP behavior for every deployed access-manager. The auth service
 // interprets the IP; this layer never parses or validates it.
 func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error) {
-	authorized, statusCode, _, err := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+	resolution, _ := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
 
-	return authorized, statusCode, err
+	return resolution.legacyResult()
 }
 
 // checkAuthorizationWithPrincipal is checkAuthorization plus the caller identity it
 // derived on the way to the decision, so the Fiber middleware can publish it on the
 // request context. The identity is built BEFORE the decision cache is consulted, so
 // a cache hit carries the same principal a round-trip would have.
-func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, Principal, error) {
+//
+// It returns the full authzResolution rather than the legacy triple: callers that
+// answer on the wire read legacyResult and behave exactly as before, while Check
+// reads checkResult and can tell an outage from a denial.
+func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, product, resource, action, accessToken, clientIP string) (authzResolution, Principal) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -786,7 +802,9 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, pro
 
 	principal, statusCode, err := auth.derivePrincipal(ctx, span, accessToken, product)
 	if err != nil {
-		return false, statusCode, Principal{}, err
+		// A local token failure: the request never reaches the Access Manager, so
+		// this is never an outage.
+		return authzResolution{statusCode: statusCode, err: err}, Principal{}
 	}
 
 	userType, sub := principal.Type, principal.Subject
@@ -829,7 +847,7 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, pro
 	if err != nil {
 		tracing.HandleSpanError(span, "Failed to convert request body to JSON string", err)
 
-		return false, http.StatusInternalServerError, Principal{}, err
+		return authzResolution{statusCode: http.StatusInternalServerError, err: err}, Principal{}
 	}
 
 	requestBodyJSON, err := json.Marshal(requestBody)
@@ -838,7 +856,7 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, pro
 
 		tracing.HandleSpanError(span, "Failed to marshal request body", err)
 
-		return false, http.StatusInternalServerError, Principal{}, err
+		return authzResolution{statusCode: http.StatusInternalServerError, err: err}, Principal{}
 	}
 
 	// Cache key = the authz request inputs PLUS a digest of the bearer token they were
@@ -863,13 +881,11 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, pro
 	// serving a stale grant).
 	if auth.cache != nil {
 		if authorized, hit := auth.cache.get(key); hit {
-			return authorized, http.StatusOK, principal, nil
+			return authzResolution{authorized: authorized, statusCode: http.StatusOK}, principal
 		}
 	}
 
-	authorized, statusCode, err := auth.resolveAuthz(ctx, span, accessToken, requestBodyJSON, key)
-
-	return authorized, statusCode, principal, err
+	return auth.resolveAuthz(ctx, span, accessToken, requestBodyJSON, key), principal
 }
 
 // GetApplicationToken sends a POST request to the authorization service to get a token for the application.

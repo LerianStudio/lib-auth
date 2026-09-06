@@ -16,6 +16,7 @@ import (
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/sony/gobreaker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -2225,4 +2226,127 @@ func TestCheck_SendsTheSameBodyAsAuthorize(t *testing.T) {
 
 	require.Len(t, *bodies, 2)
 	assert.Equal(t, (*bodies)[0], (*bodies)[1])
+}
+
+// ---------------------------------------------------------------------------
+// Check - authorization-service outages are 503, never a denial (FC-4)
+// ---------------------------------------------------------------------------
+
+// authorizeWireAnswer drives Authorize on the given client through a real Fiber app
+// and returns the status and body it wrote. Every outage subtest below holds the
+// new 503 Check reports against this, to prove the middleware path still answers on
+// the wire exactly what it answered before the distinction existed.
+func authorizeWireAnswer(t *testing.T, auth *AuthClient, token string) (int, string) {
+	t.Helper()
+
+	app := fiber.New()
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+		return c.SendString("reached handler")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	// The retry subtest outlives Fiber's 1s default test deadline.
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second, FailOnTimeout: true})
+	require.NoError(t, err)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	return resp.StatusCode, string(body)
+}
+
+func TestCheck_AuthorizationServiceUnavailableIs503(t *testing.T) {
+	t.Parallel()
+
+	token := createTestJWT(jwt.MapClaims{
+		"type":  "normal-user",
+		"owner": "acme-org",
+		"sub":   "user123",
+	})
+
+	t.Run("connection_refused_without_retry_or_breaker", func(t *testing.T) {
+		t.Parallel()
+
+		// A server closed before use: nobody is listening on its address.
+		server := mockAuthServer(t, true, http.StatusOK)
+		server.Close()
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+		require.Error(t, err)
+		assert.False(t, authorized, "an unreachable authorization service must stay fail-closed")
+		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+		assert.Contains(t, err.Error(), "failed to make request")
+
+		// Authorize is unchanged: a transport error with no resilience layer to
+		// absorb it is still the internal error it always was.
+		status, body := authorizeWireAnswer(t, auth, token)
+		assert.Equal(t, http.StatusInternalServerError, status)
+		assert.Equal(t, http.StatusText(http.StatusInternalServerError), body)
+	})
+
+	t.Run("retries_exhausted", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+
+		auth := &AuthClient{
+			Address:  server.URL,
+			Enabled:  true,
+			Logger:   &testLogger{},
+			timeout:  5 * time.Second,
+			retryMax: 1,
+		}
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+		require.Error(t, err)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+		assert.Equal(t, int64(2), hits.Load(), "the initial attempt plus one retry must both have been made")
+
+		// Authorize is unchanged: an absorbed outage is still the fail-closed deny.
+		status, body := authorizeWireAnswer(t, auth, token)
+		assert.Equal(t, http.StatusForbidden, status)
+		assert.Equal(t, "Forbidden", body)
+	})
+
+	t.Run("breaker_open", func(t *testing.T) {
+		t.Parallel()
+
+		server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+
+		auth := &AuthClient{
+			Address: server.URL,
+			Enabled: true,
+			Logger:  &testLogger{},
+			breaker: newAuthBreaker(2, time.Minute),
+		}
+
+		// Two consecutive transient failures trip the breaker.
+		for i := 0; i < 2; i++ {
+			_, _, err := auth.checkAuthorization(context.Background(), "midaz", "resource", "get", token, "")
+			require.NoError(t, err, "an absorbed outage denies without surfacing an error on the legacy path")
+		}
+
+		require.Equal(t, int64(2), hits.Load())
+
+		authorized, statusCode, err := auth.Check(context.Background(), "midaz", "resource", "get", token, "")
+		require.ErrorIs(t, err, gobreaker.ErrOpenState)
+		assert.False(t, authorized)
+		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+
+		// Authorize is unchanged: an open breaker is still the fail-closed deny.
+		status, body := authorizeWireAnswer(t, auth, token)
+		assert.Equal(t, http.StatusForbidden, status)
+		assert.Equal(t, "Forbidden", body)
+
+		assert.Equal(t, int64(2), hits.Load(), "an open breaker must short-circuit, not reach the authz service")
+	})
 }

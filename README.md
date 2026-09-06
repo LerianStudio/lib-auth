@@ -359,12 +359,23 @@ fail-closed rules:
 func (auth *AuthClient) Check(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error)
 ```
 
-It returns `(true, 200, nil)` when authorized, `(false, 403, nil)` when denied (a
-plain deny is an answer, not a failure), and `(false, status, err)` on a token or
-transport failure. When `AUTH_REQUIRED` is set and the client cannot authorize, it
-returns `(false, 503, err)` without evaluating the token, mirroring `Authorize`.
-`Check` publishes no principal: the caller already holds the one `Authorize`
-published.
+It returns:
+
+* `(true, 200, nil)` when authorized;
+* `(false, 403, nil)` on an authoritative denial from the authorization service — a
+  plain deny is an answer, not a failure — or the status it refused with when it
+  answered with a coded error body;
+* `(false, 401, err)` on a local token failure: a missing or invalid token, an
+  unsupported token type, a missing `owner` or `sub` claim;
+* `(false, 503, err)` whenever the authorization service is unavailable: a connection
+  refused or other transport error, retries exhausted, or an open breaker. A client
+  with `AUTH_REQUIRED` set that cannot authorize answers the same way, without
+  evaluating the token.
+
+The unavailable result stays fail-closed — never authorized — but remains
+distinguishable from an authoritative denial, including when `AUTH_RETRY_MAX` or
+`AUTH_BREAKER_ENABLED` is set. `Check` publishes no principal: the caller already
+holds the one `Authorize` published.
 
 `clientIP` is **caller-supplied** and reaches the authorization decision as-is, where
 it feeds the per-tenant IP allowlist described in
@@ -375,12 +386,10 @@ resolved yourself through your own trusted-proxy configuration. Never pass Fiber
 `X-Forwarded-For` header, which lets a caller pick the address the allowlist matches
 it against.
 
-A transport failure surfaces in one of two shapes, depending on the resilience
-settings. With the breaker and retry disabled, which is the default, `Check` returns
-`(false, 500, err)`. With `AUTH_BREAKER_ENABLED` or `AUTH_RETRY_MAX` set, an exhausted
-failure surfaces as `(false, 403, nil)`, indistinguishable from a policy deny. This
-mirrors `Authorize`, and both shapes are fail-closed, so a caller that reads only the
-boolean is safe either way.
+`Authorize` is unaffected by the 503 mapping: on the same outage it answers on the
+wire exactly what it always did — the fail-closed `403 Forbidden` once retry or the
+breaker absorbed the failure, `500 Internal Server Error` when neither is configured
+— since a route's caller has no use for the distinction `Check`'s caller needs.
 
 ## 📥 Example Request to Auth
 
