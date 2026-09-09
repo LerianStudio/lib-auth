@@ -1070,21 +1070,22 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	respError, err := unmarshalErrorResponse(body)
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to unmarshal auth error response: %v", err)
+	// The STATUS says whether a token was issued, never a field inside the body.
+	// This used to refuse only when the body carried a non-empty "code", and that
+	// field is optional in both error shapes the Access Manager serves. A refusal
+	// without one fell through to the token decode, where it yields an EMPTY access
+	// token and a nil error — a failed login reported as a successful one, handing
+	// the caller a blank bearer. The declaration publisher reads exactly that pair
+	// as "auth is disabled or misconfigured" and stops retrying permanently, so a
+	// transient refusal at boot became a permanent give-up.
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		refusal := accessManagerRefusalFrom(resp.StatusCode, body)
 
-		tracing.HandleSpanError(span, "Failed to unmarshal auth error response", err)
+		logErrorf(ctx, auth.Logger, "Failed to get application token: %s", refusal.Message)
 
-		return "", fmt.Errorf("failed to unmarshal auth error response: %w", err)
-	}
+		tracing.HandleSpanError(span, "Failed to get application token", refusal)
 
-	if respError.Code != "" && resp.StatusCode != http.StatusInternalServerError {
-		logErrorf(ctx, auth.Logger, "Failed to get application token: %s", respError.Message)
-
-		tracing.HandleSpanError(span, "Failed to get application token", respError)
-
-		return "", respError
+		return "", refusal
 	}
 
 	var response oauth2Token
@@ -1094,6 +1095,19 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		tracing.HandleSpanError(span, "Failed to unmarshal response", err)
 
 		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	// A 2xx that carries no bearer is a failed login too. The one ("", nil) this
+	// function may still return is the deliberate "auth is off" decided above,
+	// before any request leaves.
+	if response.AccessToken == "" {
+		missing := errors.New("authorization service returned no access token")
+
+		logErrorf(ctx, auth.Logger, "Failed to get application token: %v", missing)
+
+		tracing.HandleSpanError(span, "Failed to get application token", missing)
+
+		return "", missing
 	}
 
 	return response.AccessToken, nil
