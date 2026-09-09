@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -273,8 +274,14 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 		return authzOutcome{statusCode: http.StatusServiceUnavailable, authErr: unavailable, transientErr: unavailable}
 	}
 
-	var response AuthResponse
-	if err := json.Unmarshal(body, &response); err != nil {
+	// Decoded through a POINTER, which AuthResponse's plain bool cannot do: `null`
+	// and `{}` unmarshal cleanly and leave a plain bool false, so a body that never
+	// answered the question was indistinguishable from one that answered "no".
+	var decoded struct {
+		Authorized *bool `json:"authorized"`
+	}
+
+	if err := json.Unmarshal(body, &decoded); err != nil {
 		logErrorf(ctx, auth.Logger, "Failed to unmarshal response: %v", err)
 		tracing.HandleSpanError(span, "Failed to unmarshal response", err)
 
@@ -286,7 +293,26 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 		return authzOutcome{statusCode: http.StatusServiceUnavailable, authErr: unavailable, transientErr: unavailable}
 	}
 
-	return authzOutcome{authorized: response.Authorized, statusCode: statusCode}
+	// A 2xx that parses but carries no decision is the same condition as one that
+	// does not parse: the service answered and did not answer the question. Reading
+	// it as a denial would hide a broken contract behind a plausible refusal.
+	//
+	// This is retryable and breaker-eligible, the cost that kept 404 an
+	// authoritative refusal. It is acceptable here because a missing decision
+	// cannot be a property of one caller's data: the Access Manager's decision
+	// field carries no omitempty, so a genuine deny always writes
+	// "authorized":false. An absent one is a contract break or a responder that is
+	// not the Access Manager, so no single caller can trip the breaker through it.
+	if decoded.Authorized == nil {
+		unavailable := errors.New("authorization service returned no decision")
+
+		logErrorf(ctx, auth.Logger, "Authorization unavailable: %v", unavailable)
+		tracing.HandleSpanError(span, "Authorization unavailable", unavailable)
+
+		return authzOutcome{statusCode: http.StatusServiceUnavailable, authErr: unavailable, transientErr: unavailable}
+	}
+
+	return authzOutcome{authorized: *decoded.Authorized, statusCode: statusCode}
 }
 
 // isCallerRefusal reports whether a status from the Access Manager is a decision
@@ -317,6 +343,11 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 //     rail's own authorization volume. Telling an end caller to slow down about a
 //     quota they do not hold is wrong, and a throttle is precisely the transient
 //     condition the retry and breaker layers exist to absorb.
+//   - 408 — the responder's own side timed out waiting for the request. Nothing
+//     on the authorize path emits one (the Access Manager has no 408 in its error
+//     catalog at all), so it can only come from an intermediary, which makes it a
+//     statement about the hop rather than about the caller. RFC 9110 defines it as
+//     repeatable, which is exactly what "unavailable" buys it here.
 //
 // The default is deliberately "caller refusal", not "unavailable". Reporting a
 // permanent, caller-caused refusal as an outage would also make it RETRYABLE and
@@ -328,7 +359,8 @@ func isCallerRefusal(statusCode int) bool {
 	}
 
 	switch statusCode {
-	case http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusTooManyRequests:
+	case http.StatusBadRequest, http.StatusRequestTimeout,
+		http.StatusUnprocessableEntity, http.StatusTooManyRequests:
 		return false
 	default:
 		return true

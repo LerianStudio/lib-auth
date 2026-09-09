@@ -239,6 +239,7 @@ func TestAuthorize_A4xxThatIsNotAboutTheCallerIs503(t *testing.T) {
 		{"unprocessable_entity_with_a_code", http.StatusUnprocessableEntity, `{"status":422,"detail":"resource must not be empty","code":"AUT-0007"}`},
 		{"unprocessable_entity_from_the_framework", http.StatusUnprocessableEntity, `{"title":"Unprocessable Entity","status":422,"detail":"expected object, but received string"}`},
 		{"rate_limited", http.StatusTooManyRequests, `{"title":"Too Many Requests","status":429,"detail":"rate limit exceeded"}`},
+		{"request_timeout", http.StatusRequestTimeout, `{"title":"Request Timeout","status":408}`},
 	}
 
 	for _, tc := range cases {
@@ -265,9 +266,13 @@ func TestAuthorize_EveryNon2xxStillRefuses(t *testing.T) {
 	t.Parallel()
 
 	statuses := []int{
+		// The 3xx here carries NO Location header, so Go returns it rather than
+		// following it: this entry exercises the classifier, not the redirect
+		// machinery. A redirect that is actually followed is a distinct fail-open
+		// and is pinned by TestAuthorize_ARedirectIsNeverFollowed.
 		http.StatusMovedPermanently, http.StatusBadRequest, http.StatusUnauthorized,
 		http.StatusForbidden, http.StatusNotFound, http.StatusConflict,
-		http.StatusUnprocessableEntity, http.StatusTooManyRequests,
+		http.StatusRequestTimeout, http.StatusUnprocessableEntity, http.StatusTooManyRequests,
 		http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout,
 	}
 
@@ -290,4 +295,58 @@ func TestAuthorize_EveryNon2xxStillRefuses(t *testing.T) {
 			require.Error(t, capture.get(), "a %d must always produce a refusal", status)
 		})
 	}
+}
+
+// TestAuthorize_A2xxWithNoDecisionIs503 pins the last way a 2xx can fail to be an
+// answer. `null` and `{}` both unmarshal cleanly and leave a plain bool false, so
+// a missing decision used to reach the caller as an ordinary denial — safe, but it
+// hides a broken contract behind a plausible-looking refusal, and it is the same
+// condition as the unparseable body that already reports 503.
+//
+// Making it unavailable makes it retryable and breaker-eligible, which is the cost
+// that kept 404 a refusal. It is acceptable here because a missing decision cannot
+// be a property of one caller's data: the Access Manager's decision field carries
+// no omitempty (model.EnforcePermissionResult), so a genuine deny always writes
+// "authorized":false. An absent field is a contract break or a responder that is
+// not the Access Manager — never something one user can cause, so no single caller
+// can trip the breaker through this path.
+func TestAuthorize_A2xxWithNoDecisionIs503(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct{ name, body string }{
+		{"null", `null`},
+		{"empty_object", `{}`},
+		{"explicit_null_decision", `{"authorized":null}`},
+		{"only_a_timestamp", `{"timestamp":"2026-01-15T09:30:00Z"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := accessManagerServing(t, http.StatusOK, tc.body)
+
+			app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+
+			resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
+			assert.Equal(t, http.StatusTeapot, resp.StatusCode)
+			requireFiberError(t, capture.get(), http.StatusServiceUnavailable, "Service Unavailable")
+		})
+	}
+}
+
+// TestAuthorize_A2xxDenialIsStillADenial is the counterweight to the test above:
+// an explicit "no" must stay an ordinary 403 policy denial and must NOT become an
+// outage, because that is the answer the Access Manager gives for every denied
+// permission (it answers 200 with authorized=false, never 403).
+func TestAuthorize_A2xxDenialIsStillADenial(t *testing.T) {
+	t.Parallel()
+
+	server := accessManagerServing(t, http.StatusOK, `{"authorized":false,"timestamp":"2026-01-15T09:30:00Z"}`)
+
+	app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+
+	resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
+	assert.Equal(t, http.StatusTeapot, resp.StatusCode)
+	requireFiberError(t, capture.get(), http.StatusForbidden, "Forbidden")
 }

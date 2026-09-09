@@ -162,6 +162,10 @@ type AuthClient struct {
 	noProxiesOnce sync.Once
 }
 
+// AuthResponse is the decision body /v1/authorize returns on a 2xx. It is part of
+// this package's published surface and describes the wire shape; the classifier
+// decodes through a pointer instead (see classifyResponse), because a plain bool
+// cannot tell a decision of "no" from a body that carried no decision at all.
 type AuthResponse struct {
 	Authorized bool      `json:"authorized"`
 	Timestamp  time.Time `json:"timestamp"`
