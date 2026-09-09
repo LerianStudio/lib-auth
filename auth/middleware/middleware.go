@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -161,6 +162,10 @@ type AuthClient struct {
 	noProxiesOnce sync.Once
 }
 
+// AuthResponse is the decision body /v1/authorize returns on a 2xx. It is part of
+// this package's published surface and describes the wire shape; the classifier
+// decodes through a pointer instead (see classifyResponse), because a plain bool
+// cannot tell a decision of "no" from a body that carried no decision at all.
 type AuthResponse struct {
 	Authorized bool      `json:"authorized"`
 	Timestamp  time.Time `json:"timestamp"`
@@ -186,6 +191,25 @@ const (
 // are safe for concurrent use and should be reused across requests.
 var sharedHTTPClient = &http.Client{
 	Timeout: 30 * time.Second,
+
+	// Never follow a redirect. Do returns the 3xx itself, which every caller here
+	// already treats as "the authorization service did not answer".
+	//
+	// Following one is a FAIL-OPEN on the authorization path. Do would hand the
+	// classifier the FINAL response, so the status it decides on would belong to
+	// whatever the Location named rather than to the service this library
+	// addressed: a 302 pointing anywhere that answers 200 {"authorized":true}
+	// becomes a grant. It is the same shape as a refusal body claiming authorized,
+	// except that the status is laundered too, and it needs no misconfiguration of
+	// PLUGIN_AUTH_ADDRESS — one compromised or careless hop in front of the Access
+	// Manager is enough.
+	//
+	// It is also a credential leak on the token path: 307 and 308 preserve the
+	// method AND the body, so a redirect would re-POST clientSecret to the host the
+	// Location names.
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
 	Transport: &http.Transport{
 		ForceAttemptHTTP2:   false,
 		MaxIdleConns:        100,
@@ -195,12 +219,21 @@ var sharedHTTPClient = &http.Client{
 }
 
 // unmarshalErrorResponse unmarshals a JSON response body into commons.Response,
-// tolerating a numeric "code" field (the auth service may return code as a number).
+// reading BOTH error shapes the Access Manager serves. Its Fiber-native routes
+// answer with the legacy envelope, whose human text is "message"; its Huma-served
+// routes answer with the shared RFC 9457 problem document, whose human text is
+// "detail" — and /v1/authorize is one of those today. Reading "message" alone
+// decoded a fully described refusal as a blank one, so the refusal reached the
+// caller as the bare status word.
+//
+// It also tolerates a numeric "code" field (the auth service may return code as a
+// number).
 func unmarshalErrorResponse(body []byte) (commons.Response, error) {
 	var raw struct {
 		EntityType string          `json:"entityType,omitempty"`
 		Title      string          `json:"title,omitempty"`
 		Message    string          `json:"message,omitempty"`
+		Detail     string          `json:"detail,omitempty"`
 		Code       json.RawMessage `json:"code,omitempty"`
 	}
 
@@ -211,7 +244,7 @@ func unmarshalErrorResponse(body []byte) (commons.Response, error) {
 	resp := commons.Response{
 		EntityType: raw.EntityType,
 		Title:      raw.Title,
-		Message:    raw.Message,
+		Message:    cmp.Or(raw.Message, raw.Detail),
 	}
 
 	if len(raw.Code) > 0 {
@@ -616,6 +649,23 @@ func refusalMessage(response commons.Response, statusCode int) string {
 	return http.StatusText(statusCode)
 }
 
+// accessManagerRefusalFrom builds the error a non-2xx Access Manager answer
+// surfaces as. The STATUS is what makes the answer a refusal; the body only
+// supplies the reason, so a body that is empty, carries no domain code, or is not
+// JSON at all costs the caller the reason text and never the refusal itself. The
+// message is always non-empty, so a caller that logs the error never logs a blank
+// line.
+func accessManagerRefusalFrom(statusCode int, body []byte) commons.Response {
+	response, err := unmarshalErrorResponse(body)
+	if err != nil {
+		response = commons.Response{}
+	}
+
+	response.Message = refusalMessage(response, statusCode)
+
+	return response
+}
+
 // errAuthorizationUnavailable is the error Check reports alongside 503 when
 // Required is set but the client cannot authorize. Authorize returns the same
 // condition as a 503 *fiber.Error; Check has no response to write, so it needs a
@@ -628,7 +678,8 @@ var errAuthorizationUnavailable = errors.New("authorization is required but the 
 //
 //   - (true, 200, nil) when authorized;
 //   - (false, 403, nil) on a plain authoritative denial from the Access Manager;
-//   - (false, status, err) when the Access Manager answers with a coded error body;
+//   - (false, status, err) when the Access Manager refuses the caller — any 4xx
+//     except 400, 408, 422 and 429 — at that status, carrying the reason it wrote;
 //   - (false, 401, err) on a local token failure — a missing or invalid token, an
 //     unsupported token type, a missing owner or sub claim;
 //   - (false, 503, err) whenever the authorization service is unavailable: a
@@ -1043,21 +1094,22 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	respError, err := unmarshalErrorResponse(body)
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to unmarshal auth error response: %v", err)
+	// The STATUS says whether a token was issued, never a field inside the body.
+	// This used to refuse only when the body carried a non-empty "code", and that
+	// field is optional in both error shapes the Access Manager serves. A refusal
+	// without one fell through to the token decode, where it yields an EMPTY access
+	// token and a nil error — a failed login reported as a successful one, handing
+	// the caller a blank bearer. The declaration publisher reads exactly that pair
+	// as "auth is disabled or misconfigured" and stops retrying permanently, so a
+	// transient refusal at boot became a permanent give-up.
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		refusal := accessManagerRefusalFrom(resp.StatusCode, body)
 
-		tracing.HandleSpanError(span, "Failed to unmarshal auth error response", err)
+		logErrorf(ctx, auth.Logger, "Failed to get application token: %s", refusal.Message)
 
-		return "", fmt.Errorf("failed to unmarshal auth error response: %w", err)
-	}
+		tracing.HandleSpanError(span, "Failed to get application token", refusal)
 
-	if respError.Code != "" && resp.StatusCode != http.StatusInternalServerError {
-		logErrorf(ctx, auth.Logger, "Failed to get application token: %s", respError.Message)
-
-		tracing.HandleSpanError(span, "Failed to get application token", respError)
-
-		return "", respError
+		return "", refusal
 	}
 
 	var response oauth2Token
@@ -1067,6 +1119,19 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		tracing.HandleSpanError(span, "Failed to unmarshal response", err)
 
 		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	// A 2xx that carries no bearer is a failed login too. The one ("", nil) this
+	// function may still return is the deliberate "auth is off" decided above,
+	// before any request leaves.
+	if response.AccessToken == "" {
+		missing := errors.New("authorization service returned no access token")
+
+		logErrorf(ctx, auth.Logger, "Failed to get application token: %v", missing)
+
+		tracing.HandleSpanError(span, "Failed to get application token", missing)
+
+		return "", missing
 	}
 
 	return response.AccessToken, nil

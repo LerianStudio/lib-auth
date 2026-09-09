@@ -671,7 +671,9 @@ func TestCheckAuthorization_ServerReturnsInvalidJSON(t *testing.T) {
 
 	require.Error(t, err)
 	assert.False(t, authorized)
-	assert.Equal(t, http.StatusInternalServerError, statusCode)
+	// 503, not 500: a 2xx body that cannot be read as a decision is the Access
+	// Manager failing to decide, not this library failing internally.
+	assert.Equal(t, http.StatusServiceUnavailable, statusCode)
 	assert.Contains(t, err.Error(), "failed to unmarshal")
 }
 
