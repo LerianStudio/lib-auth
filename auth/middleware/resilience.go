@@ -229,34 +229,46 @@ func (auth *AuthClient) doAuthorizeCall(ctx context.Context, span trace.Span, ac
 
 	outcome := auth.classifyResponse(ctx, span, resp.StatusCode, respBody)
 
-	if resp.StatusCode >= http.StatusInternalServerError {
-		// 5xx is transient for the resilience layer regardless of how it is surfaced.
-		outcome.transientErr = fmt.Errorf("authz service returned status %d", resp.StatusCode)
-
-		return outcome, outcome.transientErr
-	}
-
-	return outcome, nil
+	// The transient error classifyResponse attached — a 5xx, a status that is not
+	// an answer at all, or a 2xx body that is not a decision — is exactly what the
+	// retry and breaker layers act on. An authoritative refusal (any 4xx) attaches
+	// none, so it is never retried and never trips the breaker.
+	return outcome, outcome.transientErr
 }
 
 // classifyResponse converts an authz HTTP response (status + body) into an
-// authzOutcome, reproducing the pre-resilience decision logic exactly: a coded
-// error body is an authoritative deny at its status; otherwise the AuthResponse
-// decides; unparseable bodies are internal errors.
+// authzOutcome, deciding on the HTTP STATUS and never on a field inside the body.
+//
+// Only a 2xx body is an authorization decision. A 4xx is an authoritative refusal
+// AT ITS OWN STATUS: the status is what says the service refused, so a refusal
+// carrying no domain code — every framework-generated one — is still refused at
+// the status it came with, rather than downgraded to a flat 403. Everything else
+// (a 5xx, a redirect, an informational status, or a 2xx whose body cannot be read
+// as a decision) is the authorization service failing to answer, which the caller
+// reports as 503.
+//
+// The rule this replaces read "code" from the body and treated a non-empty value
+// as "refused". That field is optional in both error shapes the Access Manager
+// serves, so its absence sent a refusal down the DECISION branch — where the
+// status was discarded, the reason was lost, and a 4xx body claiming
+// "authorized":true was read as a GRANT.
 func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, statusCode int, body []byte) authzOutcome {
-	respError, err := unmarshalErrorResponse(body)
-	if err != nil {
-		logErrorf(ctx, auth.Logger, "Failed to unmarshal auth error response: %v", err)
-		tracing.HandleSpanError(span, "Failed to unmarshal auth error response", err)
+	switch {
+	case statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError:
+		refusal := accessManagerRefusalFrom(statusCode, body)
 
-		return authzOutcome{statusCode: http.StatusInternalServerError, authErr: fmt.Errorf("failed to unmarshal auth error response: %w", err)}
-	}
+		logErrorf(ctx, auth.Logger, "Authorization request failed: %s", refusal.Message)
+		tracing.HandleSpanError(span, "Authorization request failed", refusal)
 
-	if respError.Code != "" && statusCode != http.StatusInternalServerError {
-		logErrorf(ctx, auth.Logger, "Authorization request failed: %s", respError.Message)
-		tracing.HandleSpanError(span, "Authorization request failed", respError)
+		return authzOutcome{statusCode: statusCode, authErr: refusal}
 
-		return authzOutcome{statusCode: statusCode, authErr: respError}
+	case statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices:
+		unavailable := fmt.Errorf("authz service returned status %d", statusCode)
+
+		logErrorf(ctx, auth.Logger, "Authorization unavailable: %v", unavailable)
+		tracing.HandleSpanError(span, "Authorization unavailable", unavailable)
+
+		return authzOutcome{statusCode: statusCode, authErr: unavailable, transientErr: unavailable}
 	}
 
 	var response AuthResponse
@@ -264,7 +276,12 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 		logErrorf(ctx, auth.Logger, "Failed to unmarshal response: %v", err)
 		tracing.HandleSpanError(span, "Failed to unmarshal response", err)
 
-		return authzOutcome{statusCode: http.StatusInternalServerError, authErr: fmt.Errorf("failed to unmarshal response: %w", err)}
+		unavailable := fmt.Errorf("failed to unmarshal response: %w", err)
+
+		// 503, not the 2xx it arrived with and not the 500 this used to report: the
+		// authorization service answered with something that is not a decision, which
+		// is the service failing to decide, not this library failing internally.
+		return authzOutcome{statusCode: http.StatusServiceUnavailable, authErr: unavailable, transientErr: unavailable}
 	}
 
 	return authzOutcome{authorized: response.Authorized, statusCode: statusCode}

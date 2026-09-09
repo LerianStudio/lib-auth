@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -195,12 +196,21 @@ var sharedHTTPClient = &http.Client{
 }
 
 // unmarshalErrorResponse unmarshals a JSON response body into commons.Response,
-// tolerating a numeric "code" field (the auth service may return code as a number).
+// reading BOTH error shapes the Access Manager serves. Its Fiber-native routes
+// answer with the legacy envelope, whose human text is "message"; its Huma-served
+// routes answer with the shared RFC 9457 problem document, whose human text is
+// "detail" — and /v1/authorize is one of those today. Reading "message" alone
+// decoded a fully described refusal as a blank one, so the refusal reached the
+// caller as the bare status word.
+//
+// It also tolerates a numeric "code" field (the auth service may return code as a
+// number).
 func unmarshalErrorResponse(body []byte) (commons.Response, error) {
 	var raw struct {
 		EntityType string          `json:"entityType,omitempty"`
 		Title      string          `json:"title,omitempty"`
 		Message    string          `json:"message,omitempty"`
+		Detail     string          `json:"detail,omitempty"`
 		Code       json.RawMessage `json:"code,omitempty"`
 	}
 
@@ -211,7 +221,7 @@ func unmarshalErrorResponse(body []byte) (commons.Response, error) {
 	resp := commons.Response{
 		EntityType: raw.EntityType,
 		Title:      raw.Title,
-		Message:    raw.Message,
+		Message:    cmp.Or(raw.Message, raw.Detail),
 	}
 
 	if len(raw.Code) > 0 {
@@ -614,6 +624,23 @@ func refusalMessage(response commons.Response, statusCode int) string {
 	}
 
 	return http.StatusText(statusCode)
+}
+
+// accessManagerRefusalFrom builds the error a non-2xx Access Manager answer
+// surfaces as. The STATUS is what makes the answer a refusal; the body only
+// supplies the reason, so a body that is empty, carries no domain code, or is not
+// JSON at all costs the caller the reason text and never the refusal itself. The
+// message is always non-empty, so a caller that logs the error never logs a blank
+// line.
+func accessManagerRefusalFrom(statusCode int, body []byte) commons.Response {
+	response, err := unmarshalErrorResponse(body)
+	if err != nil {
+		response = commons.Response{}
+	}
+
+	response.Message = refusalMessage(response, statusCode)
+
+	return response
 }
 
 // errAuthorizationUnavailable is the error Check reports alongside 503 when
