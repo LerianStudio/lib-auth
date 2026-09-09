@@ -187,6 +187,25 @@ const (
 // are safe for concurrent use and should be reused across requests.
 var sharedHTTPClient = &http.Client{
 	Timeout: 30 * time.Second,
+
+	// Never follow a redirect. Do returns the 3xx itself, which every caller here
+	// already treats as "the authorization service did not answer".
+	//
+	// Following one is a FAIL-OPEN on the authorization path. Do would hand the
+	// classifier the FINAL response, so the status it decides on would belong to
+	// whatever the Location named rather than to the service this library
+	// addressed: a 302 pointing anywhere that answers 200 {"authorized":true}
+	// becomes a grant. It is the same shape as a refusal body claiming authorized,
+	// except that the status is laundered too, and it needs no misconfiguration of
+	// PLUGIN_AUTH_ADDRESS — one compromised or careless hop in front of the Access
+	// Manager is enough.
+	//
+	// It is also a credential leak on the token path: 307 and 308 preserve the
+	// method AND the body, so a redirect would re-POST clientSecret to the host the
+	// Location names.
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
 	Transport: &http.Transport{
 		ForceAttemptHTTP2:   false,
 		MaxIdleConns:        100,
