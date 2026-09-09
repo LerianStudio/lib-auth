@@ -258,7 +258,7 @@ The `Authorize` function:
 * Sends a POST request to the authorization service.
 * On the Fiber path, derives the caller's client IP from `TRUSTED_PROXIES` and the socket peer — not from Fiber's `c.IP()` or `c.IPs()` — and sends it as the optional `clientIp` field, omitting it when no caller IP is attributable (see [Client IP forwarding](#-client-ip-forwarding)).
 * Checks if the response indicates that the user is authorized.
-* Allows the normal application flow or returns a 403 (Forbidden) error.
+* Allows the normal application flow or refuses the request.
 
 Every refusal is **returned** as a `*fiber.Error`, never written to the response by
 the middleware, so the application's own `ErrorHandler` renders it and keeps its
@@ -266,15 +266,24 @@ response envelope (RFC 9457 problem+json, say) instead of having a plain-text bo
 written past it. The status and the message are the ones the written body carried, so
 a service running Fiber's `DefaultErrorHandler` gets identical responses: 401
 `Missing Token`, 403 `Forbidden`, 503 `Service Unavailable`, and the status text for
-anything else. When the authorization service answered a coded error body, the
-returned error also resolves to that `commons.Response` through `errors.As`, so a
-handler that knows lib-commons still renders the code, title and message it sent.
+anything else. Every refusal the authorization service itself returned also resolves
+to a `commons.Response` through `errors.As`, so a handler that knows lib-commons
+still renders the code, title and message it sent.
+
+**The HTTP status decides, never a field inside the body.** Only a `2xx` answer is
+an authorization decision. Any `4xx` is an authoritative refusal surfaced AT ITS OWN
+STATUS — a `422` stays a `422`, a `429` stays a `429` — whether or not the body
+carries an error code, parses as JSON, or exists at all; a body that claims
+`authorized` inside a refusal is never read as a grant. The refusal message is read
+from both error shapes the authorization service serves: `message` on its legacy
+envelope, `detail` on its RFC 9457 problem document.
 
 `403 Forbidden` means the authorization service answered no. An authorization
-service that could not answer at all — unreachable, a 5xx, retries exhausted, or the
-circuit breaker open — is `503 Service Unavailable` instead. The request is refused
-either way (fail closed), but only the 503 tells an operator the outage apart from a
-policy denial, and only the 503 reaches a rail's 5xx alarms.
+service that could not answer at all — unreachable, a 5xx, a 2xx body that is not a
+decision, retries exhausted, or the circuit breaker open — is `503 Service
+Unavailable` instead. The request is refused either way (fail closed), but only the
+503 tells an operator the outage apart from a policy denial, and only the 503
+reaches a rail's 5xx alarms.
 
 ## 🪪 Principal on the request context
 
@@ -390,8 +399,8 @@ It returns:
 * `(true, 200, nil)` when authorized;
 * `(false, 403, nil)` on a plain authoritative denial from the authorization service —
   a plain deny is an answer, not a failure;
-* `(false, status, err)` when the authorization service answers with a coded error
-  body;
+* `(false, status, err)` when the authorization service answers with any `4xx`, at
+  that status, carrying the reason it wrote;
 * `(false, 401, err)` on a local token failure: a missing or invalid token, an
   unsupported token type, an `owner` or `sub` claim that is missing, empty or
   whitespace-only;
