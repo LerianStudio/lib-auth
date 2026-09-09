@@ -254,7 +254,7 @@ func (auth *AuthClient) doAuthorizeCall(ctx context.Context, span trace.Span, ac
 // "authorized":true was read as a GRANT.
 func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, statusCode int, body []byte) authzOutcome {
 	switch {
-	case statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError:
+	case isCallerRefusal(statusCode):
 		refusal := accessManagerRefusalFrom(statusCode, body)
 
 		logErrorf(ctx, auth.Logger, "Authorization request failed: %s", refusal.Message)
@@ -268,7 +268,9 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 		logErrorf(ctx, auth.Logger, "Authorization unavailable: %v", unavailable)
 		tracing.HandleSpanError(span, "Authorization unavailable", unavailable)
 
-		return authzOutcome{statusCode: statusCode, authErr: unavailable, transientErr: unavailable}
+		// 503, not the status that arrived: this is the service failing to answer,
+		// and 503 is the single word every such failure already reports.
+		return authzOutcome{statusCode: http.StatusServiceUnavailable, authErr: unavailable, transientErr: unavailable}
 	}
 
 	var response AuthResponse
@@ -285,6 +287,52 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 	}
 
 	return authzOutcome{authorized: response.Authorized, statusCode: statusCode}
+}
+
+// isCallerRefusal reports whether a status from the Access Manager is a decision
+// ABOUT THE CALLER — surfaced at that status — rather than the service failing to
+// answer the question, which is surfaced as 503. Both refuse the request; the
+// split decides which word the caller and the operator read, and whether the retry
+// and breaker layers treat the answer as worth repeating.
+//
+// A 4xx is a caller refusal by default, because the Access Manager emits
+// caller-meaningful ones and they are permanent for that caller:
+//
+//   - 401 — the bearer token is missing (AUT-0006) or invalid (AUT-0007).
+//   - 403 — the tenant IP allowlist denied the caller's address (AUT-0021).
+//   - 404 — no subject exists for the token's sub (AUT-1015), raised on the
+//     normal-user hot path in both the single-tenant and multi-tenant enforcers.
+//
+// Three are excluded, because the Access Manager reaches them for reasons the
+// caller cannot see and cannot act on:
+//
+//   - 400 and 422 — the request body was rejected. That body is built entirely by
+//     this library (see checkAuthorization) and /v1/authorize declares no field
+//     constraints a caller could violate, so these mean this library and the
+//     Access Manager disagree about the contract: a deployment fault, and one an
+//     operator must be paged for rather than see rendered to a customer.
+//   - 429 — the Access Manager's own rate limiter. The DIRECT caller of
+//     /v1/authorize is this service, not the end caller, and the permission tier
+//     is sized for exactly that service traffic, so the limit being hit is the
+//     rail's own authorization volume. Telling an end caller to slow down about a
+//     quota they do not hold is wrong, and a throttle is precisely the transient
+//     condition the retry and breaker layers exist to absorb.
+//
+// The default is deliberately "caller refusal", not "unavailable". Reporting a
+// permanent, caller-caused refusal as an outage would also make it RETRYABLE and
+// breaker-eligible, so a single deleted user could trip the circuit breaker for
+// everyone behind the rail.
+func isCallerRefusal(statusCode int) bool {
+	if statusCode < http.StatusBadRequest || statusCode >= http.StatusInternalServerError {
+		return false
+	}
+
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusTooManyRequests:
+		return false
+	default:
+		return true
+	}
 }
 
 // newAuthBreaker builds a circuit breaker that opens after maxFailures consecutive

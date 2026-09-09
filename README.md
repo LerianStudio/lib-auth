@@ -271,19 +271,32 @@ to a `commons.Response` through `errors.As`, so a handler that knows lib-commons
 still renders the code, title and message it sent.
 
 **The HTTP status decides, never a field inside the body.** Only a `2xx` answer is
-an authorization decision. Any `4xx` is an authoritative refusal surfaced AT ITS OWN
-STATUS — a `422` stays a `422`, a `429` stays a `429` — whether or not the body
-carries an error code, parses as JSON, or exists at all; a body that claims
-`authorized` inside a refusal is never read as a grant. The refusal message is read
-from both error shapes the authorization service serves: `message` on its legacy
-envelope, `detail` on its RFC 9457 problem document.
+an authorization decision. A body that claims `authorized` inside any non-`2xx`
+answer is never read as a grant, whatever the status.
 
-`403 Forbidden` means the authorization service answered no. An authorization
-service that could not answer at all — unreachable, a 5xx, a 2xx body that is not a
-decision, retries exhausted, or the circuit breaker open — is `503 Service
-Unavailable` instead. The request is refused either way (fail closed), but only the
-503 tells an operator the outage apart from a policy denial, and only the 503
-reaches a rail's 5xx alarms.
+Every non-`2xx` refuses. What the status chooses is the WORD the caller and the
+operator read:
+
+* **Refused at its own status** — the answer is about the caller, and repeating the
+  request will not change it: `401` (token missing or invalid), `403` (tenant IP
+  allowlist), `404` (no subject exists for the token's `sub`), and any other `4xx`.
+  These are never retried and never trip the circuit breaker.
+* **`503 Service Unavailable`** — the authorization service did not answer the
+  question: unreachable, a `5xx`, a redirect, a `2xx` body that is not a decision,
+  retries exhausted, the circuit breaker open, and three `4xx` that are not about
+  the caller. `400` and `422` mean the request body was rejected, and that body is
+  built entirely by this library, so they signal a contract mismatch an operator
+  must fix. `429` is the authorization service's own rate limiter, whose direct
+  caller is this service rather than the end caller. These are retried and are
+  breaker-eligible, because repeating them can succeed.
+
+The refusal message is read from both error shapes the authorization service
+serves: `message` on its legacy envelope, `detail` on its RFC 9457 problem
+document.
+
+`403 Forbidden` means the authorization service answered no. The request is refused
+under every rule above (fail closed), but only the 503 tells an operator an outage
+apart from a policy denial, and only the 503 reaches a rail's 5xx alarms.
 
 ## 🪪 Principal on the request context
 
@@ -399,8 +412,9 @@ It returns:
 * `(true, 200, nil)` when authorized;
 * `(false, 403, nil)` on a plain authoritative denial from the authorization service —
   a plain deny is an answer, not a failure;
-* `(false, status, err)` when the authorization service answers with any `4xx`, at
-  that status, carrying the reason it wrote;
+* `(false, status, err)` when the authorization service refuses the caller — any
+  `4xx` except `400`, `422` and `429` — at that status, carrying the reason it
+  wrote;
 * `(false, 401, err)` on a local token failure: a missing or invalid token, an
   unsupported token type, an `owner` or `sub` claim that is missing, empty or
   whitespace-only;
