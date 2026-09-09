@@ -1,3 +1,14 @@
+## [4.1.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.4...v4.1.0-beta.5) (2026-09-09)
+
+
+### Bug Fixes
+
+* **middleware:** decide authorization on the http status ([23273f9](https://github.com/LerianStudio/lib-auth/commit/23273f901b85853d4648b23f72a2f2bb68463b9d))
+* **middleware:** fail a login that did not return a token ([61d88e5](https://github.com/LerianStudio/lib-auth/commit/61d88e50d1b4a9ed51fb3ccfa944d29ef8ae07f6))
+* **middleware:** never follow a redirect from the authorization service ([823d0af](https://github.com/LerianStudio/lib-auth/commit/823d0affa58cea42918205cd8e70574e4e3c5bdd))
+* **middleware:** report a 4xx that is not about the caller as 503 ([e5bbcc2](https://github.com/LerianStudio/lib-auth/commit/e5bbcc293825900106b8e3059995a05288542f63))
+* **middleware:** treat a timeout and a missing decision as no answer ([c86128b](https://github.com/LerianStudio/lib-auth/commit/c86128bfb73fc4305d895cd67676e681107d4f7f))
+
 ## [4.1.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.3...v4.1.0-beta.4) (2026-09-06)
 
 
