@@ -282,13 +282,19 @@ operator read:
   allowlist), `404` (no subject exists for the token's `sub`), and any other `4xx`.
   These are never retried and never trip the circuit breaker.
 * **`503 Service Unavailable`** — the authorization service did not answer the
-  question: unreachable, a `5xx`, a redirect, a `2xx` body that is not a decision,
-  retries exhausted, the circuit breaker open, and three `4xx` that are not about
-  the caller. `400` and `422` mean the request body was rejected, and that body is
-  built entirely by this library, so they signal a contract mismatch an operator
-  must fix. `429` is the authorization service's own rate limiter, whose direct
-  caller is this service rather than the end caller. These are retried and are
+  question: unreachable, a `5xx`, a redirect, a `2xx` that does not parse or that
+  carries no decision at all, retries exhausted, the circuit breaker open, and four
+  `4xx` that are not about the caller. `400` and `422` mean the request body was
+  rejected, and that body is built entirely by this library, so they signal a
+  contract mismatch an operator must fix. `429` is the authorization service's own
+  rate limiter, whose direct caller is this service rather than the end caller.
+  `408` is a timeout on the responder's side. These are retried and are
   breaker-eligible, because repeating them can succeed.
+
+Redirects are never followed. The client returns the `3xx` itself, so the status
+the decision is made on always belongs to the service at `PLUGIN_AUTH_ADDRESS` and
+not to whatever a `Location` header named — otherwise a redirect to any endpoint
+answering `200 {"authorized":true}` would be a grant.
 
 The refusal message is read from both error shapes the authorization service
 serves: `message` on its legacy envelope, `detail` on its RFC 9457 problem
@@ -413,8 +419,8 @@ It returns:
 * `(false, 403, nil)` on a plain authoritative denial from the authorization service —
   a plain deny is an answer, not a failure;
 * `(false, status, err)` when the authorization service refuses the caller — any
-  `4xx` except `400`, `422` and `429` — at that status, carrying the reason it
-  wrote;
+  `4xx` except `400`, `408`, `422` and `429` — at that status, carrying the reason
+  it wrote;
 * `(false, 401, err)` on a local token failure: a missing or invalid token, an
   unsupported token type, an `owner` or `sub` claim that is missing, empty or
   whitespace-only;
