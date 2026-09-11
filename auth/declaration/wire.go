@@ -63,12 +63,23 @@ const (
 	envM2MClientSecretDeprecated    = "M2M_CLIENT_SECRET" // #nosec G101 -- env var NAME, not a credential value
 
 	// envAuthEnabled / envAuthHost configure the token minter (the AUTH host,
-	// distinct from the identity host). Passed through faithfully to
-	// middleware.NewAuthClient; the publisher fail-opens if a token cannot be
-	// minted, so auth need NOT be enabled for WireFromEnv to succeed. These are
-	// OUT of scope for #4232 and keep their names.
+	// distinct from the identity host). Both are REQUIRED when declaration is
+	// enabled: the identity endpoint is M2M-guarded, so without a mintable token
+	// the PUT can never be accepted. Leaving them optional turned a permanent
+	// misconfiguration into a silent one — the publisher fail-opens on the minting
+	// failure, so the pod goes green and simply never declares. Requiring them
+	// here converts that into a boot error naming the missing variable.
 	envAuthEnabled = "PLUGIN_AUTH_ENABLED"
 	envAuthHost    = "PLUGIN_AUTH_HOST"
+
+	// envAuthHostDeprecated is the OTHER spelling of the auth host already in
+	// production. Roughly half the platform's deployments set PLUGIN_AUTH_ADDRESS
+	// and the other half PLUGIN_AUTH_HOST, both carrying the same value (the auth
+	// component's base URL); some set both. Honored as an alias so requiring the
+	// auth host above does not fail-close every deployment in the ADDRESS camp.
+	// Convergence on a single name is tracked separately; until it lands, the
+	// canonical name wins and using the alias logs a WARN.
+	envAuthHostDeprecated = "PLUGIN_AUTH_ADDRESS"
 )
 
 // lookupWithDeprecatedAlias resolves an env var during the #4232 rename window.
@@ -120,9 +131,14 @@ type WireInput struct {
 //   - IDP_DECLARATION_ENABLED != "true"  => no-op: returns a non-nil func(){} and
 //     a nil error WITHOUT reading or validating any other env (default-off keeps
 //     the plugin boot unchanged when the flag is off).
-//   - enabled => IDP_HOST, IDP_M2M_CLIENT_ID and IDP_M2M_CLIENT_SECRET are
-//     required (each yields a clear, named error when blank). Deeper URL
-//     validation is delegated to New.
+//   - enabled => IDP_HOST, IDP_M2M_CLIENT_ID, IDP_M2M_CLIENT_SECRET, the auth
+//     host (PLUGIN_AUTH_HOST, or its alias PLUGIN_AUTH_ADDRESS) and
+//     PLUGIN_AUTH_ENABLED=true are required; each yields a clear, named error
+//     when blank or off. The auth pair is required because the identity
+//     declaration endpoint is M2M-guarded: without a mintable token the publish
+//     can never succeed, and since the publish fail-opens, omitting them used to
+//     produce a green pod that silently never declared. Deeper URL validation is
+//     delegated to New.
 //
 // Fail-open by design: on the happy path Start never blocks on identity
 // reachability (a failing initial publish is logged in the background, not
@@ -146,7 +162,7 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 	identityHost := lookupWithDeprecatedAlias(envIdentityHost, envIdentityHostDeprecated, in.Logger)
 	clientID := lookupWithDeprecatedAlias(envM2MClientID, envM2MClientIDDeprecated, in.Logger)
 	clientSecret := lookupWithDeprecatedAlias(envM2MClientSecret, envM2MClientSecretDeprecated, in.Logger)
-	authHost := strings.TrimSpace(os.Getenv(envAuthHost))
+	authHost := lookupWithDeprecatedAlias(envAuthHost, envAuthHostDeprecated, in.Logger)
 	authEnabled := os.Getenv(envAuthEnabled) == "true"
 
 	// Validate the required fields (absorbs the old validateDeclarationConfig).
@@ -158,12 +174,18 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 		return noop, fmt.Errorf("%s is required when %s=true", envM2MClientID, envDeclarationEnabled)
 	case clientSecret == "":
 		return noop, fmt.Errorf("%s is required when %s=true", envM2MClientSecret, envDeclarationEnabled)
+	case authHost == "":
+		return noop, fmt.Errorf("%s (or its alias %s) is required when %s=true: the identity declaration endpoint is M2M-guarded and no token can be minted without it",
+			envAuthHost, envAuthHostDeprecated, envDeclarationEnabled)
+	case !authEnabled:
+		return noop, fmt.Errorf("%s must be true when %s=true: the identity declaration endpoint is M2M-guarded and the minter yields an empty token while auth is off",
+			envAuthEnabled, envDeclarationEnabled)
 	}
 
 	// Build the token minter. NewAuthClient takes an obs.Logger and resolves a
 	// nil one to its own default, so the caller's logger goes straight through.
-	// Auth is passed through faithfully — the publisher fail-opens if a token
-	// can't be minted, matching current plugin behavior.
+	// Host and enablement were validated above, so this cannot be handed the
+	// empty-host/disabled combination that silently yields an empty token.
 	auth := middleware.NewAuthClient(authHost, authEnabled, in.Logger)
 
 	// Assemble the Config. Cache/Interval/FailFast are hardcoded to the
