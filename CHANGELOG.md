@@ -1,3 +1,10 @@
+## [4.1.0-beta.6](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.5...v4.1.0-beta.6) (2026-09-11)
+
+
+### Bug Fixes
+
+* **declaration:** require the auth host and auth-enabled when declaring ([0e605f7](https://github.com/LerianStudio/lib-auth/commit/0e605f7f7b4998d1d0aba9c3cc52817a465d7882))
+
 ## [4.1.0-beta.5](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.4...v4.1.0-beta.5) (2026-09-09)
 
 
