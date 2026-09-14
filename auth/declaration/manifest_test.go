@@ -17,7 +17,7 @@ const feesJSON = `{
   "permissions": [
     { "resource": "billing-packages", "action": "create", "effect": "allow", "roles": ["fees/editor"] },
     { "resource": "billing-packages", "action": "read",   "effect": "allow", "roles": ["fees/editor", "fees/viewer"] },
-    { "resource": "billing-packages", "action": "delete", "effect": "deny",  "roles": ["fees/viewer"] }
+    { "resource": "billing-packages", "action": "delete", "effect": "allow", "roles": ["fees/viewer"] }
   ],
   "roles": [
     { "name": "fees/editor", "granted_to": [{ "group": "fees-admins" }] },
@@ -42,7 +42,7 @@ permissions:
     roles: [fees/editor, fees/viewer]
   - resource: billing-packages
     action: delete
-    effect: deny
+    effect: allow
     roles: [fees/viewer]
 roles:
   - name: fees/editor
@@ -116,7 +116,7 @@ func TestCanonicalHash_KeyOrderIndependent(t *testing.T) {
       "permissions": [
         { "roles": ["fees/editor"], "effect": "allow", "action": "create", "resource": "billing-packages" },
         { "resource": "billing-packages", "action": "read", "effect": "allow", "roles": ["fees/editor", "fees/viewer"] },
-        { "resource": "billing-packages", "action": "delete", "effect": "deny", "roles": ["fees/viewer"] }
+        { "resource": "billing-packages", "action": "delete", "effect": "allow", "roles": ["fees/viewer"] }
       ]
     }`
 
@@ -142,7 +142,7 @@ func TestCanonicalHash_ContentChangeChangesHash(t *testing.T) {
 	mutated := *base
 	perms := make([]DeclarationPermission, len(base.Permissions))
 	copy(perms, base.Permissions)
-	perms[0].Effect = "deny"
+	perms[0].Resource = "billing-plans"
 	mutated.Permissions = perms
 
 	hBase, err := base.CanonicalHash()
@@ -247,7 +247,7 @@ func TestValidate_RejectsBadManifests(t *testing.T) {
 // one violation (distinct resources avoid composed-name collisions):
 //
 //	permissions[0] — empty resource   (resource must not be empty)
-//	permissions[1] — bad effect       (effect must be "allow" or "deny")
+//	permissions[1] — bad effect       (effect must be "allow")
 //	permissions[2] — undeclared role  (references undeclared role "ghost")
 //
 // Service/version/roles are all valid, so the aggregated message contains
@@ -309,11 +309,56 @@ func TestValidate_AggregatesMultipleViolations(t *testing.T) {
 
 	// Every offending permissions[i] must be reported, each with its own reason.
 	assert.Contains(t, me.Reason, "permissions[0]: resource must not be empty")
-	assert.Contains(t, me.Reason, `permissions[1]: effect must be "allow" or "deny"`)
+	assert.Contains(t, me.Reason, `permissions[1]: effect must be "allow"`)
 	assert.Contains(t, me.Reason, `permissions[2]: references undeclared role "ghost"`)
 
 	// The aggregation must not fail-fast: exactly one violation per bad index,
 	// joined with "; " — no more, no fewer.
 	violations := strings.Split(me.Reason, "; ")
 	assert.Len(t, violations, 3, "expected exactly one aggregated violation per offending permission")
+}
+
+// TestValidate_RejectsDenyEffect locks in the mitigation for the Taura finding:
+// a manifest may no longer author `effect: deny`. The reconciler used to accept
+// it and write it to Casdoor as a real permission, but no evaluation point
+// applies it — an effect other than allow reads as "did not match" and the next
+// allow wins. The author saw a refusal that the runtime never honoured.
+//
+// The message has to name the reason, not just the expected value: a team that
+// wrote deny on purpose needs to learn the semantics do not exist, not that they
+// typed the wrong word.
+func TestValidate_RejectsDenyEffect(t *testing.T) {
+	const raw = `{"service":"s","version":1,"roles":[{"name":"x"}],` +
+		`"permissions":[{"resource":"r","action":"read","effect":"deny","roles":["x"]}]}`
+
+	m, err := parseManifest([]byte(raw))
+	require.NoError(t, err, "a deny manifest still parses; it is Validate that refuses it")
+
+	verr := m.Validate()
+	require.Error(t, verr, "effect: deny must be rejected")
+
+	var me *ManifestError
+	require.ErrorAs(t, verr, &me)
+
+	assert.Contains(t, me.Reason, `permissions[0]: effect must be "allow"`)
+	assert.Contains(t, me.Reason, "never enforced",
+		"the violation must say WHY deny is refused, not merely that it is")
+
+	violations := strings.Split(me.Reason, "; ")
+	assert.Len(t, violations, 1, "deny must be the only violation reported")
+}
+
+// TestValidate_AcceptsDenyAsAnAction guards the obvious way to break the check
+// above: "deny" is a legitimate ACTION name. br-sfn's SPB manifest declares
+// `{ resource: str-emission-approvals, action: deny, effect: allow }` — approving
+// or denying an STR emission is the domain verb there. Only the effect field is
+// constrained; the action vocabulary is the service's own.
+func TestValidate_AcceptsDenyAsAnAction(t *testing.T) {
+	const raw = `{"service":"br-spb","version":1,"roles":[{"name":"editor"}],` +
+		`"permissions":[{"resource":"str-emission-approvals","action":"deny","effect":"allow","roles":["editor"]}]}`
+
+	m, err := parseManifest([]byte(raw))
+	require.NoError(t, err)
+
+	assert.NoError(t, m.Validate(), "an action named deny is a domain verb, not an effect")
 }
