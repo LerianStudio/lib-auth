@@ -1,3 +1,16 @@
+## [4.1.0-beta.7](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.6...v4.1.0-beta.7) (2026-09-14)
+
+
+### Features
+
+* **middleware:** send declared scope attributes on authorize ([9a67890](https://github.com/LerianStudio/lib-auth/commit/9a6789099fb4a6cd4d23773840d011dfb0da4e0e))
+
+
+### Bug Fixes
+
+* **middleware:** make the attributes cache key injective by construction ([004955d](https://github.com/LerianStudio/lib-auth/commit/004955dccda82c0495d57ec633f081b8a773039b))
+* **middleware:** refuse a scope declaration that repeats a dimension name ([5a638d2](https://github.com/LerianStudio/lib-auth/commit/5a638d2dee095d740aab09451e7cc8714dc0219b))
+
 ## [4.1.0-beta.6](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.5...v4.1.0-beta.6) (2026-09-11)
 
 
