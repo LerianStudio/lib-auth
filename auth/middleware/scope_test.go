@@ -513,6 +513,61 @@ func TestAuthorize_ExposesScopeAndPartnerToTheHandler(t *testing.T) {
 	assert.Equal(t, "acme/p1", gotLocals)
 }
 
+// Both context values Authorize publishes must survive the SAME request.
+//
+// This seam was created by the merge of the scoped-access work into develop and
+// was covered by NEITHER side: develop added the Principal and its
+// publishPrincipal call, this branch added the RequestScope and its own, and each
+// side tested only its own value on its own request. The two run back to back and
+// BOTH build their new context from c.Context(), so the second read has to observe
+// what the first wrote. Reorder them, drop one, or rebuild either from a context
+// captured before the other, and one value silently overwrites the other: the
+// handler still gets a 200, still reads one of the two, and nothing turns red
+// unless a test reads both on one request.
+func TestAuthorize_PublishesPrincipalAndScopeOnTheSameRequest(t *testing.T) {
+	t.Parallel()
+
+	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	auth := &AuthClient{Address: rec.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
+
+	var (
+		gotScope     RequestScope
+		scopeOK      bool
+		gotPrincipal Principal
+		principalOK  bool
+	)
+
+	app := fiber.New()
+	app.Get("/v1/ledgers/:ledger_id/accounts",
+		auth.Authorize("midaz", "accounts", "get",
+			RequireScope("midaz", Dim("ledgerId", FromPath).At("ledger_id")),
+		),
+		func(c fiber.Ctx) error {
+			// Read BOTH off the same context, in the one handler invocation: that
+			// is the whole point of the test.
+			gotScope, scopeOK = ScopeFromContext(c.Context())
+			gotPrincipal, principalOK = PrincipalFromContext(c.Context())
+
+			return c.SendString("ok")
+		})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/ledgers/led-1/accounts", nil)
+	req.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	require.True(t, scopeOK, "RequestScope must be readable on a request that also publishes a Principal")
+	assert.Equal(t, "acme/p1", gotScope.Partner)
+	assert.Equal(t, map[string]string{"ledgerId": "led-1"}, gotScope.Attributes)
+
+	require.True(t, principalOK, "Principal must be readable on a request that also publishes a RequestScope")
+	assert.Equal(t, application, gotPrincipal.Type)
+	assert.Equal(t, "acme/app", gotPrincipal.Subject)
+	assert.Equal(t, "acme/app", gotPrincipal.Sub)
+}
+
 // A request with no partner claim reaches the handler with no scope recorded, so
 // a handler cannot mistake "not a partner" for "a partner with no restriction".
 func TestScopeFromContext_AbsentWithoutPartner(t *testing.T) {
