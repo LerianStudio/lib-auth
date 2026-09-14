@@ -719,3 +719,70 @@ func TestDecisionCache_SeparatorBytesInAValueDoNotForgeAnotherScopesKey(t *testi
 	assert.Equal(t, int64(2), rec.hits.Load(),
 		"the crafted value must not key as the genuine two-field scope; both questions must reach the access manager")
 }
+
+// ---------------------------------------------------------------------------
+// Duplicate dimension names
+// ---------------------------------------------------------------------------
+
+// A repeated dimension name is a misdeclaration: resolveAttributes writes into a
+// map, so the second value overwrites the first and the request asks about ONE
+// dimension while the route declared two. It is refused at declaration time, and
+// the refusal names the repeated dimension so whoever wrote the route knows which.
+func TestResolveDeclaration_RejectsDuplicateDimensionName(t *testing.T) {
+	t.Parallel()
+
+	_, declErr := resolveDeclaration("midaz", []ScopeDeclaration{
+		RequireScope("midaz",
+			Dim("organizationId", FromPath).At("organization_id"),
+			Dim("organizationId", FromHeader).At("X-Organization-Id"),
+		),
+	})
+
+	assert.Contains(t, declErr, "organizationId",
+		"the refusal must name the repeated dimension")
+	assert.Contains(t, declErr, "declared more than once")
+}
+
+func TestAuthorize_GuardDeniesDuplicateDimensionName(t *testing.T) {
+	t.Parallel()
+
+	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	auth := &AuthClient{Address: rec.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
+
+	app := fiber.New()
+	app.Get("/dup/:organization_id",
+		auth.Authorize("midaz", "accounts", "get",
+			RequireScope("midaz",
+				Dim("organizationId", FromPath).At("organization_id"),
+				Dim("organizationId", FromQuery).At("organizationId"),
+			),
+		),
+		func(c fiber.Ctx) error { return c.SendString("reached") })
+
+	// Positive control: the same route shape with DISTINCT names is authorized.
+	app.Get("/ok/:organization_id",
+		auth.Authorize("midaz", "accounts", "get",
+			RequireScope("midaz",
+				Dim("organizationId", FromPath).At("organization_id"),
+				Dim("ledgerId", FromQuery).At("ledgerId"),
+			),
+		),
+		func(c fiber.Ctx) error { return c.SendString("reached") })
+
+	req := httptest.NewRequest(http.MethodGet, "/dup/org-1?organizationId=org-2", nil)
+	req.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Equal(t, int64(0), rec.hits.Load(),
+		"a misdeclared route is refused before the round-trip")
+
+	ctrl := httptest.NewRequest(http.MethodGet, "/ok/org-1?ledgerId=led-1", nil)
+	ctrl.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
+
+	ctrlResp, err := app.Test(ctrl)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, ctrlResp.StatusCode)
+	assert.Equal(t, int64(1), rec.hits.Load())
+}

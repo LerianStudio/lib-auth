@@ -229,6 +229,8 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 			", which is not the route's product " + product
 	}
 
+	seen := make(map[string]struct{}, len(scope.dims))
+
 	for _, dim := range scope.dims {
 		if dim.name == "" {
 			return ScopeDeclaration{}, "scope declaration carries a dimension with no name"
@@ -241,6 +243,16 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 		if dim.key == "" {
 			return ScopeDeclaration{}, "scope dimension " + dim.name + " declares an empty request key"
 		}
+
+		// A repeated name is not a wider question, it is a narrower one: the
+		// resolved attributes live in a map, so the last occurrence silently
+		// overwrites every earlier one and the request asks about ONE dimension
+		// while the route declared several.
+		if _, duplicate := seen[dim.name]; duplicate {
+			return ScopeDeclaration{}, "scope dimension " + dim.name + " is declared more than once"
+		}
+
+		seen[dim.name] = struct{}{}
 	}
 
 	return scope, ""
