@@ -624,3 +624,98 @@ func TestDim_DefaultsRequestKeyToTheFieldName(t *testing.T) {
 	assert.Equal(t, "organization_id", renamed.Key())
 	assert.Equal(t, "organizationId", d.Key(), "At must not mutate the original declaration")
 }
+
+// ---------------------------------------------------------------------------
+// Cache-key injectivity
+// ---------------------------------------------------------------------------
+
+// The folded cache key must be injective: no two DIFFERENT attribute maps may
+// fold to the same string. Separator bytes are not a guarantee — a caller can put
+// them inside a value — so the encoding has to distinguish the boundaries by
+// construction.
+func TestAttributesCacheKey_IsInjectiveAcrossSeparatorBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		a    map[string]string
+		b    map[string]string
+	}{
+		{
+			name: "value carrying both separators vs two fields",
+			a:    map[string]string{"a": "b\x1ec\x1fd"},
+			b:    map[string]string{"a": "b", "c": "d"},
+		},
+		{
+			name: "value carrying the pair separator",
+			a:    map[string]string{"a": "b\x1e"},
+			b:    map[string]string{"a": "b"},
+		},
+		{
+			name: "name/value boundary moved",
+			a:    map[string]string{"a": "b"},
+			b:    map[string]string{"ab": ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.NotEqual(t, attributesCacheKey(tt.a), attributesCacheKey(tt.b),
+				"two different attribute maps must never fold to the same cache key")
+		})
+	}
+}
+
+// The same collision, driven through a real request: a caller percent-encodes the
+// separator bytes in a query value, and the folded key must still differ from the
+// key of a genuine two-field scope. If it does not, the second request is answered
+// from the first one's cache entry and the access manager is never consulted —
+// one partner's decision serving another partner's question.
+func TestDecisionCache_SeparatorBytesInAValueDoNotForgeAnotherScopesKey(t *testing.T) {
+	t.Parallel()
+
+	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+
+	auth := &AuthClient{
+		Address:             rec.URL,
+		Enabled:             true,
+		Logger:              &testLogger{},
+		M2MInversionEnabled: true,
+		cache:               newDecisionCache(time.Minute),
+	}
+
+	app := fiber.New()
+	app.Get("/one",
+		auth.Authorize("midaz", "accounts", "get",
+			RequireScope("midaz", Dim("a", FromQuery)),
+		),
+		func(c fiber.Ctx) error { return c.SendString("ok") })
+	app.Get("/two",
+		auth.Authorize("midaz", "accounts", "get",
+			RequireScope("midaz", Dim("a", FromQuery), Dim("c", FromQuery)),
+		),
+		func(c fiber.Ctx) error { return c.SendString("ok") })
+
+	token := partnerToken("acme/p1")
+
+	// First the crafted single field: the value carries the two separator bytes.
+	crafted := httptest.NewRequest(http.MethodGet, "/one?a=b%1Ec%1Fd", nil)
+	crafted.Header.Set("Authorization", "Bearer "+token)
+
+	craftedResp, err := app.Test(crafted)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, craftedResp.StatusCode)
+
+	// Then the genuine two-field scope it was shaped to impersonate.
+	genuine := httptest.NewRequest(http.MethodGet, "/two?a=b&c=d", nil)
+	genuine.Header.Set("Authorization", "Bearer "+token)
+
+	genuineResp, err := app.Test(genuine)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, genuineResp.StatusCode)
+
+	assert.Equal(t, int64(2), rec.hits.Load(),
+		"the crafted value must not key as the genuine two-field scope; both questions must reach the access manager")
+}

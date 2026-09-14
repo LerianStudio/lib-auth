@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -169,9 +170,13 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (map[string]string, string
 // the decision cache can key on them: the cache key is a comparable struct and a
 // map cannot live in one.
 //
-// Keys and values are separated by bytes that cannot appear in an identifier, so
-// distinct field boundaries cannot collide — {"a":"b"} and {"ab":""} must not
-// fold to the same string, or two different questions would share one answer.
+// The encoding is injective BY CONSTRUCTION: every name and every value is
+// written with its byte length in front of it, so the reader of the string could
+// always recover the exact map it came from. Separator bytes alone would not be
+// enough — a value is caller-supplied and can contain any byte, including the
+// separator — and two maps that fold to one string are two different questions
+// sharing one cached answer, which for a partner-scoped credential means one
+// partner's decision serving another partner's request.
 func attributesCacheKey(attributes map[string]string) string {
 	if len(attributes) == 0 {
 		return ""
@@ -187,13 +192,20 @@ func attributesCacheKey(attributes map[string]string) string {
 	var b strings.Builder
 
 	for _, name := range names {
-		b.WriteString(name)
-		b.WriteByte(0x1f)
-		b.WriteString(attributes[name])
-		b.WriteByte(0x1e)
+		writeLengthPrefixed(&b, name)
+		writeLengthPrefixed(&b, attributes[name])
 	}
 
 	return b.String()
+}
+
+// writeLengthPrefixed writes s as its decimal byte length, a colon, then s. The
+// length is what makes the fold injective: the colon is a delimiter for the
+// length only, and a length can never contain one.
+func writeLengthPrefixed(b *strings.Builder, s string) {
+	b.WriteString(strconv.Itoa(len(s)))
+	b.WriteByte(':')
+	b.WriteString(s)
 }
 
 // resolveDeclaration validates a route's scope declaration once, at registration
