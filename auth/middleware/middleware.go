@@ -169,6 +169,52 @@ type AuthClient struct {
 type AuthResponse struct {
 	Authorized bool      `json:"authorized"`
 	Timestamp  time.Time `json:"timestamp"`
+	// Reason names WHY a denial happened, so this layer can pick the right HTTP
+	// status for the service's own caller. It is present only when Authorized is
+	// false and the credential is bound to a partner; every other denial carries
+	// no reason, exactly as before.
+	//
+	// "suspended" and "expired" mean the credential itself is no longer valid —
+	// widening a permission would not help, it has to be re-issued — so they
+	// surface as 401. "permission" and "scope" stay the 403 a denial has always
+	// been, and are never told apart to the end caller: which axis failed is an
+	// enumeration oracle over another partner's identifiers.
+	Reason string `json:"reason,omitempty"`
+}
+
+// Denial reasons the authorization service publishes. Only the two that mean
+// "this credential is finished" change the status this layer returns.
+const (
+	reasonSuspended = "suspended"
+	reasonExpired   = "expired"
+)
+
+// denialStatus maps a denial reason to the status the caller is answered with.
+// Unknown and absent reasons keep the 403 every denial returned before reasons
+// existed, so a reason this version does not know never widens or narrows access.
+func denialStatus(reason string) int {
+	switch reason {
+	case reasonSuspended, reasonExpired:
+		return http.StatusUnauthorized
+	default:
+		return http.StatusForbidden
+	}
+}
+
+// authzParams are the inputs of one authorization decision.
+type authzParams struct {
+	product     string
+	resource    string
+	action      string
+	accessToken string
+	clientIP    string
+	// attributes are the instance identifiers the route declared and this request
+	// carried. Nil for a route that declares none, which is every route today.
+	attributes map[string]string
+	// declared reports whether the route declared any dimension at all. It is the
+	// distinction the partner guard turns on: a partner-bound credential reaching
+	// a route that cannot say WHERE it is pointing is unscopeable, not unscoped.
+	declared bool
 }
 
 type oauth2Token struct {
@@ -503,8 +549,19 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // message are the ones a written body carried, so an app that never customized it
 // sees no change. When the Access Manager answered a coded error body, the
 // returned error also resolves to that commons.Response through errors.As.
-func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handler {
+//
+// scopes is optional and additive: pass a RequireScope declaration when the route
+// addresses instances (an organization, a ledger) whose identifiers the
+// authorization service must see to honour a partner-scoped credential. A route
+// that passes none behaves exactly as before, down to the bytes on the wire.
+func (auth *AuthClient) Authorize(product, resource, action string, scopes ...ScopeDeclaration) fiber.Handler {
 	auth.warnMissingTrustedProxies()
+
+	// The declaration is validated ONCE, at route-registration time, not per
+	// request: a misdeclared route is a programming error and every one of its
+	// requests is refused, which is what makes it visible on the first call
+	// instead of on the first partner.
+	scope, declErr := resolveDeclaration(product, scopes)
 
 	return func(c fiber.Ctx) error {
 		// Inherit the ambient request context instead of extracting inbound trace
@@ -551,6 +608,14 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 			attribute.String("app.request.request_id", reqID),
 		)
 
+		if declErr != "" {
+			logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", declErr)
+
+			span.End()
+
+			return fiber.NewError(http.StatusForbidden, "Forbidden")
+		}
+
 		accessToken := libHTTP.ExtractTokenFromHeader(c)
 
 		if commons.IsNilOrEmpty(&accessToken) {
@@ -578,14 +643,36 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 		// would forward the ingress address and could produce a false ALLOW.
 		clientIP := auth.resolveClientIP(c)
 
-		resolution, principal := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+		// Read the declared identifiers out of THIS request. A declared dimension
+		// the request does not carry is refused here, before the round-trip: an
+		// identifier with no value cannot be matched against a partner's scope, and
+		// sending it absent would quietly ask a question the route did not promise.
+		attributes, missing := resolveAttributes(c, scope.dims)
+		if missing != "" {
+			logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
+
+			span.End()
+
+			return fiber.NewError(http.StatusForbidden, "Forbidden")
+		}
+
+		resolution, principal := auth.checkAuthorizationWithPrincipal(ctx, authzParams{
+			product:     product,
+			resource:    resource,
+			action:      action,
+			accessToken: accessToken,
+			clientIP:    clientIP,
+			attributes:  attributes,
+			declared:    scope.declared(),
+		})
 
 		// checkResult, not legacyResult: an Access Manager that never produced an
 		// answer must be refused as 503, not rendered as a 403 the caller reads as
 		// "you are Forbidden" or a 500 that names the wrong subsystem. Fail-closed
 		// is unchanged — the request is still refused — only the word is corrected,
 		// which is what puts the outage in the rail's 5xx alarms.
-		if authorized, statusCode, err := resolution.checkResult(); err != nil {
+		authorized, statusCode, err := resolution.checkResult()
+		if err != nil {
 			var commonsErr commons.Response
 			if errors.As(err, &commonsErr) {
 				span.End()
@@ -599,17 +686,37 @@ func (auth *AuthClient) Authorize(product, resource, action string) fiber.Handle
 			span.End()
 
 			return fiber.NewError(statusCode, http.StatusText(statusCode))
-		} else if authorized {
-			publishPrincipal(c, span, principal)
+		}
 
+		if !authorized {
 			span.End()
 
-			return c.Next()
+			// The denial reason, not the transport status, picks the word: a
+			// credential the authorization service called finished is answered 401
+			// so its holder re-issues it, while every other denial stays the 403 it
+			// has always been.
+			status := denialStatus(resolution.reason)
+
+			return fiber.NewError(status, http.StatusText(status))
+		}
+
+		publishPrincipal(c, span, principal)
+
+		// Record what the request was authorized AS, for the handler and the
+		// service's request log. Only for a partner-bound credential: leaving it
+		// absent otherwise is what stops a handler reading "no scope" as "a partner
+		// with no restriction".
+		if resolution.partner != "" {
+			c.Locals(PartnerLocalsKey, resolution.partner)
+			c.SetContext(context.WithValue(c.Context(), requestScopeContextKey{}, RequestScope{
+				Partner:    resolution.partner,
+				Attributes: attributes,
+			}))
 		}
 
 		span.End()
 
-		return fiber.NewError(http.StatusForbidden, "Forbidden")
+		return c.Next()
 	}
 }
 
@@ -742,7 +849,13 @@ func (auth *AuthClient) Check(ctx context.Context, product, resource, action, ac
 		return true, http.StatusOK, nil
 	}
 
-	resolution, _ := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+	resolution, _ := auth.checkAuthorizationWithPrincipal(ctx, authzParams{
+		product:     product,
+		resource:    resource,
+		action:      action,
+		accessToken: accessToken,
+		clientIP:    clientIP,
+	})
 
 	authorized, statusCode, err := resolution.checkResult()
 	if err != nil {
@@ -751,8 +864,9 @@ func (auth *AuthClient) Check(ctx context.Context, product, resource, action, ac
 
 	if !authorized {
 		// A plain deny is an answer, not a failure: it carries no error, and it is
-		// reported as the 403 Authorize would have written.
-		return false, http.StatusForbidden, nil
+		// reported as the status Authorize would have written — the 403 every denial
+		// has always been, or the 401 the two credential-finished reasons earn.
+		return false, denialStatus(resolution.reason), nil
 	}
 
 	return true, http.StatusOK, nil
@@ -893,7 +1007,13 @@ func shouldForwardProduct(userType, product string, forwardM2MProduct bool) bool
 // the pre-IP behavior for every deployed access-manager. The auth service
 // interprets the IP; this layer never parses or validates it.
 func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error) {
-	resolution, _ := auth.checkAuthorizationWithPrincipal(ctx, product, resource, action, accessToken, clientIP)
+	resolution, _ := auth.checkAuthorizationWithPrincipal(ctx, authzParams{
+		product:     product,
+		resource:    resource,
+		action:      action,
+		accessToken: accessToken,
+		clientIP:    clientIP,
+	})
 
 	return resolution.legacyResult()
 }
@@ -903,10 +1023,16 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 // request context. The identity is built BEFORE the decision cache is consulted, so
 // a cache hit carries the same principal a round-trip would have.
 //
+// It is the whole implementation; checkAuthorization is the narrower view of it
+// that callers without a request scope (the gRPC interceptors) use, which is why
+// it takes authzParams rather than the positional arguments: a scoped route adds
+// the declared dimensions and their values, and every caller that declares none
+// sends exactly what it sent before.
+//
 // It returns the full authzResolution rather than the legacy triple: Authorize and
 // Check read checkResult, so both tell an outage from a denial, while the gRPC
 // interceptors still read legacyResult and behave exactly as before.
-func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, product, resource, action, accessToken, clientIP string) (authzResolution, Principal) {
+func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, p authzParams) (authzResolution, Principal) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -922,7 +1048,7 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, pro
 	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
 	defer cancel()
 
-	principal, statusCode, err := auth.derivePrincipal(ctx, span, accessToken, product)
+	principal, claims, statusCode, err := auth.derivePrincipalWithClaims(ctx, span, p.accessToken, p.product)
 	if err != nil {
 		// A local token failure: the request never reaches the Access Manager, so
 		// this is never an outage.
@@ -930,25 +1056,38 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, pro
 	}
 
 	userType, sub := principal.Type, principal.Subject
+	partner, _ := claims["partner"].(string)
+
+	// Fail closed on an unscopeable partner. A credential bound to a partner is
+	// only ever allowed to reach SOME instances; a route that declares no
+	// dimension cannot say which instance this request points at, so the
+	// authorization service would have to decide the "where" with nothing to
+	// decide it on. Refusing here — before the call — is the only answer that
+	// cannot accidentally widen the credential.
+	if partner != "" && !p.declared {
+		logErrorf(ctx, auth.Logger, "Partner-bound credential on a route that declares no scope dimension; denying (fail closed)")
+
+		return authzResolution{statusCode: http.StatusForbidden, partner: partner}, principal
+	}
 
 	requestBody := map[string]string{
 		"sub":      sub,
-		"resource": resource,
-		"action":   action,
+		"resource": p.resource,
+		"action":   p.action,
 	}
 
 	// M2M product forwarding only applies under the inversion model; the legacy
 	// path (inversion OFF) forwards product for normal-user flows only (pre-#122).
 	// shouldForwardProduct(userType, product, false) == the legacy normal-user rule.
 	forwardM2MProduct := auth.ForwardM2MProduct && auth.M2MInversionEnabled
-	if shouldForwardProduct(userType, product, forwardM2MProduct) {
-		requestBody["product"] = product
+	if shouldForwardProduct(userType, p.product, forwardM2MProduct) {
+		requestBody["product"] = p.product
 	}
 
 	// clientIp is optional: the field is omitted when empty, so callers that don't
 	// resolve a client IP send the same request body (no clientIp key) as before.
-	if clientIP != "" {
-		requestBody["clientIp"] = clientIP
+	if p.clientIP != "" {
+		requestBody["clientIp"] = p.clientIP
 	}
 
 	// The span payload omits sub and clientIp: the caller's subject and its IP are
@@ -973,16 +1112,29 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, pro
 	if err != nil {
 		tracing.HandleSpanError(span, "Failed to convert request body to JSON string", err)
 
-		return authzResolution{statusCode: http.StatusInternalServerError, err: err}, Principal{}
+		return authzResolution{statusCode: http.StatusInternalServerError, err: err, partner: partner}, Principal{}
 	}
 
-	requestBodyJSON, err := json.Marshal(requestBody)
+	// attributes is the ONLY member this version can add, and it is added only
+	// when the route declared dimensions. With none declared the payload is the
+	// same set of string members in the same encoder as before, so a deployed
+	// caller's bytes on the wire do not move.
+	payload := make(map[string]any, len(requestBody)+1)
+	for k, v := range requestBody {
+		payload[k] = v
+	}
+
+	if len(p.attributes) > 0 {
+		payload["attributes"] = p.attributes
+	}
+
+	requestBodyJSON, err := json.Marshal(payload)
 	if err != nil {
 		logErrorf(ctx, auth.Logger, "Failed to marshal request body: %v", err)
 
 		tracing.HandleSpanError(span, "Failed to marshal request body", err)
 
-		return authzResolution{statusCode: http.StatusInternalServerError, err: err}, Principal{}
+		return authzResolution{statusCode: http.StatusInternalServerError, err: err, partner: partner}, Principal{}
 	}
 
 	// Cache key = the authz request inputs PLUS a digest of the bearer token they were
@@ -994,24 +1146,28 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, pro
 	// it a forged token with the same claims would hit an entry warmed by a genuine one and
 	// never reach the verifier.
 	key := cacheKey{
-		tokenDigest: sha256.Sum256([]byte(accessToken)),
+		tokenDigest: sha256.Sum256([]byte(p.accessToken)),
 		sub:         sub,
-		resource:    resource,
-		action:      action,
+		resource:    p.resource,
+		action:      p.action,
 		product:     requestBody["product"],
-		clientIP:    clientIP,
+		clientIP:    p.clientIP,
+		attributes:  attributesCacheKey(p.attributes),
 	}
 
 	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so
 	// the breaker only ever runs on a miss — its open state then denies (never
 	// serving a stale grant).
 	if auth.cache != nil {
-		if authorized, hit := auth.cache.get(key); hit {
-			return authzResolution{authorized: authorized, statusCode: http.StatusOK}, principal
+		if authorized, reason, hit := auth.cache.get(key); hit {
+			return authzResolution{authorized: authorized, statusCode: http.StatusOK, reason: reason, partner: partner}, principal
 		}
 	}
 
-	return auth.resolveAuthz(ctx, span, accessToken, requestBodyJSON, key), principal
+	resolution := auth.resolveAuthz(ctx, span, p.accessToken, requestBodyJSON, key)
+	resolution.partner = partner
+
+	return resolution, principal
 }
 
 // GetApplicationToken sends a POST request to the authorization service to get a token for the application.

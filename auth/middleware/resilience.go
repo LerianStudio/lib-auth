@@ -43,7 +43,10 @@ const (
 type authzOutcome struct {
 	authorized bool
 	statusCode int
-	authErr    error
+	// reason is the denial reason published by the authorization service, empty
+	// when it published none (which is every decision that predates the field).
+	reason  string
+	authErr error
 
 	// transientErr is non-nil when the authorization service did not produce an
 	// authoritative answer — a network failure, a context timeout, or a 5xx. It is
@@ -66,6 +69,14 @@ type authzResolution struct {
 	authorized bool
 	statusCode int
 	err        error
+
+	// reason is the authorization service's denial reason, empty when authorized
+	// or when the service published none.
+	reason string
+
+	// partner is the token's "partner" claim, empty for every credential that is
+	// not partner-bound.
+	partner string
 
 	// unavailableErr is non-nil exactly when the authorization service did not
 	// answer: transport failure, timeout, 5xx, retries exhausted, breaker open.
@@ -116,6 +127,9 @@ func (auth *AuthClient) resolveAuthz(ctx context.Context, span trace.Span, acces
 		logErrorf(ctx, auth.Logger, "Authorization unavailable, denying (fail closed): %v", err)
 		tracing.HandleSpanError(span, "Authorization unavailable, denying", err)
 
+		// An unavailable authorization service names no reason, so this denial
+		// stays the 403 it has always been — never the 401 that would tell a
+		// healthy caller to re-issue a perfectly good credential.
 		return authzResolution{statusCode: http.StatusForbidden, unavailableErr: err}
 	}
 
@@ -132,10 +146,10 @@ func (auth *AuthClient) resolveAuthz(ctx context.Context, span trace.Span, acces
 	}
 
 	if auth.cache != nil {
-		auth.cache.set(key, outcome.authorized)
+		auth.cache.set(key, outcome.authorized, outcome.reason)
 	}
 
-	return authzResolution{authorized: outcome.authorized, statusCode: outcome.statusCode}
+	return authzResolution{authorized: outcome.authorized, statusCode: outcome.statusCode, reason: outcome.reason}
 }
 
 // invokeAuthz runs the authorization call under the resilience layers. Composition
@@ -279,6 +293,10 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 	// answered the question was indistinguishable from one that answered "no".
 	var decoded struct {
 		Authorized *bool `json:"authorized"`
+		// Reason is read off the SAME decode, so a denial's reason survives the
+		// pointer-decoded read of the decision (see AuthResponse.Reason for what
+		// each value means and which status it maps to).
+		Reason string `json:"reason"`
 	}
 
 	if err := json.Unmarshal(body, &decoded); err != nil {
@@ -312,7 +330,7 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 		return authzOutcome{statusCode: http.StatusServiceUnavailable, authErr: unavailable, transientErr: unavailable}
 	}
 
-	return authzOutcome{authorized: *decoded.Authorized, statusCode: statusCode}
+	return authzOutcome{authorized: *decoded.Authorized, statusCode: statusCode, reason: decoded.Reason}
 }
 
 // isCallerRefusal reports whether a status from the Access Manager is a decision

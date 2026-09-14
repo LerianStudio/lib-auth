@@ -150,8 +150,8 @@ AUTH_REQUIRED=false
 AUTH_TIMEOUT=30s
 # AUTH_CACHE_TTL enables a short-lived decision cache when > 0, keyed by
 # (SHA-256 digest of the bearer token, subject, resource, action, product,
-# clientIp) — never the raw token. Empty/0 disables it (default). Security
-# tradeoff: a permission revocation takes up to
+# clientIp, scope attributes) — never the raw token. Empty/0 disables it
+# (default). Security tradeoff: a permission revocation takes up to
 # the TTL to propagate, so keep it small (5–15s). It sheds load and, with the
 # breaker, survives brief authz outages by serving fresh positive decisions.
 # The clientIp is part of the key so an IP-dependent decision cached for one
@@ -516,6 +516,61 @@ On the Fiber path, `Authorize` sends `clientIp` to `POST /v1/authorize`, enablin
 * **gRPC forwards no client IP yet.** The gRPC interceptors send no `clientIp` in this version, so every gRPC-authorized call reaches the authorization service addressless — the same position as an unset `TRUSTED_PROXIES`, and subject to the same conditional outcome, including the deny. Peer/metadata IP extraction is a planned follow-up.
 * **Cache is IP-scoped.** When `AUTH_CACHE_TTL > 0`, the decision cache key includes `clientIp`, so a decision cached for one IP is never reused for another. IP-dependent decisions stay correct under caching. When no IP is derivable the key holds an empty string, exactly as the gRPC path has always done.
 
+## 🎯 Scoped access (declaring which instance a route addresses)
+
+By default an authorization question says WHAT is being done — a resource and an
+action. A credential that is allowed to do that on *some* instances and not others
+needs the question to also say WHERE: which organization, which ledger. Only the
+route knows where those identifiers sit in its own request, so the route declares
+it.
+
+```go
+scope := authMiddleware.RequireScope("midaz",
+    authMiddleware.Dim("organizationId", authMiddleware.FromPath).At("organization_id"),
+    authMiddleware.Dim("ledgerId", authMiddleware.FromPath).At("ledger_id"),
+)
+
+f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
+    auth.Authorize("midaz", "accounts", "get", scope),
+    accountHandler.GetAccounts)
+```
+
+* `Dim(name, source)` names the field the authorization service knows the
+  dimension by, and where to read it: `FromPath`, `FromHeader` or `FromQuery`.
+  The request key defaults to the name; use `At("...")` when the route calls it
+  something else.
+* The resolved values are sent as an additional `attributes` object on
+  `POST /v1/authorize`. **A route that declares nothing sends exactly the bytes it
+  sends today** — the member is omitted, not sent empty — so adopting this is
+  route by route, with no flag day.
+* The accepted field names are the authorization service's, per product. Sending
+  a name it does not know for that product matches nothing, and a dimension
+  nobody matches never denies — which is why a declaration whose product does not
+  match the route's product is refused rather than forwarded.
+
+Two refusals are deliberate and both answer **403**, before any call is made:
+
+1. A credential bound to a partner reaching a route that declares no dimension.
+   Such a credential is only ever allowed to reach *some* instances, and a route
+   that cannot say which instance the request points at leaves the "where" with
+   nothing to decide on.
+2. A declared dimension the request carries no value for (header absent, empty
+   path parameter). An identifier with no value cannot be matched, and sending it
+   absent would quietly ask a question the route did not promise.
+
+Inside the handler, `ScopeFromContext` returns what was resolved, for the checks a
+route declaration cannot reach — a scope that has to be applied to the request
+body, for example. It is present only for a partner-bound credential, so "no
+scope" can never be read as "a partner with no restriction". The partner is also
+recorded in `c.Locals("partner")` for the service's request log.
+
+```go
+if scope, ok := authMiddleware.ScopeFromContext(c.Context()); ok {
+    // scope.Partner    -> "acme/partner-id"
+    // scope.Attributes -> map[string]string{"organizationId": "...", "ledgerId": "..."}
+}
+```
+
 ## 📡 Expected Authorization Service Response
 
 The authorization service should return a JSON response in the following format:
@@ -526,6 +581,28 @@ The authorization service should return a JSON response in the following format:
     "timestamp": "2025-03-03T12:00:00Z"
 }
 ```
+
+A denial may name a reason, and the reason selects the status the caller is
+answered with:
+
+```json
+{
+    "authorized": false,
+    "timestamp": "2025-03-03T12:00:00Z",
+    "reason": "suspended"
+}
+```
+
+* `suspended` and `expired` mean the credential itself is finished — widening a
+  permission would not help, it has to be re-issued — so the middleware answers
+  **401**.
+* `permission`, `scope`, an unknown reason, and no reason at all stay the **403**
+  every denial has always been. Which axis failed is never told apart to the end
+  caller: that would turn the field into an enumeration oracle over another
+  credential's identifiers.
+
+The field is optional and additive. A service that never publishes it produces
+exactly the behavior this middleware had before the field existed.
 
 ## 🔒 gRPC usage
 

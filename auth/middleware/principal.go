@@ -94,19 +94,31 @@ func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 // PrincipalRequiredWhenDisabled path alike — so the two can never drift apart.
 // It returns the status code to answer with when derivation fails.
 func (auth *AuthClient) derivePrincipal(ctx context.Context, span trace.Span, accessToken, product string) (Principal, int, error) {
+	principal, _, statusCode, err := auth.derivePrincipalWithClaims(ctx, span, accessToken, product)
+
+	return principal, statusCode, err
+}
+
+// derivePrincipalWithClaims is derivePrincipal plus the parsed claims it derived
+// the identity from. The authorizing path needs one claim the Principal does not
+// carry — "partner", which says the credential may only reach SOME instances — and
+// reading it off this single parse is what keeps the scope guard deciding on
+// exactly the claims the subject was derived from, rather than on a second,
+// independently parsed view of the same token.
+func (auth *AuthClient) derivePrincipalWithClaims(ctx context.Context, span trace.Span, accessToken, product string) (Principal, jwt.MapClaims, int, error) {
 	claims, statusCode, err := auth.extractClaims(ctx, span, accessToken)
 	if err != nil {
-		return Principal{}, statusCode, err
+		return Principal{}, nil, statusCode, err
 	}
 
 	userType, _ := claims["type"].(string)
 
 	subject, statusCode, err := auth.deriveSubject(ctx, span, claims, userType, product)
 	if err != nil {
-		return Principal{}, statusCode, err
+		return Principal{}, nil, statusCode, err
 	}
 
-	return principalFromClaims(claims, subject), http.StatusOK, nil
+	return principalFromClaims(claims, subject), claims, http.StatusOK, nil
 }
 
 // derivePrincipalWithoutRoundTrip applies the extra fail-closed rule required when

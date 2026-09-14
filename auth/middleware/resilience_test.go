@@ -74,9 +74,9 @@ func TestDecisionCache_SetGetFresh(t *testing.T) {
 	c := newDecisionCache(time.Minute)
 	key := cacheKey{sub: "s", resource: "r", action: "a", product: "p"}
 
-	c.set(key, true)
+	c.set(key, true, "")
 
-	authorized, ok := c.get(key)
+	authorized, _, ok := c.get(key)
 	require.True(t, ok)
 	assert.True(t, authorized)
 }
@@ -87,9 +87,9 @@ func TestDecisionCache_NegativeDecisionCached(t *testing.T) {
 	c := newDecisionCache(time.Minute)
 	key := cacheKey{sub: "s", resource: "r", action: "a"}
 
-	c.set(key, false)
+	c.set(key, false, "")
 
-	authorized, ok := c.get(key)
+	authorized, _, ok := c.get(key)
 	require.True(t, ok)
 	assert.False(t, authorized)
 }
@@ -100,11 +100,11 @@ func TestDecisionCache_ExpiredEntryNotReturned(t *testing.T) {
 	c := newDecisionCache(15 * time.Millisecond)
 	key := cacheKey{sub: "s", resource: "r", action: "a"}
 
-	c.set(key, true)
+	c.set(key, true, "")
 
 	time.Sleep(40 * time.Millisecond)
 
-	_, ok := c.get(key)
+	_, _, ok := c.get(key)
 	assert.False(t, ok, "an expired entry must never be served (would be fail-open under an outage)")
 }
 
@@ -113,11 +113,11 @@ func TestDecisionCache_KeyFieldsDoNotCollide(t *testing.T) {
 
 	c := newDecisionCache(time.Minute)
 
-	c.set(cacheKey{sub: "a", resource: "b"}, true)
-	c.set(cacheKey{sub: "ab", resource: ""}, false)
+	c.set(cacheKey{sub: "a", resource: "b"}, true, "")
+	c.set(cacheKey{sub: "ab", resource: ""}, false, "")
 
-	got1, ok1 := c.get(cacheKey{sub: "a", resource: "b"})
-	got2, ok2 := c.get(cacheKey{sub: "ab", resource: ""})
+	got1, _, ok1 := c.get(cacheKey{sub: "a", resource: "b"})
+	got2, _, ok2 := c.get(cacheKey{sub: "ab", resource: ""})
 
 	require.True(t, ok1)
 	require.True(t, ok2)
@@ -133,7 +133,7 @@ func TestDecisionCache_BoundedUnderManyKeys(t *testing.T) {
 	// Insert far more distinct keys than a single shard's cap to exercise eviction.
 	total := decisionCacheShards * decisionCacheMaxPerShard * 2
 	for i := 0; i < total; i++ {
-		c.set(cacheKey{sub: "s", resource: "r", action: "a", product: string(rune(i)) + "-" + time.Now().String()}, true)
+		c.set(cacheKey{sub: "s", resource: "r", action: "a", product: string(rune(i)) + "-" + time.Now().String()}, true, "")
 	}
 
 	size := 0
