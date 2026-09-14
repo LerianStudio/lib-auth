@@ -222,6 +222,40 @@ func TestCheckAuthorization_NegativeCache_Served(t *testing.T) {
 	assert.Equal(t, int64(1), hits.Load(), "a cached denial is served without re-querying")
 }
 
+func TestCheckAuthorization_TransientDecisionIsNotCached(t *testing.T) {
+	t.Parallel()
+
+	server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, n int64) {
+		if n == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(AuthResponse{Authorized: false})
+
+			return
+		}
+
+		writeAuthorized(w, true)
+	})
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+		cache:   newDecisionCache(time.Minute),
+	}
+
+	authorized, statusCode, err := auth.Check(context.Background(), "", "res", "read", userToken(), "")
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+
+	authorized, statusCode, err = auth.Check(context.Background(), "", "res", "read", userToken(), "")
+	require.NoError(t, err)
+	assert.True(t, authorized, "the recovered service must be queried instead of serving the transient denial")
+	assert.Equal(t, http.StatusOK, statusCode)
+	assert.Equal(t, int64(2), hits.Load(), "a transient 5xx result must not populate the decision cache")
+}
+
 // TestCheckAuthorization_ForgedTokenMustNotHitCachedAllow proves the cache does not
 // substitute for authentication. Local JWT verification is off (the default), so the
 // authz service is the ONLY party that verifies the token signature. Two tokens carry

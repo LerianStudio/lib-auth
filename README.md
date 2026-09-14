@@ -97,6 +97,16 @@ AUTH_M2M_PRODUCT_FORWARD_ENABLED=false
 # seeds are migrated.
 AUTH_M2M_INVERSION_ENABLED=false
 
+# Optional. When "true", Authorize keeps demanding a bearer token that names a
+# principal even while auth is disabled (PLUGIN_AUTH_ENABLED=false or an empty
+# PLUGIN_AUTH_ADDRESS): the token is extracted (401 when missing), its claims
+# parsed exactly as on the enabled path, the subject derived with the same
+# fail-closed token-type rules, and the Principal published on the request
+# context. ONLY the authorization round-trip is skipped. Defaults to false,
+# which preserves the historical pass-through. AUTH_REQUIRED still wins: with
+# it set, a client that cannot authorize refuses with 503 and never gets here.
+AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=false
+
 # Optional. Opt-in local JWT signature verification for the general authorization
 # path. When unset, tokens are parsed without signature verification (the
 # authorization service remains the trust anchor) — the previous behavior,
@@ -104,12 +114,22 @@ AUTH_M2M_INVERSION_ENABLED=false
 # expiry required, and issuer when AUTH_JWT_ISSUER is set) BEFORE its claims are
 # trusted; any failure denies the request (401, fail closed).
 #
+# One path is the exception to "the authorization service remains the trust
+# anchor": with AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=true no authorization call
+# is made at all, so with verification unset that path has NO trust anchor and
+# the caller identity is self-asserted. Setting a cert here restores one, because
+# the same claim extraction runs on both paths, and an invalid signature is then
+# refused with 401 on the disabled path too.
+#
 # AUTH_JWT_VERIFY_CERT holds the issuer's PEM certificate(s) or RSA public key(s).
 # Newline-join multiple PEMs to carry the old and new certs simultaneously across
 # a key rotation (zero-downtime: a token verified by ANY listed key is accepted).
 # AUTH_JWT_VERIFY_CERT_PATH points to a mounted PEM file instead (used only when
 # AUTH_JWT_VERIFY_CERT is empty). A configured-but-unparseable cert is logged at
-# ERROR and leaves verification disabled; it is never silently accepted.
+# ERROR and leaves verification disabled on the normal authorizing path, where the
+# authorization service remains the trust anchor. The no-round-trip principal path
+# refuses with 503 instead of accepting self-asserted claims when a configured key
+# source could not be loaded.
 AUTH_JWT_VERIFY_CERT=
 AUTH_JWT_VERIFY_CERT_PATH=
 AUTH_JWT_ISSUER=
@@ -129,8 +149,9 @@ AUTH_REQUIRED=false
 # (Go duration). Defaults to 30s (behavior-neutral). It also caps the retry budget.
 AUTH_TIMEOUT=30s
 # AUTH_CACHE_TTL enables a short-lived decision cache when > 0, keyed by
-# (subject, resource, action, product, clientIp, scope attributes) — never the token. Empty/0
-# disables it (default). Security tradeoff: a permission revocation takes up to
+# (SHA-256 digest of the bearer token, subject, resource, action, product,
+# clientIp, scope attributes) — never the raw token. Empty/0 disables it
+# (default). Security tradeoff: a permission revocation takes up to
 # the TTL to propagate, so keep it small (5–15s). It sheds load and, with the
 # breaker, survives brief authz outages by serving fresh positive decisions.
 # The clientIp is part of the key so an IP-dependent decision cached for one
@@ -157,8 +178,13 @@ AUTH_RETRY_MAX=0
 # it cannot be rebased it is rejected, never stored in a form that would match
 # nothing. An unusable entry is logged at ERROR and dropped; the valid entries
 # still apply. Nothing here ever fails the boot: a missing or entirely unusable
-# value logs ONE ERROR line at startup naming cause and consequence, and the
-# service starts with no address to forward.
+# value leaves the service starting with no address to forward, and announces
+# that in ONE wording at two levels. At construction it is an INFO disclosure,
+# in every NewAuthClient. It becomes an ERROR — once per client — only when
+# Authorize is mounted on a client configured to call the authorization service
+# (auth enabled and an address set), because that is the only path in this
+# library that resolves a caller IP. A token-only or gRPC-only client never
+# reaches it and is not paged for a feature it does not use.
 #
 # LEAVING IT UNSET CAN LOCK YOUR CALLERS OUT. With no trusted proxies the derived
 # caller IP is empty and clientIp is omitted from the authorize call. What the
@@ -232,7 +258,194 @@ The `Authorize` function:
 * Sends a POST request to the authorization service.
 * On the Fiber path, derives the caller's client IP from `TRUSTED_PROXIES` and the socket peer — not from Fiber's `c.IP()` or `c.IPs()` — and sends it as the optional `clientIp` field, omitting it when no caller IP is attributable (see [Client IP forwarding](#-client-ip-forwarding)).
 * Checks if the response indicates that the user is authorized.
-* Allows the normal application flow or returns a 403 (Forbidden) error.
+* Allows the normal application flow or refuses the request.
+
+Every refusal is **returned** as a `*fiber.Error`, never written to the response by
+the middleware, so the application's own `ErrorHandler` renders it and keeps its
+response envelope (RFC 9457 problem+json, say) instead of having a plain-text body
+written past it. The status and the message are the ones the written body carried, so
+a service running Fiber's `DefaultErrorHandler` gets identical responses: 401
+`Missing Token`, 403 `Forbidden`, 503 `Service Unavailable`, and the status text for
+anything else. Every refusal the authorization service itself returned also resolves
+to a `commons.Response` through `errors.As`, so a handler that knows lib-commons
+still renders the code, title and message it sent.
+
+**The HTTP status decides, never a field inside the body.** Only a `2xx` answer is
+an authorization decision. A body that claims `authorized` inside any non-`2xx`
+answer is never read as a grant, whatever the status.
+
+Every non-`2xx` refuses. What the status chooses is the WORD the caller and the
+operator read:
+
+* **Refused at its own status** — the answer is about the caller, and repeating the
+  request will not change it: `401` (token missing or invalid), `403` (tenant IP
+  allowlist), `404` (no subject exists for the token's `sub`), and any other `4xx`.
+  These are never retried and never trip the circuit breaker.
+* **`503 Service Unavailable`** — the authorization service did not answer the
+  question: unreachable, a `5xx`, a redirect, a `2xx` that does not parse or that
+  carries no decision at all, retries exhausted, the circuit breaker open, and four
+  `4xx` that are not about the caller. `400` and `422` mean the request body was
+  rejected, and that body is built entirely by this library, so they signal a
+  contract mismatch an operator must fix. `429` is the authorization service's own
+  rate limiter, whose direct caller is this service rather than the end caller.
+  `408` is a timeout on the responder's side. These are retried and are
+  breaker-eligible, because repeating them can succeed.
+
+Redirects are never followed. The client returns the `3xx` itself, so the status
+the decision is made on always belongs to the service at `PLUGIN_AUTH_ADDRESS` and
+not to whatever a `Location` header named — otherwise a redirect to any endpoint
+answering `200 {"authorized":true}` would be a grant.
+
+The refusal message is read from both error shapes the authorization service
+serves: `message` on its legacy envelope, `detail` on its RFC 9457 problem
+document.
+
+`403 Forbidden` means the authorization service answered no. The request is refused
+under every rule above (fail closed), but only the 503 tells an operator an outage
+apart from a policy denial, and only the 503 reaches a rail's 5xx alarms.
+
+## 🪪 Principal on the request context
+
+Every path where `Authorize` reads a token and then calls `c.Next()` publishes the
+caller identity it derived, so a handler never has to parse the token again. Read it
+back with `PrincipalFromContext`, which reports absent when no principal was
+published, when the stored `Sub` is empty or whitespace-only, and when the
+derivation produced no real subject (the legacy `M2MInversionEnabled=false` model,
+where the subject is a fabricated role).
+
+```go
+type Principal struct {
+    Type     string // token "type" claim: "normal-user" | "application"
+    Owner    string // "owner" claim; empty for application tokens
+    Sub      string // "sub" claim, verbatim
+    Subject  string // "<owner>/<sub>" for normal-user, "<sub>" for application
+    ClientID string // "azp" claim when present, else empty
+}
+
+func PrincipalFromContext(ctx context.Context) (Principal, bool)
+```
+
+An `owner` or `sub` claim that is empty or whitespace-only names nobody and is
+refused with 401 before any principal is published. Every other value is published
+verbatim: `Owner` and `Sub` are the claims as the token wrote them, edge whitespace
+included, with no normalization. `Subject` is the string sent to the authorization
+service.
+
+Publication covers the authorized decision, a decision-cache hit, and the
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` path below. A denied request publishes
+nothing, and neither does the default disabled pass-through. The only identity attribute any of
+these spans carries is `app.auth.principal.type`. The span copy of the authorization
+payload omits `sub`, so `Owner`, `Sub`, `Subject` and `ClientID` are recorded nowhere,
+and neither the access token nor any caller identifier reaches a span attribute or a
+log line — the request id is what correlates a span with the service's own audit
+trail. The body sent to the authorization service is unchanged and still carries the
+subject, since it is the subject of the decision; only the telemetry copy is redacted.
+
+### Bearer required while auth is disabled
+
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` (field `PrincipalRequiredWhenDisabled`,
+default `false`) is for services that always want a named caller, even in a
+deployment that runs with the authorization service off. When it is `true` and the
+client cannot authorize, `Authorize` still extracts the token (401 when missing),
+parses the claims, derives the subject under the same fail-closed token-type rules,
+and publishes the `Principal`. A legacy fabricated-role token without a real `sub`
+is refused with 401 because it does not name a principal, as is a token whose `sub`
+is empty or whitespace-only. The authorization round-trip is the only thing
+skipped. The branch is taken only when the client is
+disabled: a client that is enabled but has no address is an incomplete
+configuration and refuses with 503 in both `Authorize` and `Check`, never the
+no-round-trip path. `AUTH_REQUIRED` takes precedence: a client
+that cannot authorize refuses with 503 regardless. Like
+`AUTH_M2M_INVERSION_ENABLED`, the field can be pinned in code after
+`NewAuthClient` instead of read from the environment.
+
+**This is a development mode, and its trust boundary is not the usual one.** There is
+no authorization round-trip on this path, so nothing external vouches for the caller.
+Unless local verification is configured, with the `AUTH_JWT_VERIFY_CERT` /
+`AUTH_JWT_VERIFY_CERT_PATH` PEM or a JWKS source wired through `WithKeySource`, the
+published identity is **self-asserted**: anyone who can reach the route can present a
+token naming any principal, and the library will publish it. The branch runs the same
+claim extraction as the enabled path, so configuring keys does apply here: an invalid
+signature is refused with 401 on this path too. With no keys configured the token is
+parsed without verifying its signature. Do not rely on a principal published by an
+unverified client on a network you do not control.
+
+### Type guards
+
+`RequireHuman()` and `RequireApplication()` are `fiber.Handler`s that gate a route on
+the published `Principal.Type`. Mount them AFTER `Authorize`: a missing principal is
+401 (nobody was identified) and a principal of the wrong kind is 403 (a known caller
+of the wrong kind). Both **return** the corresponding Fiber error
+(`fiber.ErrUnauthorized`, `fiber.ErrForbidden`) instead of writing a response
+themselves. Under Fiber's default error handler the rendered bodies are unchanged —
+plain-text `Unauthorized` and `Forbidden`, matching `Authorize` — while a service that
+installs its own `ErrorHandler`, problem+json for instance, receives the error and
+keeps its own response envelope.
+
+`RequireApplication` is not `RequireM2M`. It performs no signature verification: the
+authorization round-trip behind `Authorize` is the trust anchor, as it is for every
+other route. `RequireM2M` stays a separate, self-verifying gate.
+
+The two do not substitute for each other in a chain either. A route gated only by
+`RequireM2M` publishes no `Principal`, because only `Authorize` publishes one, so a
+`RequireApplication()` mounted behind it answers 401 for every caller, valid M2M token
+included. Mount `Authorize` first whenever a type guard follows.
+
+```go
+f.Post("/v1/emissions/:id/approve",
+    auth.Authorize(applicationName, "emission", "approve"),
+    authMiddleware.RequireHuman(),      // 403 for a machine caller
+    emissionHandler.Approve)
+
+f.Post("/v1/operations/:id/resolution",
+    auth.Authorize(applicationName, "operation", "resolve"),
+    authMiddleware.RequireApplication(), // 403 for a human caller
+    operationHandler.Resolve)
+```
+
+### Authorization outside the chain
+
+When the resource or action is only known inside the handler, `Check` runs the same
+decision the middleware would, with the same derivation, decision cache, breaker and
+fail-closed rules:
+
+```go
+func (auth *AuthClient) Check(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error)
+```
+
+It returns:
+
+* `(true, 200, nil)` when authorized;
+* `(false, 403, nil)` on a plain authoritative denial from the authorization service —
+  a plain deny is an answer, not a failure;
+* `(false, status, err)` when the authorization service refuses the caller — any
+  `4xx` except `400`, `408`, `422` and `429` — at that status, carrying the reason
+  it wrote;
+* `(false, 401, err)` on a local token failure: a missing or invalid token, an
+  unsupported token type, an `owner` or `sub` claim that is missing, empty or
+  whitespace-only;
+* `(false, 503, err)` whenever the authorization service is unavailable: a connection
+  refused or other transport error, retries exhausted, or an open breaker. A client
+  with `AUTH_REQUIRED` set that cannot authorize answers the same way, without
+  evaluating the token.
+
+The unavailable result stays fail-closed — never authorized — but remains
+distinguishable from an authoritative denial, including when `AUTH_RETRY_MAX` or
+`AUTH_BREAKER_ENABLED` is set. `Check` publishes no principal: the caller already
+holds the one `Authorize` published.
+
+`clientIP` is **caller-supplied** and reaches the authorization decision as-is, where
+it feeds the per-tenant IP allowlist described in
+[Client IP forwarding](#-client-ip-forwarding). Pass it empty, in which case it is
+omitted from the request body exactly as on the middleware path, or pass a value you
+resolved yourself through your own trusted-proxy configuration. Never pass Fiber's
+`c.IP()` raw: under a misconfigured proxy chain that value is the attacker-chosen
+`X-Forwarded-For` header, which lets a caller pick the address the allowlist matches
+it against.
+
+`Authorize` answers the same `503 Service Unavailable` on the wire for the same
+outage (see the refusal paragraph under **How It Works** above), so a rail's alarms
+can key on 503 across both surfaces.
 
 ## 📥 Example Request to Auth
 
@@ -271,13 +484,20 @@ On the Fiber path, `Authorize` sends `clientIp` to `POST /v1/authorize`, enablin
   **This table is a copy, and the copy is not the authority.** The rule belongs to the authorization service and can change there without a release here — it has already gone stale twice in this file, in both directions. Before acting on it, confirm it in that service's own IP-allowlist operations documentation. What does *not* go stale is the sentence above it: this library omits the field when no address is derivable, and takes no position on what that means.
 
   There is deliberately **no fallback to the socket peer**: the peer is the ingress address, so a tenant with the ingress CIDR in its allowlist would see a *false allow* for every caller on earth. Set the variable on any deployment where tenants use IP allowlists.
-* **A missing or unusable value never fails the boot.** The service starts normally, forwarding no address — there is no `Fatal`, no `panic` and no error returned to your bootstrap. The degradation is announced instead: **one ERROR line at construction** (not per request) naming the cause and the consequence, e.g.
+* **A missing or unusable value never fails the boot.** The service starts normally, forwarding no address — there is no `Fatal`, no `panic` and no error returned to your bootstrap. The degradation is announced instead, in one wording at two levels (never per request), naming the cause and the consequence:
 
   ```text
   TRUSTED_PROXIES is not set; client IP will not be forwarded and the per-tenant IP allowlist has nothing to match the caller against
   ```
 
-  A value that was set but left no usable CIDR logs the same consequence with a distinct cause (`has no usable CIDR`), preceded by one ERROR per dropped entry. **Alert on that line.** It is emitted once, at construction, and is the only warning before the conditional outcome above starts applying to every request this service authorizes.
+  | when | level |
+  | --- | --- |
+  | at construction, in every `NewAuthClient` | **INFO** — a disclosure, visible when the consuming service logs at INFO or DEBUG |
+  | the first time `Authorize` is mounted on a client configured to call the authorization service (auth enabled and an address set) | **ERROR**, once per client |
+
+  **Alert on the ERROR.** Mounting `Authorize` is what makes the caller address load-bearing: from that point every authorized request omits `clientIp` and the conditional outcome above starts applying. A client that never mounts it — one built only to mint tokens with `GetApplicationToken`, a gRPC-only client, a service that hand-rolls its own authorize call, or one whose auth is disabled or addressless — cannot experience that outcome, so it gets the INFO and is not paged for a feature it does not use.
+
+  A value that was set but left no usable CIDR follows the same two levels with a distinct cause (`has no usable CIDR`). Each dropped entry is still its own ERROR at construction, unconditionally: an unusable entry is a live misconfiguration whichever way the client is used.
 * **How the IP is chosen.** The hop list is every `X-Forwarded-For` line on the request followed by the real socket peer. It is walked **right to left** (nearest hop first), skipping every hop inside a trusted CIDR; the first hop that is not a trusted proxy is the caller. If every hop is trusted (fully-internal traffic), or a hop cannot be read as a bare IP, no caller is attributable: the result is empty and `clientIp` is omitted — which, for a tenant with an active allowlist, is the conditional outcome described in the bullet above, not a quiet pass. IPv4-mapped IPv6 hops (`::ffff:203.0.113.7`) are normalised, so they match IPv4 CIDRs and reach the allowlist in the form it stores.
 
 * **The chain is read off the request, not through `c.IPs()`.** `c.IPs()` reads the same header but filters it through the consuming service's app config first: with `EnableIPValidation` set, Fiber drops every token it does not recognise as an address before this library sees the chain. Dropping a token closes the gap it left, so the walk no longer stops there and carries on further left — onto text the caller wrote about itself. The same request would attribute a different caller depending only on a flag in the embedding service. So the library reads the header bytes and splits them itself: one hop per comma position, surrounding whitespace trimmed, **empty positions kept** (an empty position is a hop that cannot be vouched for, so it stops the walk like any other unreadable one). Repeated `X-Forwarded-For` lines are read and concatenated in order, as [RFC 9110 §5.2](https://www.rfc-editor.org/rfc/rfc9110#section-5.2) defines them — reading only the first line would discard the trustworthy right-hand end of the chain and stop the walk further left.
