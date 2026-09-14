@@ -42,7 +42,10 @@ const (
 type authzOutcome struct {
 	authorized bool
 	statusCode int
-	authErr    error
+	// reason is the denial reason published by the authorization service, empty
+	// when it published none (which is every decision that predates the field).
+	reason  string
+	authErr error
 }
 
 // requestTimeout is the per-request authorization deadline, falling back to the
@@ -61,24 +64,27 @@ func (auth *AuthClient) requestTimeout() time.Duration {
 // denies (fail closed): it returns (false, 403, nil), the same "not authorized"
 // path a normal denial takes, never failing open. A clean decision is cached (when
 // the cache is enabled) before being returned.
-func (auth *AuthClient) resolveAuthz(ctx context.Context, span trace.Span, accessToken string, body []byte, key cacheKey) (bool, int, error) {
+func (auth *AuthClient) resolveAuthz(ctx context.Context, span trace.Span, accessToken string, body []byte, key cacheKey) (authzDecision, error) {
 	outcome, err := auth.invokeAuthz(ctx, span, accessToken, body)
 	if err != nil {
 		logErrorf(ctx, auth.Logger, "Authorization unavailable, denying (fail closed): %v", err)
 		tracing.HandleSpanError(span, "Authorization unavailable, denying", err)
 
-		return false, http.StatusForbidden, nil
+		// An unavailable authorization service names no reason, so this denial
+		// stays the 403 it has always been — never the 401 that would tell a
+		// healthy caller to re-issue a perfectly good credential.
+		return authzDecision{statusCode: http.StatusForbidden}, nil
 	}
 
 	if outcome.authErr != nil {
-		return false, outcome.statusCode, outcome.authErr
+		return authzDecision{statusCode: outcome.statusCode}, outcome.authErr
 	}
 
 	if auth.cache != nil {
-		auth.cache.set(key, outcome.authorized)
+		auth.cache.set(key, outcome.authorized, outcome.reason)
 	}
 
-	return outcome.authorized, outcome.statusCode, nil
+	return authzDecision{authorized: outcome.authorized, statusCode: outcome.statusCode, reason: outcome.reason}, nil
 }
 
 // invokeAuthz runs the authorization call under the resilience layers. Composition
@@ -205,7 +211,7 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 		return authzOutcome{statusCode: http.StatusInternalServerError, authErr: fmt.Errorf("failed to unmarshal response: %w", err)}
 	}
 
-	return authzOutcome{authorized: response.Authorized, statusCode: statusCode}
+	return authzOutcome{authorized: response.Authorized, statusCode: statusCode, reason: response.Reason}
 }
 
 // newAuthBreaker builds a circuit breaker that opens after maxFailures consecutive
