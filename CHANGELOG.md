@@ -1,3 +1,10 @@
+## [4.1.0-beta.8](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.7...v4.1.0-beta.8) (2026-09-14)
+
+
+### Bug Fixes
+
+* **declaration:** refuse a deny effect instead of accepting one nobody applies ([8bf314a](https://github.com/LerianStudio/lib-auth/commit/8bf314a32b86b2d40c83309e01db177eef5ae863))
+
 ## [4.1.0-beta.7](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.6...v4.1.0-beta.7) (2026-09-14)
 
 
