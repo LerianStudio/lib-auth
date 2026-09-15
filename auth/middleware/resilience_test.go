@@ -74,9 +74,9 @@ func TestDecisionCache_SetGetFresh(t *testing.T) {
 	c := newDecisionCache(time.Minute)
 	key := cacheKey{sub: "s", resource: "r", action: "a", product: "p"}
 
-	c.set(key, true)
+	c.set(key, true, "")
 
-	authorized, ok := c.get(key)
+	authorized, _, ok := c.get(key)
 	require.True(t, ok)
 	assert.True(t, authorized)
 }
@@ -87,9 +87,9 @@ func TestDecisionCache_NegativeDecisionCached(t *testing.T) {
 	c := newDecisionCache(time.Minute)
 	key := cacheKey{sub: "s", resource: "r", action: "a"}
 
-	c.set(key, false)
+	c.set(key, false, "")
 
-	authorized, ok := c.get(key)
+	authorized, _, ok := c.get(key)
 	require.True(t, ok)
 	assert.False(t, authorized)
 }
@@ -100,11 +100,11 @@ func TestDecisionCache_ExpiredEntryNotReturned(t *testing.T) {
 	c := newDecisionCache(15 * time.Millisecond)
 	key := cacheKey{sub: "s", resource: "r", action: "a"}
 
-	c.set(key, true)
+	c.set(key, true, "")
 
 	time.Sleep(40 * time.Millisecond)
 
-	_, ok := c.get(key)
+	_, _, ok := c.get(key)
 	assert.False(t, ok, "an expired entry must never be served (would be fail-open under an outage)")
 }
 
@@ -113,11 +113,11 @@ func TestDecisionCache_KeyFieldsDoNotCollide(t *testing.T) {
 
 	c := newDecisionCache(time.Minute)
 
-	c.set(cacheKey{sub: "a", resource: "b"}, true)
-	c.set(cacheKey{sub: "ab", resource: ""}, false)
+	c.set(cacheKey{sub: "a", resource: "b"}, true, "")
+	c.set(cacheKey{sub: "ab", resource: ""}, false, "")
 
-	got1, ok1 := c.get(cacheKey{sub: "a", resource: "b"})
-	got2, ok2 := c.get(cacheKey{sub: "ab", resource: ""})
+	got1, _, ok1 := c.get(cacheKey{sub: "a", resource: "b"})
+	got2, _, ok2 := c.get(cacheKey{sub: "ab", resource: ""})
 
 	require.True(t, ok1)
 	require.True(t, ok2)
@@ -133,7 +133,7 @@ func TestDecisionCache_BoundedUnderManyKeys(t *testing.T) {
 	// Insert far more distinct keys than a single shard's cap to exercise eviction.
 	total := decisionCacheShards * decisionCacheMaxPerShard * 2
 	for i := 0; i < total; i++ {
-		c.set(cacheKey{sub: "s", resource: "r", action: "a", product: string(rune(i)) + "-" + time.Now().String()}, true)
+		c.set(cacheKey{sub: "s", resource: "r", action: "a", product: string(rune(i)) + "-" + time.Now().String()}, true, "")
 	}
 
 	size := 0
@@ -220,6 +220,40 @@ func TestCheckAuthorization_NegativeCache_Served(t *testing.T) {
 	}
 
 	assert.Equal(t, int64(1), hits.Load(), "a cached denial is served without re-querying")
+}
+
+func TestCheckAuthorization_TransientDecisionIsNotCached(t *testing.T) {
+	t.Parallel()
+
+	server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, n int64) {
+		if n == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(AuthResponse{Authorized: false})
+
+			return
+		}
+
+		writeAuthorized(w, true)
+	})
+
+	auth := &AuthClient{
+		Address: server.URL,
+		Enabled: true,
+		Logger:  &testLogger{},
+		cache:   newDecisionCache(time.Minute),
+	}
+
+	authorized, statusCode, err := auth.Check(context.Background(), "", "res", "read", userToken(), "")
+	require.Error(t, err)
+	assert.False(t, authorized)
+	assert.Equal(t, http.StatusServiceUnavailable, statusCode)
+
+	authorized, statusCode, err = auth.Check(context.Background(), "", "res", "read", userToken(), "")
+	require.NoError(t, err)
+	assert.True(t, authorized, "the recovered service must be queried instead of serving the transient denial")
+	assert.Equal(t, http.StatusOK, statusCode)
+	assert.Equal(t, int64(2), hits.Load(), "a transient 5xx result must not populate the decision cache")
 }
 
 // TestCheckAuthorization_ForgedTokenMustNotHitCachedAllow proves the cache does not

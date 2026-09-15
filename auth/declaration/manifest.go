@@ -12,13 +12,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Permission effects. A permission either grants (allow) or refuses (deny) the
-// declared (resource, action) pair. These are the only accepted values. They
-// mirror the server model (plugin-access-manager identity pkg/model).
-const (
-	effectAllow = "allow"
-	effectDeny  = "deny"
-)
+// effectAllow is the only accepted permission effect. It mirrors the server
+// model (plugin-access-manager identity pkg/model).
+//
+// "deny" is deliberately NOT accepted. The manifest used to take it and the
+// reconciler wrote it to Casdoor as a real permission, but no decision point
+// applies it: every evaluator treats an effect other than allow as "did not
+// match" and carries on, authorizing on the first allow that does match. There
+// is no deny-wins pass, and Casdoor's own enforcer — which would honour it — is
+// replaced by that implementation. Accepting a deny would therefore be a lie:
+// the author reads a refusal, the runtime grants.
+//
+// Refusing it at the door is the mitigation, not the whole answer. Real
+// deny-wins semantics across the evaluation points is separate work; until it
+// exists, the safe state is that no deny can be authored at all.
+const effectAllow = "allow"
 
 // DeclarationManifest is the wire model for a plugin's access-manager declaration
 // (the body of PUT /v1/declarations/{slug}). It is a faithful client-side mirror of
@@ -247,7 +255,7 @@ func (m *DeclarationManifest) validateRoles() (map[string]struct{}, []string) {
 
 // validatePermissions validates each declared permission against declaredRoles and
 // returns any violations. It enforces a non-empty resource and action, an
-// allow/deny effect, at least one granted (declared) role, no duplicate composed
+// allow effect, at least one granted (declared) role, no duplicate composed
 // name, and no lossy Casdoor-safe collision — mirroring the server.
 func (m *DeclarationManifest) validatePermissions(declaredRoles map[string]struct{}) []string {
 	var violations []string
@@ -264,8 +272,9 @@ func (m *DeclarationManifest) validatePermissions(declaredRoles map[string]struc
 			violations = append(violations, fmt.Sprintf("permissions[%d]: action must not be empty", i))
 		}
 
-		if p.Effect != effectAllow && p.Effect != effectDeny {
-			violations = append(violations, fmt.Sprintf("permissions[%d]: effect must be %q or %q", i, effectAllow, effectDeny))
+		if p.Effect != effectAllow {
+			violations = append(violations, fmt.Sprintf(
+				"permissions[%d]: effect must be %q (a deny effect is recorded but never enforced, so it is not accepted)", i, effectAllow))
 		}
 
 		if len(p.Roles) == 0 {

@@ -462,3 +462,92 @@ func TestWireFromEnv_DeprecatedAliasesStillWork(t *testing.T) {
 		t.Fatal("expected a background declaration PUT from the deprecated-alias contract")
 	}
 }
+
+// TestWireFromEnv_MissingAuthHostFailsClosed pins the auth host as REQUIRED when
+// declaration is enabled. The identity declaration endpoint is M2M-guarded, so
+// without a host the minter yields an empty token and the PUT can never be
+// accepted — and because the publish fail-opens, the old behaviour was a green pod
+// that silently never declared. The error must name BOTH spellings, because half
+// the platform's deployments carry the alias.
+func TestWireFromEnv_MissingAuthHostFailsClosed(t *testing.T) {
+	setWireEnv(t, "http://identity.local:4001", "", true)
+	t.Setenv("PLUGIN_AUTH_ADDRESS", "")
+
+	stop, err := WireFromEnv(context.Background(), wireInput())
+
+	require.Error(t, err, "an empty auth host must fail closed, not publish nothing in silence")
+	require.NotNil(t, stop, "error path must still return a non-nil no-op stop")
+	assert.Contains(t, err.Error(), "PLUGIN_AUTH_HOST", "the error must name the canonical var")
+	assert.Contains(t, err.Error(), "PLUGIN_AUTH_ADDRESS", "the error must name the alias too")
+	assert.NotPanics(t, func() { stop() })
+}
+
+// TestWireFromEnv_AuthDisabledFailsClosed covers the other half of the same
+// contract: auth turned off cannot mint a token either, so declaration with auth
+// off is a permanent misconfiguration and must refuse boot rather than warn.
+func TestWireFromEnv_AuthDisabledFailsClosed(t *testing.T) {
+	setWireEnv(t, "http://identity.local:4001", "http://auth.local:4000", false)
+
+	stop, err := WireFromEnv(context.Background(), wireInput())
+
+	require.Error(t, err, "declaration enabled with auth disabled must fail closed")
+	require.NotNil(t, stop)
+	assert.Contains(t, err.Error(), "PLUGIN_AUTH_ENABLED")
+	assert.NotPanics(t, func() { stop() })
+}
+
+// TestWireFromEnv_AuthHostAliasAccepted proves the deprecated spelling keeps a
+// deployment working. Requiring the auth host without honouring PLUGIN_AUTH_ADDRESS
+// would fail-close every deployment in that camp on the very release that added
+// the requirement.
+func TestWireFromEnv_AuthHostAliasAccepted(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(identity.Close)
+
+	setWireEnv(t, identity.URL, "", true)
+	t.Setenv("PLUGIN_AUTH_ADDRESS", auth.URL)
+
+	stop, err := WireFromEnv(context.Background(), wireInput())
+	require.NoError(t, err, "the alias alone must satisfy the auth-host requirement")
+	require.NotNil(t, stop)
+	t.Cleanup(stop)
+
+	select {
+	case <-identity.puts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a background declaration PUT using the aliased auth host")
+	}
+}
+
+// TestWireFromEnv_AuthHostCanonicalWinsOverAlias pins precedence: with both set,
+// the canonical name is the one that reaches the minter. Proven by pointing the
+// alias at a server that would fail the test if it were ever called.
+func TestWireFromEnv_AuthHostCanonicalWinsOverAlias(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	wrong := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("the deprecated alias must not win over the canonical auth host")
+	}))
+	t.Cleanup(wrong.Close)
+
+	identity := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(identity.Close)
+
+	setWireEnv(t, identity.URL, auth.URL, true)
+	t.Setenv("PLUGIN_AUTH_ADDRESS", wrong.URL)
+
+	stop, err := WireFromEnv(context.Background(), wireInput())
+	require.NoError(t, err)
+	require.NotNil(t, stop)
+	t.Cleanup(stop)
+
+	select {
+	case <-identity.puts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a background declaration PUT")
+	}
+}
