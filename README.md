@@ -279,7 +279,8 @@ operator read:
 
 * **Refused at its own status** — the answer is about the caller, and repeating the
   request will not change it: `401` (token missing or invalid), `403` (tenant IP
-  allowlist), `404` (no subject exists for the token's `sub`), and any other `4xx`.
+  allowlist), `404` (no subject exists for the token's `sub`), and any other `4xx`
+  except the four the next bullet reclassifies (`400`, `408`, `422`, `429`).
   These are never retried and never trip the circuit breaker.
 * **`503 Service Unavailable`** — the authorization service did not answer the
   question: unreachable, a `5xx`, a redirect, a `2xx` that does not parse or that
@@ -300,7 +301,9 @@ The refusal message is read from both error shapes the authorization service
 serves: `message` on its legacy envelope, `detail` on its RFC 9457 problem
 document.
 
-`403 Forbidden` means the authorization service answered no. The request is refused
+`403 Forbidden` is one of two things: a refusal this library makes locally, before
+any call (a misdeclared route, or the two `RequireScope` refusals described under
+Scoped access), or the authorization service answering no. The request is refused
 under every rule above (fail closed), but only the 503 tells an operator an outage
 apart from a policy denial, and only the 503 reaches a rail's 5xx alarms.
 
@@ -325,8 +328,10 @@ type Principal struct {
 func PrincipalFromContext(ctx context.Context) (Principal, bool)
 ```
 
-An `owner` or `sub` claim that is empty or whitespace-only names nobody and is
-refused with 401 before any principal is published. Every other value is published
+A `sub` claim that is empty or whitespace-only names nobody and is refused with 401
+before any principal is published; on a `normal-user` token the same applies to
+`owner`, while an `application` token's `owner` is ignored and `Owner` stays empty.
+Every other value is published
 verbatim: `Owner` and `Sub` are the claims as the token wrote them, edge whitespace
 included, with no normalization. `Subject` is the string sent to the authorization
 service.
@@ -336,9 +341,11 @@ Publication covers the authorized decision, a decision-cache hit, and the
 nothing, and neither does the default disabled pass-through. The only identity attribute any of
 these spans carries is `app.auth.principal.type`. The span copy of the authorization
 payload omits `sub`, so `Owner`, `Sub`, `Subject` and `ClientID` are recorded nowhere,
-and neither the access token nor any caller identifier reaches a span attribute or a
-log line — the request id is what correlates a span with the service's own audit
-trail. The body sent to the authorization service is unchanged and still carries the
+and neither the access token nor any principal identifier reaches a span attribute
+or a log line written by this library — the request id is what correlates a span
+with the service's own audit trail. The one caller identifier this library hands
+to the service is the partner id of a scoped credential, in `c.Locals(PartnerLocalsKey)`,
+for the service's own request log (see Scoped access). The body sent to the authorization service is unchanged and still carries the
 subject, since it is the subject of the decision; only the telemetry copy is redacted.
 
 ### Bearer required while auth is disabled
