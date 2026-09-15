@@ -743,6 +743,65 @@ func TestResolveDeclaration_RejectsDuplicateDimensionName(t *testing.T) {
 	assert.Contains(t, declErr, "declared more than once")
 }
 
+// A misdeclared route is refused with auth DISABLED too. Both disabled-auth
+// branches used to run before the declaration check: the default pass-through
+// served every request of a route whose declaration was a programming error,
+// and the AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED path did the same. The contract
+// ("every one of its requests is refused") has no auth-posture clause.
+func TestAuthorize_MisdeclaredRouteIsRefusedWhileAuthIsDisabled(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		auth *AuthClient
+	}{
+		{name: "default pass-through", auth: &AuthClient{Enabled: false, Logger: &testLogger{}}},
+		{name: "principal required when disabled", auth: &AuthClient{
+			Enabled: false, Logger: &testLogger{}, M2MInversionEnabled: true, PrincipalRequiredWhenDisabled: true,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			app := fiber.New()
+			app.Get("/dup/:organization_id",
+				tc.auth.Authorize("midaz", "accounts", "get",
+					RequireScope("midaz",
+						Dim("organizationId", FromPath).At("organization_id"),
+						Dim("organizationId", FromQuery).At("organizationId"),
+					),
+				),
+				func(c fiber.Ctx) error { return c.SendString("reached") })
+
+			// Positive control: a well-declared route keeps the disabled-auth behaviour.
+			app.Get("/ok/:organization_id",
+				tc.auth.Authorize("midaz", "accounts", "get",
+					RequireScope("midaz",
+						Dim("organizationId", FromPath).At("organization_id"),
+						Dim("ledgerId", FromQuery).At("ledgerId"),
+					),
+				),
+				func(c fiber.Ctx) error { return c.SendString("reached") })
+
+			req := httptest.NewRequest(http.MethodGet, "/dup/org-1?organizationId=org-2", nil)
+			req.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
+
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusForbidden, resp.StatusCode,
+				"a misdeclared route is refused even with auth disabled")
+
+			ctrl := httptest.NewRequest(http.MethodGet, "/ok/org-1?ledgerId=led-1", nil)
+			ctrl.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
+
+			ctrlResp, err := app.Test(ctrl)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusOK, ctrlResp.StatusCode,
+				"a well-declared route keeps the disabled-auth behaviour")
+		})
+	}
+}
+
 func TestAuthorize_GuardDeniesDuplicateDimensionName(t *testing.T) {
 	t.Parallel()
 
