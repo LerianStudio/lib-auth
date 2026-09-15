@@ -588,6 +588,20 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			return fiber.NewError(http.StatusServiceUnavailable, "Service Unavailable")
 		}
 
+		// A misdeclared route refuses EVERY request, whatever the auth posture. The
+		// declaration is a programming error caught at registration, and the
+		// disabled-auth pass-through below must not hide it: with auth off the
+		// route would otherwise serve the very requests the contract says it
+		// refuses, and the error would surface only on the first deployment that
+		// turns auth on.
+		if declErr != "" {
+			if auth != nil {
+				logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", declErr)
+			}
+
+			return fiber.NewError(http.StatusForbidden, "Forbidden")
+		}
+
 		if !auth.canAuthorize() {
 			if !auth.principalRequiredWhenDisabled() {
 				return c.Next()
@@ -607,14 +621,6 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		span.SetAttributes(
 			attribute.String("app.request.request_id", reqID),
 		)
-
-		if declErr != "" {
-			logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", declErr)
-
-			span.End()
-
-			return fiber.NewError(http.StatusForbidden, "Forbidden")
-		}
 
 		accessToken := libHTTP.ExtractTokenFromHeader(c)
 
