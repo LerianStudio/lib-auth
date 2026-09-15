@@ -1,3 +1,10 @@
+## [4.1.0-beta.9](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.8...v4.1.0-beta.9) (2026-09-15)
+
+
+### Bug Fixes
+
+* **middleware:** refuse a misdeclared route while auth is disabled ([c09b370](https://github.com/LerianStudio/lib-auth/commit/c09b3707e59965fbe46c63c7af24d17dd90e9706)), closes [#184](https://github.com/LerianStudio/lib-auth/issues/184)
+
 ## [4.1.0-beta.8](https://github.com/LerianStudio/lib-auth/compare/v4.1.0-beta.7...v4.1.0-beta.8) (2026-09-14)
 
 
