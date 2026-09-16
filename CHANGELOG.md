@@ -1,3 +1,10 @@
+## [5.0.1-hf.1](https://github.com/LerianStudio/lib-auth/compare/v5.0.0...v5.0.1-hf.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* **middleware:** report an authorization outage as Unavailable on the gRPC surface ([7dc52fc](https://github.com/LerianStudio/lib-auth/commit/7dc52fc520d3d1bf6636704c36cfa8c1f2393d17)), closes [#170](https://github.com/LerianStudio/lib-auth/issues/170)
+
 ## [5.0.0](https://github.com/LerianStudio/lib-auth/compare/v4.2.0...v5.0.0) (2026-09-16)
 
 
