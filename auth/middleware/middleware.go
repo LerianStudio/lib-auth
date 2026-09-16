@@ -37,12 +37,6 @@ type AuthClient struct {
 	Enabled bool
 	Logger  obs.Logger
 
-	// ReturnAuthorizeErrors makes Authorize return refusals as *fiber.Error so the
-	// consuming application's ErrorHandler owns the response envelope. The v4
-	// default is false to preserve the v4.0.0 contract; v5 removes this switch and
-	// makes returned errors the only behavior.
-	ReturnAuthorizeErrors bool
-
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
 	// "{product}/" prefix from stored resources and dual-match a bare request.
