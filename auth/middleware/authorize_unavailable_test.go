@@ -61,7 +61,7 @@ func TestAuthorize_UnavailableAccessManagerReturns503(t *testing.T) {
 
 		server, _ := unavailableAccessManager(t, "")
 
-		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -76,7 +76,7 @@ func TestAuthorize_UnavailableAccessManagerReturns503(t *testing.T) {
 		// answer the service could not stand behind is not an answer.
 		server, _ := unavailableAccessManager(t, `{"authorized":true}`)
 
-		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -93,7 +93,7 @@ func TestAuthorize_UnavailableAccessManagerReturns503(t *testing.T) {
 		}))
 		server.Close()
 
-		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -113,7 +113,7 @@ func TestAuthorize_UnavailableAccessManagerReturns503(t *testing.T) {
 		})
 		defer server.Close()
 
-		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -132,7 +132,7 @@ func TestAuthorize_UnavailableAccessManagerReturns503(t *testing.T) {
 
 		server, hits := unavailableAccessManager(t, "")
 
-		app, capture := newCapturingApp(&AuthClient{
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true,
 			Address: server.URL,
 			Enabled: true,
 			Logger:  &testLogger{},
@@ -167,7 +167,7 @@ func TestAuthorize_RetriesExhaustedReturns503(t *testing.T) {
 	auth := NewAuthClient(server.URL, true, &testLogger{})
 	require.EqualValues(t, 1, auth.retryMax, "the retry layer must be configured for this test to mean anything")
 
-	app, capture := newCapturingApp(auth)
+	app, capture := newCapturingApp(func() *AuthClient { auth.ReturnAuthorizeErrors = true; return auth }())
 
 	resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 	assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -191,7 +191,7 @@ func TestAuthorize_AnsweredRefusalsKeepTheirStatus(t *testing.T) {
 		})
 		defer server.Close()
 
-		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -211,7 +211,7 @@ func TestAuthorize_AnsweredRefusalsKeepTheirStatus(t *testing.T) {
 		server := mockAuthServer(t, false, http.StatusOK)
 		defer server.Close()
 
-		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
