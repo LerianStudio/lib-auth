@@ -40,7 +40,7 @@ Authorization-service error responses also remain recoverable as
 
 ## Recommended rollout
 
-1. Keep existing consumers on the latest v4 patch until their custom Fiber
+1. Keep existing consumers on `v4.2.0` until their custom Fiber
    `ErrorHandler` preserves `*fiber.Error.Code`.
 2. Change the module/import path to `/v5`.
 3. Run refusal-path tests for missing tokens, denials, authorization-service outages,
