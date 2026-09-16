@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LerianStudio/lib-auth/v4/auth/obs"
+	"github.com/LerianStudio/lib-auth/v5/auth/obs"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/LerianStudio/lib-observability/v4/zap"
@@ -36,12 +36,6 @@ type AuthClient struct {
 	Address string
 	Enabled bool
 	Logger  obs.Logger
-
-	// ReturnAuthorizeErrors makes Authorize return refusals as *fiber.Error so the
-	// consuming application's ErrorHandler owns the response envelope. The v4
-	// default is false to preserve the v4.0.0 contract; v5 removes this switch and
-	// makes returned errors the only behavior.
-	ReturnAuthorizeErrors bool
 
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
@@ -548,10 +542,11 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // authorization service answered no, and 503 Service Unavailable when it could not answer at all (unreachable, 5xx, retries
 // exhausted, breaker open) — fail-closed either way, but only the 503 reads as an outage.
 //
-// Every refusal is written directly to the response. This preserves the v4.0.0
-// middleware contract for consumers with custom Fiber ErrorHandlers: upgrading
-// within v4 cannot route these refusals through application error remapping.
-// Consumers that want ErrorHandler-owned envelopes must migrate to lib-auth/v5.
+// Every refusal — 401 missing token, 403 denied, 503 unavailable, and the status
+// the Access Manager itself answered — is returned as a *fiber.Error and never
+// written to the response here. This is the v5 contract: the consuming
+// application's ErrorHandler owns the response envelope and must preserve the
+// status carried by the error.
 //
 // scopes is optional and additive: pass a RequireScope declaration when the route
 // addresses instances (an organization, a ledger) whose identifiers the
@@ -726,23 +721,15 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 	}
 }
 
-func (auth *AuthClient) authorizeRefusal(c fiber.Ctx, status int, message string) error {
-	if auth != nil && auth.ReturnAuthorizeErrors {
-		return fiber.NewError(status, message)
-	}
-
-	return c.Status(status).SendString(message)
+func (auth *AuthClient) authorizeRefusal(_ fiber.Ctx, status int, message string) error {
+	return fiber.NewError(status, message)
 }
 
-func (auth *AuthClient) authorizeCommonsRefusal(c fiber.Ctx, status int, response commons.Response) error {
-	if auth != nil && auth.ReturnAuthorizeErrors {
-		return accessManagerRefusal{
-			fiberErr: fiber.NewError(status, refusalMessage(response, status)),
-			response: response,
-		}
+func (auth *AuthClient) authorizeCommonsRefusal(_ fiber.Ctx, status int, response commons.Response) error {
+	return accessManagerRefusal{
+		fiberErr: fiber.NewError(status, refusalMessage(response, status)),
+		response: response,
 	}
-
-	return c.Status(status).JSON(response)
 }
 
 type accessManagerRefusal struct {
