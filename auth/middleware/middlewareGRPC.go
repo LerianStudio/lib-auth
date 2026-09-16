@@ -203,6 +203,12 @@ func grpcErrorFromHTTP(httpStatus int) error {
 		return status.Error(codes.Unauthenticated, "unauthenticated")
 	case http.StatusForbidden:
 		return status.Error(codes.PermissionDenied, "forbidden")
+	case http.StatusServiceUnavailable:
+		// Unavailable, not Internal: the authorization service did not answer, and a
+		// caller must be able to tell that from "it answered no". Internal says the
+		// fault is here and is not retryable; Unavailable says the dependency is
+		// down, which is what retry policies and alarms are written against.
+		return status.Error(codes.Unavailable, "authorization service unavailable")
 	default:
 		return status.Error(codes.Internal, "internal error")
 	}

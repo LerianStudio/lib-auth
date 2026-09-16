@@ -1016,7 +1016,7 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 		clientIP:    clientIP,
 	})
 
-	return resolution.legacyResult()
+	return resolution.checkResult()
 }
 
 // checkAuthorizationWithPrincipal is checkAuthorization plus the caller identity it

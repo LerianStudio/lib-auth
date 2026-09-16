@@ -83,15 +83,8 @@ type authzResolution struct {
 	unavailableErr error
 }
 
-// legacyResult reproduces the pre-FC-4 contract unchanged, so the gRPC
-// interceptors keep answering exactly what they answered before — including the
-// fail-closed deny an absorbed outage produces. The Fiber path no longer reads it:
-// Authorize answers on checkResult, so a rail behind it reports an outage as 503.
-func (r authzResolution) legacyResult() (bool, int, error) {
-	return r.authorized, r.statusCode, r.err
-}
-
-// checkResult maps the resolution onto the contract Check and Authorize share: an
+// checkResult maps the resolution onto the contract every surface shares — Check,
+// Authorize and the gRPC interceptors: an
 // outage stays fail-closed (never authorized) but is reported as 503 with the error
 // that caused it, so a caller — and an operator reading the rail's status codes —
 // can tell "the Access Manager said no" from "the Access Manager could not be

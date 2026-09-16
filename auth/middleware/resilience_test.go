@@ -369,19 +369,22 @@ func TestCheckAuthorization_Breaker_OpensAfterN_AndDenies(t *testing.T) {
 		breaker: newAuthBreaker(2, time.Minute),
 	}
 
-	// Two consecutive transient (5xx) failures trip the breaker.
+	// Two consecutive transient (5xx) failures trip the breaker, and each one pins
+	// the contract: deny, and say it was an outage. This used to answer 403 with no
+	// error — the service is down and the caller is told it lacks permission.
 	for i := 0; i < 2; i++ {
 		authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken(), "")
-		require.NoError(t, err, "runtime outage denies without surfacing an error")
+		require.Error(t, err, "a runtime outage denies AND reports the outage")
 		assert.False(t, authorized)
-		assert.Equal(t, http.StatusForbidden, statusCode)
+		assert.Equal(t, http.StatusServiceUnavailable, statusCode)
 	}
 
-	// Breaker now open: the next call is denied WITHOUT touching the authz service.
+	// Breaker now open: the next call is denied WITHOUT touching the authz service,
+	// and an open breaker is still an outage, not a refusal.
 	authorized, statusCode, err := auth.checkAuthorization(context.Background(), "", "res", "read", userToken(), "")
-	require.NoError(t, err)
+	require.Error(t, err)
 	assert.False(t, authorized)
-	assert.Equal(t, http.StatusForbidden, statusCode)
+	assert.Equal(t, http.StatusServiceUnavailable, statusCode)
 
 	assert.Equal(t, int64(2), hits.Load(), "an open breaker must short-circuit, not reach the authz service")
 }
@@ -419,7 +422,7 @@ func TestCheckAuthorization_BreakerOpen_ServesFreshPositiveCacheOnly(t *testing.
 
 	for i := 0; i < 2; i++ {
 		_, _, err = auth.checkAuthorization(context.Background(), "", "resTrip", "read", userToken(), "")
-		require.NoError(t, err)
+		require.Error(t, err, "each failure that trips the breaker is itself an outage")
 	}
 
 	hitsAfterTrip := hits.Load()
@@ -430,11 +433,12 @@ func TestCheckAuthorization_BreakerOpen_ServesFreshPositiveCacheOnly(t *testing.
 	assert.True(t, authorized, "a fresh positive cache hit is served even while the breaker is open")
 	assert.Equal(t, http.StatusOK, statusCode)
 
-	// Breaker open + no cache -> deny.
+	// Breaker open + no cache -> deny, reported as the outage it is rather than as
+	// a refusal the subject could do something about.
 	authorized, statusCode, err = auth.checkAuthorization(context.Background(), "", "resUncached", "read", userToken(), "")
-	require.NoError(t, err)
+	require.Error(t, err)
 	assert.False(t, authorized, "with the breaker open and no fresh cache, the request is denied")
-	assert.Equal(t, http.StatusForbidden, statusCode)
+	assert.Equal(t, http.StatusServiceUnavailable, statusCode)
 
 	assert.Equal(t, hitsAfterTrip, hits.Load(), "neither the cache hit nor the open-breaker deny may reach the authz service")
 }

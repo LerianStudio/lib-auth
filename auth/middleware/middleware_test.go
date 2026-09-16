@@ -638,7 +638,10 @@ func TestCheckAuthorization_MockServerDown(t *testing.T) {
 
 	require.Error(t, err)
 	assert.False(t, authorized)
-	assert.Equal(t, http.StatusInternalServerError, statusCode)
+	// 503, not 500: the request never reached the authorization service, so the
+	// fault is the dependency's and not this library's. checkAuthorization now
+	// reports it the same way Check and Authorize already did.
+	assert.Equal(t, http.StatusServiceUnavailable, statusCode)
 	assert.Contains(t, err.Error(), "failed to make request")
 }
 
@@ -2611,10 +2614,16 @@ func TestCheck_AuthorizationServiceUnavailableIs503(t *testing.T) {
 			breaker: newAuthBreaker(2, time.Minute),
 		}
 
-		// Two consecutive transient failures trip the breaker.
+		// Two consecutive transient failures trip the breaker. They also pin the
+		// contract checkAuthorization now shares with Check and Authorize: an
+		// absorbed outage denies AND says it was an outage. It used to deny while
+		// reporting no error at all, which is what let the gRPC interceptors answer
+		// PermissionDenied — "you may not" — for a service that never answered.
 		for i := 0; i < 2; i++ {
-			_, _, err := auth.checkAuthorization(context.Background(), "midaz", "resource", "get", token, "")
-			require.NoError(t, err, "an absorbed outage denies without surfacing an error on the legacy path")
+			authorized, statusCode, err := auth.checkAuthorization(context.Background(), "midaz", "resource", "get", token, "")
+			require.Error(t, err, "an absorbed outage must surface as an outage on every surface")
+			assert.False(t, authorized, "fail-closed is unchanged: an outage never authorizes")
+			assert.Equal(t, http.StatusServiceUnavailable, statusCode)
 		}
 
 		require.Equal(t, int64(2), hits.Load())
