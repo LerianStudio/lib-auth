@@ -136,7 +136,7 @@ grep -rl 'NewAuthClient(\|NewM2MAuthenticator' --include='*.go' . \
   | xargs sed -i -E 's#(New(AuthClient|M2MAuthenticator(WithKeySource)?)\([^)]*), &([A-Za-z0-9_.]+)\)#\1, \4)#g'
 
 # 2. bump the module requirement
-go get github.com/LerianStudio/lib-auth/v5@latest
+go get github.com/LerianStudio/lib-auth/v4@latest
 go mod tidy
 
 # 3. let the compiler find the residue
@@ -145,7 +145,9 @@ go build ./... && go vet ./...
 
 ## 5. The module-path bump
 
-**Done.** The path is now `github.com/LerianStudio/lib-auth/v5`.
+**Done.** The path is now `github.com/LerianStudio/lib-auth/v4`.
+
+For the later v4 → v5 breaking migration, follow [`MIGRATION-v5.md`](MIGRATION-v5.md).
 
 It was deliberately left out of the boundary PR (#156) so the review would show
 the API change rather than the rewritten import lines, and landed separately in

@@ -1,3 +1,10 @@
+## [4.2.0](https://github.com/LerianStudio/lib-auth/compare/v4.1.0...v4.2.0) (2026-09-16)
+
+
+### Bug Fixes
+
+* **middleware:** restore v4 refusal response contract ([3d08ee0](https://github.com/LerianStudio/lib-auth/commit/3d08ee0887f953e9343a288995e61eee8052a937))
+
 ## [4.1.0](https://github.com/LerianStudio/lib-auth/compare/v4.0.0...v4.1.0) (2026-09-15)
 
 

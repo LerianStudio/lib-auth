@@ -117,7 +117,7 @@ func TestAuthorize_RefusalsAreReturnedAsFiberErrors(t *testing.T) {
 	t.Run("required_and_disabled_returns_503", func(t *testing.T) {
 		t.Parallel()
 
-		app, capture := newCapturingApp(&AuthClient{Enabled: false, Required: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Enabled: false, Required: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, "")
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode, "the application handler rendered the refusal")
@@ -144,7 +144,7 @@ func TestAuthorize_RefusalsAreReturnedAsFiberErrors(t *testing.T) {
 		server := mockAuthServer(t, true, http.StatusOK)
 		defer server.Close()
 
-		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, "")
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -157,7 +157,7 @@ func TestAuthorize_RefusalsAreReturnedAsFiberErrors(t *testing.T) {
 		server := mockAuthServer(t, false, http.StatusOK)
 		defer server.Close()
 
-		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -174,7 +174,7 @@ func TestAuthorize_RefusalsAreReturnedAsFiberErrors(t *testing.T) {
 		})
 		defer server.Close()
 
-		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -197,7 +197,7 @@ func TestAuthorize_RefusalsAreReturnedAsFiberErrors(t *testing.T) {
 		server := mockAuthServer(t, true, http.StatusOK)
 		defer server.Close()
 
-		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, "not-a-valid-jwt")
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -245,6 +245,7 @@ func TestAuthorize_DefaultErrorHandlerRendersTheRefusals(t *testing.T) {
 	t.Parallel()
 
 	newDefaultApp := func(auth *AuthClient) *fiber.App {
+		auth.ReturnAuthorizeErrors = true
 		app := fiber.New()
 
 		app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
