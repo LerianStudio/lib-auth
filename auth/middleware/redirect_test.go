@@ -58,7 +58,7 @@ func TestAuthorize_ARedirectIsNeverFollowed(t *testing.T) {
 			}))
 			t.Cleanup(redirecting.Close)
 
-			app, capture := newCapturingApp(&AuthClient{Address: redirecting.URL, Enabled: true, Logger: &testLogger{}})
+			app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: redirecting.URL, Enabled: true, Logger: &testLogger{}})
 
 			resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 
