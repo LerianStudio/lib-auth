@@ -1,3 +1,22 @@
+## [5.0.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v4.2.0...v5.0.0-beta.1) (2026-09-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* the module path is now github.com/LerianStudio/lib-auth/v5 and Authorize refusals are returned to the application ErrorHandler.
+
+Requested-by: @qnen
+
+### Features
+
+* publish v5 authorize error contract ([0a94bfe](https://github.com/LerianStudio/lib-auth/commit/0a94bfe2922af70339ffaa47709c6d60d5ad0d86))
+
+
+### Bug Fixes
+
+* keep v5 authorize contract unconditional ([9d67bf1](https://github.com/LerianStudio/lib-auth/commit/9d67bf1302c2f058422844fa694db3c616776261))
+* **middleware:** restore v4 refusal response contract ([b1b5d60](https://github.com/LerianStudio/lib-auth/commit/b1b5d6096394dd2b69dd5175dbeca895463afee0))
+
 ## [4.2.0](https://github.com/LerianStudio/lib-auth/compare/v4.1.0...v4.2.0) (2026-09-16)
 
 

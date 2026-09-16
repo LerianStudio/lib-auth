@@ -147,6 +147,8 @@ go build ./... && go vet ./...
 
 **Done.** The path is now `github.com/LerianStudio/lib-auth/v4`.
 
+For the later v4 → v5 breaking migration, follow [`MIGRATION-v5.md`](MIGRATION-v5.md).
+
 It was deliberately left out of the boundary PR (#156) so the review would show
 the API change rather than the rewritten import lines, and landed separately in
 #157. That ordering turned out to be a mistake: semantic-release tagged

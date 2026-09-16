@@ -150,7 +150,7 @@ func TestAuthorize_OnlyA2xxIsAnAuthorizationDecision(t *testing.T) {
 
 			server := accessManagerServing(t, tc.status, tc.body)
 
-			app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
+			app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 			resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 
@@ -176,7 +176,7 @@ func TestAuthorize_A2xxDecisionStillDecides(t *testing.T) {
 
 		server := accessManagerServing(t, http.StatusOK, `{"authorized":true}`)
 
-		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -188,7 +188,7 @@ func TestAuthorize_A2xxDecisionStillDecides(t *testing.T) {
 
 		server := accessManagerServing(t, http.StatusOK, `{"authorized":false}`)
 
-		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -203,7 +203,7 @@ func TestAuthorize_A2xxDecisionStillDecides(t *testing.T) {
 		// rail's operator reads an outage rather than a policy denial.
 		server := accessManagerServing(t, http.StatusOK, `<html>not json</html>`)
 
-		app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
+		app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 		resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 		assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -248,7 +248,7 @@ func TestAuthorize_A4xxThatIsNotAboutTheCallerIs503(t *testing.T) {
 
 			server := accessManagerServing(t, tc.status, tc.body)
 
-			app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
+			app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 			resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 			assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -285,7 +285,7 @@ func TestAuthorize_EveryNon2xxStillRefuses(t *testing.T) {
 
 			server := accessManagerServing(t, status, body)
 
-			app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
+			app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 			resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 
@@ -326,7 +326,7 @@ func TestAuthorize_A2xxWithNoDecisionIs503(t *testing.T) {
 
 			server := accessManagerServing(t, http.StatusOK, tc.body)
 
-			app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
+			app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 			resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 			assert.Equal(t, http.StatusTeapot, resp.StatusCode)
@@ -344,7 +344,7 @@ func TestAuthorize_A2xxDenialIsStillADenial(t *testing.T) {
 
 	server := accessManagerServing(t, http.StatusOK, `{"authorized":false,"timestamp":"2026-01-15T09:30:00Z"}`)
 
-	app, capture := newCapturingApp(&AuthClient{ReturnAuthorizeErrors: true, Address: server.URL, Enabled: true, Logger: &testLogger{}})
+	app, capture := newCapturingApp(&AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}})
 
 	resp := gatedRequest(t, app, createTestJWT(normalUserClaims()))
 	assert.Equal(t, http.StatusTeapot, resp.StatusCode)
