@@ -37,6 +37,12 @@ type AuthClient struct {
 	Enabled bool
 	Logger  obs.Logger
 
+	// ReturnAuthorizeErrors makes Authorize return refusals as *fiber.Error so the
+	// consuming application's ErrorHandler owns the response envelope. The v4
+	// default is false to preserve the v4.0.0 contract; v5 removes this switch and
+	// makes returned errors the only behavior.
+	ReturnAuthorizeErrors bool
+
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
 	// "{product}/" prefix from stored resources and dual-match a bare request.
@@ -542,13 +548,10 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // authorization service answered no, and 503 Service Unavailable when it could not answer at all (unreachable, 5xx, retries
 // exhausted, breaker open) — fail-closed either way, but only the 503 reads as an outage.
 //
-// Every refusal — 401 missing token, 403 denied, 503 unavailable, and the status
-// the Access Manager itself answered — is RETURNED as a *fiber.Error and never
-// written to the response here, so the service's own ErrorHandler renders it and
-// keeps its response envelope. Under Fiber's default handler the status and the
-// message are the ones a written body carried, so an app that never customized it
-// sees no change. When the Access Manager answered a coded error body, the
-// returned error also resolves to that commons.Response through errors.As.
+// Every refusal is written directly to the response. This preserves the v4.0.0
+// middleware contract for consumers with custom Fiber ErrorHandlers: upgrading
+// within v4 cannot route these refusals through application error remapping.
+// Consumers that want ErrorHandler-owned envelopes must migrate to lib-auth/v5.
 //
 // scopes is optional and additive: pass a RequireScope declaration when the route
 // addresses instances (an organization, a ledger) whose identifiers the
@@ -585,7 +588,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		if auth.mustRefuse() {
 			// AUTH_REQUIRED opted in but auth is disabled/misconfigured: refuse to
 			// serve (fail closed) instead of silently passing the request through.
-			return fiber.NewError(http.StatusServiceUnavailable, "Service Unavailable")
+			return auth.authorizeRefusal(c, http.StatusServiceUnavailable, "Service Unavailable")
 		}
 
 		// A misdeclared route refuses EVERY request, whatever the auth posture. The
@@ -599,7 +602,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 				logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", declErr)
 			}
 
-			return fiber.NewError(http.StatusForbidden, "Forbidden")
+			return auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
 		}
 
 		if !auth.canAuthorize() {
@@ -610,7 +613,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			if auth.Enabled {
 				// Enabled but addressless is an incomplete configuration, not a
 				// deliberate "auth off": it never earns the no-round-trip branch.
-				return fiber.NewError(http.StatusServiceUnavailable, "Service Unavailable")
+				return auth.authorizeRefusal(c, http.StatusServiceUnavailable, "Service Unavailable")
 			}
 
 			return auth.authorizeWithoutRoundTrip(c, product)
@@ -627,7 +630,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		if commons.IsNilOrEmpty(&accessToken) {
 			span.End()
 
-			return fiber.NewError(http.StatusUnauthorized, "Missing Token")
+			return auth.authorizeRefusal(c, http.StatusUnauthorized, "Missing Token")
 		}
 
 		// Derive the caller IP HERE, from this library's own TRUSTED_PROXIES list —
@@ -659,7 +662,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 
 			span.End()
 
-			return fiber.NewError(http.StatusForbidden, "Forbidden")
+			return auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
 		}
 
 		resolution, principal := auth.checkAuthorizationWithPrincipal(ctx, authzParams{
@@ -683,15 +686,12 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			if errors.As(err, &commonsErr) {
 				span.End()
 
-				return accessManagerRefusal{
-					fiberErr: fiber.NewError(statusCode, refusalMessage(commonsErr, statusCode)),
-					response: commonsErr,
-				}
+				return auth.authorizeCommonsRefusal(c, statusCode, commonsErr)
 			}
 
 			span.End()
 
-			return fiber.NewError(statusCode, http.StatusText(statusCode))
+			return auth.authorizeRefusal(c, statusCode, http.StatusText(statusCode))
 		}
 
 		if !authorized {
@@ -703,7 +703,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			// has always been.
 			status := denialStatus(resolution.reason)
 
-			return fiber.NewError(status, http.StatusText(status))
+			return auth.authorizeRefusal(c, status, http.StatusText(status))
 		}
 
 		publishPrincipal(c, span, principal)
@@ -726,17 +726,25 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 	}
 }
 
-// accessManagerRefusal is the single value Authorize returns when the Access
-// Manager answered with a coded error body. It serves two consumers at once:
-// errors.As resolves the *fiber.Error — which Fiber's DefaultErrorHandler reads
-// for the status, and a service's own ErrorHandler reads for its envelope — and
-// errors.As resolves the commons.Response, so a consumer that knows lib-commons
-// still recovers the code, title and message the Access Manager sent.
-//
-// errors.Join would resolve both too, but its Error() concatenates every joined
-// message with a newline, and the default handler renders err.Error() as the
-// response body — a caller would read the same message twice. Error() here is the
-// Fiber message alone, so the rendered body stays one line.
+func (auth *AuthClient) authorizeRefusal(c fiber.Ctx, status int, message string) error {
+	if auth != nil && auth.ReturnAuthorizeErrors {
+		return fiber.NewError(status, message)
+	}
+
+	return c.Status(status).SendString(message)
+}
+
+func (auth *AuthClient) authorizeCommonsRefusal(c fiber.Ctx, status int, response commons.Response) error {
+	if auth != nil && auth.ReturnAuthorizeErrors {
+		return accessManagerRefusal{
+			fiberErr: fiber.NewError(status, refusalMessage(response, status)),
+			response: response,
+		}
+	}
+
+	return c.Status(status).JSON(response)
+}
+
 type accessManagerRefusal struct {
 	fiberErr *fiber.Error
 	response commons.Response
@@ -901,14 +909,14 @@ func (auth *AuthClient) authorizeWithoutRoundTrip(c fiber.Ctx, product string) e
 	if commons.IsNilOrEmpty(&accessToken) {
 		span.End()
 
-		return fiber.NewError(http.StatusUnauthorized, "Missing Token")
+		return auth.authorizeRefusal(c, http.StatusUnauthorized, "Missing Token")
 	}
 
 	principal, statusCode, err := auth.derivePrincipalWithoutRoundTrip(ctx, span, accessToken, product)
 	if err != nil {
 		span.End()
 
-		return fiber.NewError(statusCode, http.StatusText(statusCode))
+		return auth.authorizeRefusal(c, statusCode, http.StatusText(statusCode))
 	}
 
 	publishPrincipal(c, span, principal)

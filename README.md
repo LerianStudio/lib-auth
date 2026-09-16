@@ -260,15 +260,13 @@ The `Authorize` function:
 * Checks if the response indicates that the user is authorized.
 * Allows the normal application flow or refuses the request.
 
-Every refusal is **returned** as a `*fiber.Error`, never written to the response by
-the middleware, so the application's own `ErrorHandler` renders it and keeps its
-response envelope (RFC 9457 problem+json, say) instead of having a plain-text body
-written past it. The status and the message are the ones the written body carried, so
-a service running Fiber's `DefaultErrorHandler` gets identical responses: 401
-`Missing Token`, 403 `Forbidden`, 503 `Service Unavailable`, and the status text for
-anything else. Every refusal the authorization service itself returned also resolves
-to a `commons.Response` through `errors.As`, so a handler that knows lib-commons
-still renders the code, title and message it sent.
+In v4, every `Authorize` refusal is **written directly** by the middleware. This
+preserves the response contract established by v4.0.0: a custom application
+`ErrorHandler` does not receive or remap authorization refusals after a minor or
+patch upgrade. The middleware writes 401 `Missing Token`, 403 `Forbidden`, 503
+`Service Unavailable`, or the status and decoded error body returned by the
+authorization service. Applications that want `Authorize` refusals returned as
+`*fiber.Error` for envelope ownership must migrate to `lib-auth/v5`.
 
 **The HTTP status decides, never a field inside the body.** Only a `2xx` answer is
 an authorization decision. A body that claims `authorized` inside any non-`2xx`
