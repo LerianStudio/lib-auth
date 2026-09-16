@@ -22,8 +22,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/LerianStudio/lib-auth/v4/auth/middleware"
-	"github.com/LerianStudio/lib-auth/v4/auth/obs"
+	"github.com/LerianStudio/lib-auth/v5/auth/middleware"
+	"github.com/LerianStudio/lib-auth/v5/auth/obs"
 )
 
 // Fixed env contract consumed by WireFromEnv. The four RI/D7-declaration vars

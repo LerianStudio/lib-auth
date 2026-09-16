@@ -7,7 +7,7 @@ Repository: [lib-auth](https://github.com/LerianStudio/lib-auth)
 ## 📦 Installation
 
 ```bash
-go get github.com/LerianStudio/lib-auth/v4@latest
+go get github.com/LerianStudio/lib-auth/v5@latest
 ```
 
 ## 🔭 Inbound trace context is not extracted by the middleware
@@ -230,7 +230,7 @@ if err != nil {
 ```
 
 ```go
-import "github.com/LerianStudio/lib-auth/v4/auth/middleware"
+import "github.com/LerianStudio/lib-auth/v5/auth/middleware"
 
 authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, logger)
 ```
@@ -260,13 +260,14 @@ The `Authorize` function:
 * Checks if the response indicates that the user is authorized.
 * Allows the normal application flow or refuses the request.
 
-In v4, every `Authorize` refusal is **written directly** by the middleware. This
-preserves the response contract established by v4.0.0: a custom application
-`ErrorHandler` does not receive or remap authorization refusals after a minor or
-patch upgrade. The middleware writes 401 `Missing Token`, 403 `Forbidden`, 503
-`Service Unavailable`, or the status and decoded error body returned by the
-authorization service. Applications that want `Authorize` refusals returned as
-`*fiber.Error` for envelope ownership must migrate to `lib-auth/v5`.
+In v5, every `Authorize` refusal is **returned** as a `*fiber.Error`, never written
+to the response by the middleware. The application's own `ErrorHandler` therefore
+owns the response envelope. This is intentionally different from v4, where refusals
+are written directly for compatibility with existing consumers. Migrate the module
+path to `github.com/LerianStudio/lib-auth/v5` and ensure the application handler
+preserves the status carried by `*fiber.Error` (`401`, `403`, `503`, or the status
+returned by the authorization service). Decoded authorization-service errors also
+resolve to `commons.Response` through `errors.As`.
 
 **The HTTP status decides, never a field inside the body.** Only a `2xx` answer is
 an authorization decision. A body that claims `authorized` inside any non-`2xx`
@@ -617,7 +618,7 @@ Secure a gRPC server with the unary interceptor using per-method policies. It re
 import (
     "context"
     "google.golang.org/grpc"
-    "github.com/LerianStudio/lib-auth/v4/auth/middleware"
+    "github.com/LerianStudio/lib-auth/v5/auth/middleware"
 )
 
 // Create the auth client once (same as HTTP)
