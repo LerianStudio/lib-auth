@@ -1219,7 +1219,7 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		return "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/login/oauth/access_token", auth.Address), bytes.NewBuffer(requestBodyJSON))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/v1/login/oauth/access_token", auth.Address), bytes.NewBuffer(requestBodyJSON))
 	if err != nil {
 		logErrorf(ctx, auth.Logger, "Failed to create request: %v", err)
 
