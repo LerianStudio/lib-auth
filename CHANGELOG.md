@@ -1,3 +1,10 @@
+## [5.0.2-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.0.1...v5.0.2-beta.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **middleware:** honour caller context when minting an application token ([54cd60e](https://github.com/LerianStudio/lib-auth/commit/54cd60e7f629b13c4e520898ae961a11e5fbf9c4))
+
 ## [5.0.1](https://github.com/LerianStudio/lib-auth/compare/v5.0.0...v5.0.1) (2026-09-16)
 
 
