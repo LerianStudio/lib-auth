@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +30,15 @@ func TestGetApplicationToken_HonoursCallerContextCancellation(t *testing.T) {
 	// shared client's 30s timeout would make this failure slow instead of loud.
 	const handlerHold = 3 * time.Second
 
+	// Closed on handler entry so the cancel below lands on a request that is
+	// already blocked server-side, not on one the transport has yet to send.
+	handlerEntered := make(chan struct{})
+
+	var enteredOnce sync.Once
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enteredOnce.Do(func() { close(handlerEntered) })
+
 		select {
 		case <-r.Context().Done():
 			return
@@ -59,7 +68,13 @@ func TestGetApplicationToken_HonoursCallerContextCancellation(t *testing.T) {
 		done <- mintResult{token: token, err: err}
 	}()
 
-	time.AfterFunc(50*time.Millisecond, cancel)
+	select {
+	case <-handlerEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the authorization service never received the mint request")
+	}
+
+	cancel()
 
 	select {
 	case got := <-done:
