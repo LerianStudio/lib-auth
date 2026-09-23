@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -484,4 +485,177 @@ func TestRequireHuman_BehindAuthorize(t *testing.T) {
 		"owner": "acme-org",
 		"sub":   "user123",
 	}).StatusCode)
+}
+
+// ---------------------------------------------------------------------------
+// Principal.TenantID — the "tenantId" claim, published through the real chain
+// ---------------------------------------------------------------------------
+
+type tenantEcho struct {
+	Found    bool   `json:"found"`
+	TenantID string `json:"tenantId"`
+}
+
+// newTenantEchoApp gates one route with Authorize and returns, as JSON, whether a
+// Principal was published and the TenantID it carries. JSON rather than headers so
+// edge whitespace survives the trip and the verbatim promise is actually observed.
+// The ErrorHandler reads the same context, so a refusal that published anything
+// would show up in its body too.
+func newTenantEchoApp(auth *AuthClient) *fiber.App {
+	echo := func(c fiber.Ctx) tenantEcho {
+		p, ok := PrincipalFromContext(c.Context())
+
+		return tenantEcho{Found: ok, TenantID: p.TenantID}
+	}
+
+	app := fiber.New(fiber.Config{ErrorHandler: func(c fiber.Ctx, err error) error {
+		code := http.StatusInternalServerError
+
+		var fe *fiber.Error
+		if errors.As(err, &fe) {
+			code = fe.Code
+		}
+
+		return c.Status(code).JSON(echo(c))
+	}})
+
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+		return c.JSON(echo(c))
+	})
+
+	return app
+}
+
+func tenantEchoRequest(t *testing.T, app *fiber.App, claims jwt.MapClaims) (int, tenantEcho) {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+createTestJWT(claims))
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	var got tenantEcho
+	require.NoError(t, json.Unmarshal(body, &got), "body: %s", body)
+
+	return resp.StatusCode, got
+}
+
+// TestAuthorize_PublishesTenantIDVerbatim drives every path that publishes a
+// Principal — the Access Manager round-trip under inversion and under the legacy
+// derivation, and the no-round-trip PrincipalRequiredWhenDisabled path — with
+// each claim shape on each token type. The claim is copied verbatim (case and
+// edge whitespace kept), and an absent or non-string claim publishes an empty
+// TenantID on a Principal that is still valid: tenant presence never decides
+// identity.
+func TestAuthorize_PublishesTenantIDVerbatim(t *testing.T) {
+	t.Parallel()
+
+	modes := []struct {
+		name     string
+		auth     func(address string) *AuthClient
+		appFound bool // whether an application token yields an identified principal
+	}{
+		{
+			name: "round_trip_inversion",
+			auth: func(address string) *AuthClient {
+				return &AuthClient{Address: address, Enabled: true, M2MInversionEnabled: true, Logger: &testLogger{}}
+			},
+			appFound: true,
+		},
+		{
+			name: "round_trip_legacy",
+			auth: func(address string) *AuthClient {
+				return &AuthClient{Address: address, Enabled: true, Logger: &testLogger{}}
+			},
+			appFound: false, // fabricated role: pinned absent by TestAuthorize_PublishesPrincipal
+		},
+		{
+			name: "disabled_principal_required",
+			auth: func(string) *AuthClient {
+				return &AuthClient{
+					Enabled:                       false,
+					M2MInversionEnabled:           true,
+					PrincipalRequiredWhenDisabled: true,
+					Logger:                        &testLogger{},
+				}
+			},
+			appFound: true,
+		},
+	}
+
+	tokens := []struct {
+		name   string
+		claims jwt.MapClaims
+		isApp  bool
+	}{
+		{name: "normal_user", claims: jwt.MapClaims{"type": normalUser, "owner": "acme-org", "sub": "user123"}},
+		{name: "application", claims: jwt.MapClaims{"type": application, "sub": "admin/robot", "azp": "cid"}, isApp: true},
+	}
+
+	shapes := []struct {
+		name  string
+		claim any // nil means the claim is absent
+		want  string
+	}{
+		{name: "present_verbatim", claim: " Tenant-01 ", want: " Tenant-01 "},
+		{name: "absent", claim: nil, want: ""},
+		{name: "non_string", claim: 42, want: ""},
+	}
+
+	for _, mode := range modes {
+		for _, tok := range tokens {
+			if tok.isApp && !mode.appFound {
+				continue
+			}
+
+			for _, shape := range shapes {
+				t.Run(mode.name+"/"+tok.name+"/"+shape.name, func(t *testing.T) {
+					t.Parallel()
+
+					server := mockAuthServer(t, true, http.StatusOK)
+					defer server.Close()
+
+					claims := jwt.MapClaims{}
+					for k, v := range tok.claims {
+						claims[k] = v
+					}
+
+					if shape.claim != nil {
+						claims["tenantId"] = shape.claim
+					}
+
+					status, got := tenantEchoRequest(t, newTenantEchoApp(mode.auth(server.URL)), claims)
+
+					assert.Equal(t, http.StatusOK, status)
+					assert.True(t, got.Found, "an empty or odd tenantId must not invalidate the principal")
+					assert.Equal(t, shape.want, got.TenantID)
+				})
+			}
+		}
+	}
+}
+
+// TestAuthorize_RefusalPublishesNoTenantID pins that a refused request publishes
+// nothing — no Principal, so no TenantID — even to the service's ErrorHandler,
+// which runs on the same request context.
+func TestAuthorize_RefusalPublishesNoTenantID(t *testing.T) {
+	t.Parallel()
+
+	server := mockAuthServer(t, false, http.StatusOK)
+	defer server.Close()
+
+	auth := &AuthClient{Address: server.URL, Enabled: true, M2MInversionEnabled: true, Logger: &testLogger{}}
+
+	status, got := tenantEchoRequest(t, newTenantEchoApp(auth), jwt.MapClaims{
+		"type": normalUser, "owner": "acme-org", "sub": "user123", "tenantId": "tenant-01",
+	})
+
+	assert.Equal(t, http.StatusForbidden, status)
+	assert.Equal(t, tenantEcho{}, got)
 }
