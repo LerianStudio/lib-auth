@@ -1,3 +1,10 @@
+## [5.1.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.0.2-beta.1...v5.1.0-beta.1) (2026-09-23)
+
+
+### Features
+
+* **middleware:** publish the tenantId claim on the caller principal ([d3ef117](https://github.com/LerianStudio/lib-auth/commit/d3ef117d5ae175b7674108dbba6ff82bd5531d9e))
+
 ## [5.0.2-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.0.1...v5.0.2-beta.1) (2026-09-18)
 
 
