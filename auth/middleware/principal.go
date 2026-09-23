@@ -25,6 +25,17 @@ type Principal struct {
 	Sub      string // "sub" claim, verbatim
 	Subject  string // "<owner>/<sub>" for normal-user, "<sub>" for application
 	ClientID string // "azp" claim when present, else empty
+
+	// TenantID is the token's "tenantId" claim copied VERBATIM — the same claim
+	// the gRPC interceptors propagate as md-tenant-id under MULTI_TENANT_ENABLED,
+	// published here unconditionally — and empty when the claim
+	// is absent or not a string. The library never trims, lower-cases or
+	// validates it; the consumer decides what an empty or odd value means. It is
+	// NOT a tenant-isolation decision and its presence never affects
+	// authorization or PrincipalFromContext's validity rules (BYOC tokens may
+	// carry none). In multi-tenant deployments the tenant-manager remains the
+	// authority on which tenant a request belongs to.
+	TenantID string
 }
 
 // principalContextKey is the unexported, typed key under which Authorize stores
@@ -72,6 +83,7 @@ func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 	owner, _ := claims["owner"].(string)
 	sub, _ := claims["sub"].(string)
 	clientID, _ := claims["azp"].(string)
+	tenantID, _ := claims["tenantId"].(string)
 
 	if userType == application {
 		owner = ""
@@ -83,6 +95,7 @@ func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 		Sub:      sub,
 		Subject:  subject,
 		ClientID: clientID,
+		TenantID: tenantID,
 	}
 }
 
