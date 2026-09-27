@@ -401,8 +401,8 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 	l := resolveLogger(logger)
 
 	verifyKeys, verifyIssuer := loadVerification(l)
-	staticVerificationConfigured := strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT")) != "" ||
-		strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT_PATH")) != ""
+	staticVerificationConfigured := strings.TrimSpace(os.Getenv(jwtVerifyCertEnv)) != "" ||
+		strings.TrimSpace(os.Getenv(jwtVerifyCertPathEnv)) != ""
 
 	// AUTH_M2M_PRODUCT_FORWARD_ENABLED is read with LookupEnv, not Getenv, so that
 	// "unset" and an explicit "false" are two distinguishable states. Both resolve
@@ -410,7 +410,7 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 	// explicit opt-OUT, which is what any non-false default would need as a kill
 	// switch. Any value other than the exact string "true" disables forwarding.
 	forwardM2MProduct := false
-	if v, ok := os.LookupEnv("AUTH_M2M_PRODUCT_FORWARD_ENABLED"); ok {
+	if v, ok := os.LookupEnv(m2mProductForwardEnv); ok {
 		forwardM2MProduct = v == "true"
 	}
 
@@ -423,9 +423,9 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 		Enabled:                       enabled,
 		Logger:                        l,
 		ForwardM2MProduct:             forwardM2MProduct,
-		M2MInversionEnabled:           os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true",
-		Required:                      os.Getenv("AUTH_REQUIRED") == "true",
-		PrincipalRequiredWhenDisabled: os.Getenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED") == "true",
+		M2MInversionEnabled:           os.Getenv(m2mInversionEnv) == "true",
+		Required:                      os.Getenv(requiredEnv) == "true",
+		PrincipalRequiredWhenDisabled: os.Getenv(principalWhenDisabledEnv) == "true",
 		timeout:                       parseAuthTimeout(),
 		cache:                         newDecisionCacheFromEnv(),
 		breaker:                       newBreakerFromEnv(),

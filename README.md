@@ -208,6 +208,9 @@ AUTH_RETRY_MAX=0
 TRUSTED_PROXIES=10.0.0.0/8,<ingress-cidr>
 ```
 
+`middleware.EnvNames()` returns every `AUTH_*` variable above, for tests that clean or audit
+the client's configuration.
+
 ### 2. Create a new instance of the middleware:
 
 In your `config.go` file, configure the environment variables for the Auth Service:
