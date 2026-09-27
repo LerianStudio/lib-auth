@@ -16,8 +16,9 @@ const (
 	jwtIssuerEnv             = "AUTH_JWT_ISSUER"
 )
 
-// EnvNames returns every AUTH_* environment variable NewAuthClient reads, so a
-// consumer can clean or audit the client's configuration surface without copying it.
+// EnvNames returns every AUTH_* environment variable NewAuthClient reads, as a
+// fresh slice per call, so a consumer can clean or audit the client's
+// configuration surface without copying it.
 func EnvNames() []string {
 	return []string{
 		m2mProductForwardEnv,

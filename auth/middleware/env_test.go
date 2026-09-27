@@ -1,18 +1,20 @@
 package middleware
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestEnvNames_EveryNameConfiguresTheClient proves EnvNames lists only variables
-// NewAuthClient acts on: each name, set alone, changes the client a blank
-// environment builds.
+// TestEnvNames_EveryNameConfiguresTheClient proves EnvNames names every knob in
+// values and nothing else, and that each name, set alone, changes the client a
+// blank environment builds.
 func TestEnvNames_EveryNameConfiguresTheClient(t *testing.T) {
 	_, pubPEM := newTestRSAKeyPEM(t)
 	certPath := filepath.Join(t.TempDir(), "cert.pem")
@@ -31,6 +33,7 @@ func TestEnvNames_EveryNameConfiguresTheClient(t *testing.T) {
 		jwtVerifyCertPathEnv:     certPath,
 		jwtIssuerEnv:             "http://issuer:8000",
 	}
+	require.ElementsMatch(t, slices.Collect(maps.Keys(values)), EnvNames())
 
 	for _, name := range EnvNames() {
 		t.Setenv(name, "")
