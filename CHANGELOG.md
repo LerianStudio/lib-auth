@@ -1,3 +1,10 @@
+## [5.1.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.1.0-beta.1...v5.1.0-beta.2) (2026-09-27)
+
+
+### Features
+
+* **middleware:** export the AUTH_* names the auth client reads ([1ee927e](https://github.com/LerianStudio/lib-auth/commit/1ee927e0202a2e6be9e9a098d9fac2d418d5f734))
+
 ## [5.1.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.0.2-beta.1...v5.1.0-beta.1) (2026-09-23)
 
 
