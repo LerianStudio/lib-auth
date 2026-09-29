@@ -737,6 +737,7 @@ func TestAuthorizeHTTP_ConcurrentRequestsKeepTheirOwnPrincipal(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, int64(callers), am.hits.Load())
+	assert.Len(t, am.recordedBodies(), callers, "every concurrent authorize body must be recorded")
 }
 
 // The default handler renders exactly what Fiber's default renders for the same
