@@ -19,6 +19,7 @@ package declaration
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
@@ -118,6 +119,10 @@ type WireInput struct {
 	Manifest []byte
 	// Logger receives structured logs. Optional; nil => a no-op logger.
 	Logger obs.Logger
+	// HTTPClient is the client the declaration PUT goes through. Optional; nil =>
+	// the publisher's default. It is passed to Config.HTTPClient, so the same
+	// guarantees hold: the publisher uses a copy that never follows a redirect.
+	HTTPClient *http.Client
 }
 
 // WireFromEnv builds and starts the D7 declaration publisher from the FIXED,
@@ -202,6 +207,7 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 		Interval:     0,
 		FailFast:     false,
 		Logger:       in.Logger,
+		HTTPClient:   in.HTTPClient,
 	}
 
 	pub, err := New(cfg)

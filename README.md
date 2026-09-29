@@ -718,6 +718,34 @@ Everything else is shared:
 
 The Fiber `Authorize` and the gRPC interceptors keep their existing, more lenient token extraction. `Authorize`, for example, still accepts a bare token without the `Bearer` prefix. Moving them onto `auth/bearer` would refuse requests existing consumers send today, so that change would be a separate, opt-in step.
 
+## 📣 Permission declaration publisher
+
+`auth/declaration` publishes a plugin's own permissions manifest to the identity service at boot. It sends `PUT {IDP_HOST}/v1/declarations/{slug}` with an M2M bearer. Most plugins wire it in one line from the fixed `IDP_*` environment contract:
+
+```go
+stop, err := declaration.WireFromEnv(ctx, declaration.WireInput{
+    Slug:     "plugin-fees",
+    Manifest: permissionsYAML, // //go:embed permissions.yaml
+    Logger:   logger,
+    // Optional: your own client, e.g. for a proxy, a custom CA or mTLS.
+    HTTPClient: myHTTPClient,
+})
+defer stop()
+```
+
+`declaration.Config.HTTPClient` is the same option when you build the publisher with `declaration.New`. If you leave it nil, the publisher uses a client with a 30s timeout.
+
+### Redirects are never followed
+
+The PUT carries the M2M credential and the manifest, so the publisher never follows a redirect. It refuses a redirect the same way the auth client refuses one on the token path. Following one would:
+
+- replay the credential and the manifest to the host in `Location` on 307 and 308. Go keeps the `Authorization` header on a same-host, subdomain or https-to-http hop.
+- turn the PUT into a GET on 301, 302 and 303. The redirect target's 200 would then be logged as "declaration published" when nothing was stored.
+
+Any 3xx from the identity service fails the publish with a deterministic `*declaration.PublishError` that carries the 3xx status. It is not retried and not cached, and it is logged at ERROR. The log never includes the `Location`. The fix is configuration: point `IDP_HOST` at the identity service itself, not at a hop that redirects.
+
+An injected client cannot turn redirect-following back on. The publisher takes a shallow copy of your client, so your client is never changed, and sets the copy's redirect policy to refuse. If your client has no `Timeout`, the copy gets the 30s default, so a `FailFast` boot cannot hang. Minting the M2M token does not use this client. It goes through the auth client, which already refuses redirects.
+
 ## 🚧 Error Handling
 
 The middleware captures and logs the following error types:
