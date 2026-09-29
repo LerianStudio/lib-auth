@@ -540,6 +540,9 @@ func TestAuthorizeHTTP_ClientIP(t *testing.T) {
 		{name: "ipv6_peer", trusted: []string{"10.0.0.0/8"}, remoteAddr: "[2001:db8::1]:443", want: "2001:db8::1"},
 		{name: "no_trusted_proxies_forwards_nothing", remoteAddr: "192.0.2.44:5555", forwarded: []string{"203.0.113.7"}},
 		{name: "unparseable_peer_forwards_nothing", trusted: []string{"10.0.0.0/8"}, remoteAddr: "pipe", forwarded: []string{"203.0.113.7"}},
+		{name: "unspecified_ipv4_peer_forwards_nothing", trusted: []string{"10.0.0.0/8"}, remoteAddr: "0.0.0.0:5555", forwarded: []string{"203.0.113.7"}},
+		{name: "unspecified_ipv6_peer_forwards_nothing", trusted: []string{"10.0.0.0/8"}, remoteAddr: "[::]:443", forwarded: []string{"203.0.113.7"}},
+		{name: "unspecified_mapped_peer_forwards_nothing", trusted: []string{"10.0.0.0/8"}, remoteAddr: "[::ffff:0.0.0.0]:443"},
 		{name: "empty_forwarded_position_stops_the_walk", trusted: []string{"10.0.0.0/8"}, remoteAddr: "10.1.2.3:5555", forwarded: []string{"203.0.113.7, "}},
 	}
 

@@ -523,7 +523,8 @@ func (auth *AuthClient) resolveClientIP(c fiber.Ctx) string {
 // resolveClientIPHTTP is resolveClientIP for a net/http request, with the same
 // rules: the peer is r.RemoteAddr, every X-Forwarded-For line is read in order,
 // and with no trusted proxies — or a RemoteAddr that is not an address and port,
-// as behind a unix socket — nothing is forwarded.
+// as behind a unix socket, or whose address is unspecified — nothing is
+// forwarded.
 func (auth *AuthClient) resolveClientIPHTTP(r *http.Request) string {
 	if len(auth.trustedProxies) == 0 {
 		return ""
@@ -541,7 +542,18 @@ func (auth *AuthClient) resolveClientIPHTTP(r *http.Request) string {
 // rightmost hop, and returns the first hop that is not a trusted proxy. It is the
 // one derivation both adapters share, so they can never attribute a different
 // caller to the same request.
+//
+// An unspecified peer (0.0.0.0, ::, or its IPv4-mapped form) is no peer at all:
+// fasthttp answers 0.0.0.0 for every non-TCP connection (a unix socket, an
+// in-memory pipe), and no TCP connection comes from it. Such a request has no
+// anchor, so nothing is forwarded, whatever the trusted list says; otherwise
+// the placeholder would be attributed as the caller, or, were 0.0.0.0 trusted,
+// the header would be believed from a connection nobody vouched for.
 func clientIPFrom(peer netip.Addr, forwardedLines []string, trusted []netip.Prefix) string {
+	if !peer.IsValid() || peer.Unmap().IsUnspecified() {
+		return ""
+	}
+
 	forwarded := splitForwarded(forwardedLines)
 
 	hops := make([]string, 0, len(forwarded)+1)

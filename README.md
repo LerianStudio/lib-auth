@@ -704,7 +704,7 @@ An empty signature segment is refused too, so an unsigned (`alg=none`) token nev
 
 - **`FromPath` reads `r.PathValue`,** which only the Go 1.22+ `http.ServeMux` fills in from a `{name}` pattern. Under another router a path dimension resolves empty, and the request is refused with 403. It is never sent without the dimension. `FromHeader` and `FromQuery` work under any router.
 - **Refusals go to an `HTTPErrorHandler`,** not to a returned error. `err` is always a `*middleware.RefusalError`, which carries `Status`, `Message`, and `Response`. `Response` is the Access Manager's decoded refusal body, when it sent one. `errors.As(err, &commons.Response{})` also recovers that body, as on the Fiber path. The handler must write the response. The default writes `Message` as plain text with `Status`, the same way Fiber's default handler renders the `*fiber.Error` from `Authorize`.
-- **The client IP** comes from `r.RemoteAddr` and every `X-Forwarded-For` line, read in order and walked against `TRUSTED_PROXIES` exactly as on the Fiber path. If `RemoteAddr` is not an address and port, as behind a unix socket, no IP is forwarded.
+- **The client IP** comes from `r.RemoteAddr` and every `X-Forwarded-For` line, read in order and walked against `TRUSTED_PROXIES` exactly as on the Fiber path. If `RemoteAddr` is not an address and port, as behind a unix socket, or its address is unspecified (`0.0.0.0`, `::`), no IP is forwarded; the Fiber path forwards none either for a connection with no IP peer, which fasthttp reports as `0.0.0.0`.
 - **A nil `*AuthClient`** passes every request through, as `Authorize` does. A nil `next` handler answers 500 instead of panicking.
 
 Everything else is shared:
