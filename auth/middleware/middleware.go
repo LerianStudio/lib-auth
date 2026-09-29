@@ -991,14 +991,19 @@ func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, clai
 // shouldForwardProduct reports whether the route product must be forwarded to the
 // auth service so it can isolate permissions by product (strip the "{product}/"
 // prefix from stored resources and dual-match a bare request). It is forwarded for
-// normal-user flows, and for M2M (application) flows when forwardM2MProduct is
-// enabled; an empty product is never forwarded (gate-by-presence).
-func shouldForwardProduct(userType, product string, forwardM2MProduct bool) bool {
+// normal-user flows, for partner-bound credentials, and for M2M (application) flows
+// when forwardM2MProduct is enabled; an empty product is never forwarded
+// (gate-by-presence).
+//
+// A partner-bound credential is an application token, but the auth service resolves
+// a partner's grants by product: without it every partner request is denied. So a
+// partner forwards the product regardless of the M2M forwarding keys.
+func shouldForwardProduct(userType, product string, forwardM2MProduct, partnerBound bool) bool {
 	if product == "" {
 		return false
 	}
 
-	return userType == normalUser || (userType == application && forwardM2MProduct)
+	return userType == normalUser || partnerBound || (userType == application && forwardM2MProduct)
 }
 
 // checkAuthorization builds and sends the authorization request to the auth
@@ -1079,9 +1084,10 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, p a
 
 	// M2M product forwarding only applies under the inversion model; the legacy
 	// path (inversion OFF) forwards product for normal-user flows only (pre-#122).
-	// shouldForwardProduct(userType, product, false) == the legacy normal-user rule.
+	// shouldForwardProduct(userType, product, false, false) == the legacy normal-user
+	// rule. A partner forwards the product in both paths.
 	forwardM2MProduct := auth.ForwardM2MProduct && auth.M2MInversionEnabled
-	if shouldForwardProduct(userType, p.product, forwardM2MProduct) {
+	if shouldForwardProduct(userType, p.product, forwardM2MProduct, partner != "") {
 		requestBody["product"] = p.product
 	}
 
