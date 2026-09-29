@@ -686,6 +686,62 @@ func TestJWKSKeySource_Close_StopsBackgroundRefresher(t *testing.T) {
 		"no new JWKS fetches after Close: the background refresher stopped")
 }
 
+// A cancel that lands while a refresh is in flight must end the loop once that
+// refresh returns. By then the ticker has usually queued a tick, so the loop's
+// select finds BOTH the tick and ctx.Done ready and picks one at random: without
+// a cancellation re-check the tick wins about half the time and one more fetch
+// goes out after Close. Each round forces exactly that overlap, so across the
+// rounds a missing re-check is caught with near certainty.
+func TestJWKSKeySource_RefreshLoop_NoFetchAfterCancelWithPendingTick(t *testing.T) {
+	t.Parallel()
+
+	_, pub := pubKeyOf(t)
+	body := jwksJSON(t, "cert-built-in", pub)
+
+	for round := 0; round < 30; round++ {
+		var hits atomic.Int64
+
+		entered := make(chan struct{})
+		release := make(chan struct{})
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// The first fetch passes; the second (the first tick) blocks until the
+			// test has cancelled and let the ticker queue another tick.
+			if hits.Add(1) == 2 {
+				close(entered)
+				<-release
+			}
+
+			_, _ = w.Write(body)
+		}))
+
+		source, err := newJWKSKeySource(JWKSConfig{
+			URL:             srv.URL,
+			HTTPClient:      srv.Client(),
+			RefreshInterval: time.Millisecond,
+		})
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+
+		go func() {
+			defer close(done)
+			source.refreshLoop(ctx)
+		}()
+
+		<-entered
+		cancel()
+		time.Sleep(10 * time.Millisecond) // the 1ms ticker queues a tick meanwhile
+		close(release)
+		<-done
+
+		srv.Close()
+
+		require.Equal(t, int64(2), hits.Load(), "round %d: the loop fetched again after its context was cancelled", round)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // parseJWKSKeysAndKIDs: use/alg filtering (keep omitted, drop explicit-mismatch)
 // ---------------------------------------------------------------------------
