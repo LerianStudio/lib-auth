@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LerianStudio/lib-auth/v5/auth/bearer"
 	"github.com/LerianStudio/lib-auth/v5/auth/obs"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
@@ -160,6 +161,10 @@ type AuthClient struct {
 	// noProxiesOnce keeps that ERROR to one line per client however many routes
 	// mount the middleware.
 	noProxiesOnce sync.Once
+
+	// httpErrorHandler renders AuthorizeHTTP's refusals. Nil means
+	// defaultHTTPErrorHandler. Set with WithHTTPErrorHandler.
+	httpErrorHandler HTTPErrorHandler
 }
 
 // AuthResponse is the decision body /v1/authorize returns on a 2xx. It is part of
@@ -506,10 +511,11 @@ func (auth *AuthClient) principalRequiredWhenDisabled() bool {
 }
 
 // warnMissingTrustedProxies raises the missing-trusted-proxies degradation at
-// ERROR, at most once per client, at the moment it starts to matter: when the
-// Fiber authorization middleware — the ONLY consumer of the trusted-proxy list
-// in this library (resolveClientIP) — is mounted on a client that can actually
-// reach the authorization service.
+// ERROR, at most once per client, at the moment it starts to matter: when an
+// HTTP authorization middleware — Authorize or AuthorizeHTTP, the ONLY consumers
+// of the trusted-proxy list in this library (resolveClientIP and
+// resolveClientIPHTTP) — is mounted on a client that can actually reach the
+// authorization service.
 //
 // Mounting it IS the configuration that makes the caller address load-bearing.
 // From here on every authorized request omits clientIp, and as of 2026-08-23 a
@@ -555,206 +561,60 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 func (auth *AuthClient) Authorize(product, resource, action string, scopes ...ScopeDeclaration) fiber.Handler {
 	auth.warnMissingTrustedProxies()
 
-	// The declaration is validated ONCE, at route-registration time, not per
-	// request: a misdeclared route is a programming error and every one of its
-	// requests is refused, which is what makes it visible on the first call
-	// instead of on the first partner.
-	scope, declErr := resolveDeclaration(product, scopes)
+	route := newAuthorizeRoute(product, resource, action, scopes)
 
 	return func(c fiber.Ctx) error {
-		// Inherit the ambient request context instead of extracting inbound trace
-		// context here. Whether a caller-supplied traceparent is honored is the
-		// APPLICATION's decision — a caller that can set the header can otherwise
-		// choose this service's trace ID and force its sampling decision, which is
-		// why lib-observability gates it behind
-		// tracing.TelemetryConfig.TrustInboundTraceContext (default false) from
-		// v2.1.2 on. lib-auth cannot see that setting, so extracting on its own
-		// overrides the deployment's choice: the app's server span stays a local
-		// root while this span re-parents onto the caller's trace, detaching auth
-		// from the request it is authorizing. Self-extraction also REPLACES the
-		// context's baggage with the inbound header — propagation.Baggage.Extract
-		// does not merge — discarding baggage the application seeded. Inheriting is
-		// correct under both postures: an app that does trust the inbound trace has
-		// already parented its server span to it, so this span joins for free.
+		// The ambient request context is inherited, never re-extracted from the
+		// inbound headers: see decide.
 		ctx := c.Context()
 
-		_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
-
-		if auth.mustRefuse() {
-			// AUTH_REQUIRED opted in but auth is disabled/misconfigured: refuse to
-			// serve (fail closed) instead of silently passing the request through.
-			return auth.authorizeRefusal(c, http.StatusServiceUnavailable, "Service Unavailable")
+		outcome := auth.decide(ctx, route, fiberRequest{c: c})
+		if outcome.refusal != nil {
+			return outcome.refusal.fiberError()
 		}
 
-		// A misdeclared route refuses EVERY request, whatever the auth posture. The
-		// declaration is a programming error caught at registration, and the
-		// disabled-auth pass-through below must not hide it: with auth off the
-		// route would otherwise serve the very requests the contract says it
-		// refuses, and the error would surface only on the first deployment that
-		// turns auth on.
-		if declErr != "" {
-			if auth != nil {
-				logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", declErr)
-			}
-
-			return auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
+		if outcome.principal == nil {
+			return c.Next()
 		}
 
-		if !auth.canAuthorize() {
-			if !auth.principalRequiredWhenDisabled() {
-				return c.Next()
-			}
+		c.SetContext(outcome.publish(ctx))
 
-			if auth.Enabled {
-				// Enabled but addressless is an incomplete configuration, not a
-				// deliberate "auth off": it never earns the no-round-trip branch.
-				return auth.authorizeRefusal(c, http.StatusServiceUnavailable, "Service Unavailable")
-			}
-
-			return auth.authorizeWithoutRoundTrip(c, product)
+		// Record the partner for the service's request log too, without a second
+		// parse of the token. Absent for every credential that is not partner-bound.
+		if outcome.scope != nil {
+			c.Locals(PartnerLocalsKey, outcome.scope.Partner)
 		}
-
-		ctx, span := tracer.Start(ctx, "lib_auth.authorize")
-
-		span.SetAttributes(
-			attribute.String("app.request.request_id", reqID),
-		)
-
-		accessToken := libHTTP.ExtractTokenFromHeader(c)
-
-		if commons.IsNilOrEmpty(&accessToken) {
-			span.End()
-
-			return auth.authorizeRefusal(c, http.StatusUnauthorized, "Missing Token")
-		}
-
-		// Derive the caller IP HERE, from this library's own TRUSTED_PROXIES list —
-		// never from c.IP(). c.IP() honours the trusted-proxy chain only when the
-		// consuming service set all four of TrustProxy, TrustProxyConfig{Proxies},
-		// ProxyHeader and EnableIPValidation on the fiber.App it built; miss the last
-		// one and it hands back the raw forwarded header, i.e. a value the caller
-		// supplies about itself. lib-auth cannot enforce that config, so it stops
-		// depending on it (see resolveClientIP).
-		//
-		// With TRUSTED_PROXIES unset the result is EMPTY and no IP is forwarded: an
-		// empty value is omitted from the request body (see checkAuthorization), so
-		// the authorization service decides with no address to match the caller
-		// against. That is not a quiet pass — as of 2026-08-23 a tenant with an
-		// active allowlist DENIES an addressless request unless the caller is one
-		// the service recognises as internal to the platform. The rule is that
-		// service's, and the README's client-IP section carries the dated copy.
-		// Forwarding nothing is still deliberate: falling back to the socket peer
-		// would forward the ingress address and could produce a false ALLOW.
-		clientIP := auth.resolveClientIP(c)
-
-		// Read the declared identifiers out of THIS request. A declared dimension
-		// the request does not carry is refused here, before the round-trip: an
-		// identifier with no value cannot be matched against a partner's scope, and
-		// sending it absent would quietly ask a question the route did not promise.
-		attributes, missing := resolveAttributes(c, scope.dims)
-		if missing != "" {
-			logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
-
-			span.End()
-
-			return auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
-		}
-
-		resolution, principal := auth.checkAuthorizationWithPrincipal(ctx, authzParams{
-			product:     product,
-			resource:    resource,
-			action:      action,
-			accessToken: accessToken,
-			clientIP:    clientIP,
-			attributes:  attributes,
-			declared:    scope.declared(),
-		})
-
-		// checkResult, not legacyResult: an Access Manager that never produced an
-		// answer must be refused as 503, not rendered as a 403 the caller reads as
-		// "you are Forbidden" or a 500 that names the wrong subsystem. Fail-closed
-		// is unchanged — the request is still refused — only the word is corrected,
-		// which is what puts the outage in the rail's 5xx alarms.
-		authorized, statusCode, err := resolution.checkResult()
-		if err != nil {
-			var commonsErr commons.Response
-			if errors.As(err, &commonsErr) {
-				span.End()
-
-				return auth.authorizeCommonsRefusal(c, statusCode, commonsErr)
-			}
-
-			span.End()
-
-			return auth.authorizeRefusal(c, statusCode, http.StatusText(statusCode))
-		}
-
-		if !authorized {
-			span.End()
-
-			// The denial reason, not the transport status, picks the word: a
-			// credential the authorization service called finished is answered 401
-			// so its holder re-issues it, while every other denial stays the 403 it
-			// has always been.
-			status := denialStatus(resolution.reason)
-
-			return auth.authorizeRefusal(c, status, http.StatusText(status))
-		}
-
-		publishPrincipal(c, span, principal)
-
-		// Record what the request was authorized AS, for the handler and the
-		// service's request log. Only for a partner-bound credential: leaving it
-		// absent otherwise is what stops a handler reading "no scope" as "a partner
-		// with no restriction".
-		if resolution.partner != "" {
-			c.Locals(PartnerLocalsKey, resolution.partner)
-			c.SetContext(context.WithValue(c.Context(), requestScopeContextKey{}, RequestScope{
-				Partner:    resolution.partner,
-				Attributes: attributes,
-			}))
-		}
-
-		span.End()
 
 		return c.Next()
 	}
 }
 
-func (auth *AuthClient) authorizeRefusal(_ fiber.Ctx, status int, message string) error {
-	return fiber.NewError(status, message)
+// fiberRequest reads a Fiber request for the shared authorization flow.
+type fiberRequest struct {
+	c fiber.Ctx
 }
 
-func (auth *AuthClient) authorizeCommonsRefusal(_ fiber.Ctx, status int, response commons.Response) error {
-	return accessManagerRefusal{
-		fiberErr: fiber.NewError(status, refusalMessage(response, status)),
-		response: response,
+// token keeps the Fiber path's historical extraction (lib-commons
+// ExtractTokenFromHeader) exactly: AuthorizeHTTP uses the strict bearer package,
+// and moving Fiber onto it would refuse bare tokens existing callers send.
+func (r fiberRequest) token() (string, error) {
+	accessToken := libHTTP.ExtractTokenFromHeader(r.c)
+	if commons.IsNilOrEmpty(&accessToken) {
+		return "", bearer.ErrMissing
 	}
+
+	return accessToken, nil
 }
 
-type accessManagerRefusal struct {
-	fiberErr *fiber.Error
-	response commons.Response
+// clientIP derives the caller from this library's own TRUSTED_PROXIES list —
+// never from c.IP(), which honours the trusted-proxy chain only when the consuming
+// service configured its fiber.App exactly right (see resolveClientIP).
+func (r fiberRequest) clientIP(auth *AuthClient) string {
+	return auth.resolveClientIP(r.c)
 }
 
-func (e accessManagerRefusal) Error() string { return e.fiberErr.Error() }
-
-func (e accessManagerRefusal) Unwrap() []error { return []error{e.fiberErr, e.response} }
-
-// refusalMessage is the text a decoded Access Manager error renders as: its
-// business message, else its title, else the status text. A body carrying only a
-// code has an empty Message, and falling through to the status text keeps such a
-// refusal from rendering an empty response.
-func refusalMessage(response commons.Response, statusCode int) string {
-	if response.Message != "" {
-		return response.Message
-	}
-
-	if response.Title != "" {
-		return response.Title
-	}
-
-	return http.StatusText(statusCode)
+func (r fiberRequest) dimension(d Dimension) string {
+	return d.resolve(r.c)
 }
 
 // accessManagerRefusalFrom builds the error a non-2xx Access Manager answer
@@ -871,46 +731,6 @@ func (auth *AuthClient) Check(ctx context.Context, product, resource, action, ac
 	}
 
 	return true, http.StatusOK, nil
-}
-
-// authorizeWithoutRoundTrip serves the PrincipalRequiredWhenDisabled path: the client
-// cannot authorize, so the Access Manager is never called, but the bearer token is
-// still demanded, parsed and derived with the SAME rules the enabled path applies and
-// the resulting Principal is published. A deployment running with auth off therefore
-// still refuses an anonymous request and a token it cannot make sense of, instead of
-// passing either through. The span is ended before c.Next() so it covers only the
-// derivation, matching the enabled path.
-func (auth *AuthClient) authorizeWithoutRoundTrip(c fiber.Ctx, product string) error {
-	ctx := c.Context()
-
-	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
-
-	ctx, span := tracer.Start(ctx, "lib_auth.authorize")
-
-	span.SetAttributes(
-		attribute.String("app.request.request_id", reqID),
-	)
-
-	accessToken := libHTTP.ExtractTokenFromHeader(c)
-
-	if commons.IsNilOrEmpty(&accessToken) {
-		span.End()
-
-		return auth.authorizeRefusal(c, http.StatusUnauthorized, "Missing Token")
-	}
-
-	principal, statusCode, err := auth.derivePrincipalWithoutRoundTrip(ctx, span, accessToken, product)
-	if err != nil {
-		span.End()
-
-		return auth.authorizeRefusal(c, statusCode, http.StatusText(statusCode))
-	}
-
-	publishPrincipal(c, span, principal)
-
-	span.End()
-
-	return c.Next()
 }
 
 // deriveSubject builds the authorization subject from the token claims based on

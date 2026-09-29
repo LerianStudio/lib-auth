@@ -9,7 +9,6 @@ import (
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -43,7 +42,7 @@ type Principal struct {
 // keeps the entry unreachable and uncollidable from outside this package.
 type principalContextKey struct{}
 
-// PrincipalFromContext returns the Principal Authorize stored on the request Go
+// PrincipalFromContext returns the Principal Authorize or AuthorizeHTTP stored on the request Go
 // context, or (zero, false) when absent or when the stored value does not describe
 // one of the real identities this API promises. In particular, a legacy
 // non-inversion M2M authorization uses a fabricated role as Subject; even when that
@@ -169,18 +168,6 @@ func (auth *AuthClient) derivePrincipalWithoutRoundTrip(ctx context.Context, spa
 	}
 
 	return principal, http.StatusOK, nil
-}
-
-// publishPrincipal stores the derived caller identity on the request Go context —
-// derived from c.Context(), NOT the tracing ctx, so it adds only the identity value
-// without altering span topology — and records only the principal TYPE on the span.
-// Neither the bearer token nor any identifier of the caller (Owner, Sub, Subject,
-// ClientID) reaches a span attribute or a log line: the type says what kind of
-// caller this was, the request id correlates it with the service's own audit trail.
-func publishPrincipal(c fiber.Ctx, span trace.Span, p Principal) {
-	c.SetContext(context.WithValue(c.Context(), principalContextKey{}, p))
-
-	span.SetAttributes(attribute.String("app.auth.principal.type", p.Type))
 }
 
 // RequireHuman rejects any request whose published Principal.Type is not

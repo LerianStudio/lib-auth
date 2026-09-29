@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/netip"
 	"os"
 	"strconv"
@@ -473,7 +474,7 @@ func minPrefixBits(addr netip.Addr) int {
 // ProxyHeader AND EnableIPValidation are all set. Miss the last one and c.IP()
 // returns the raw header — a value the caller supplies about itself. So this
 // library derives the IP from its own TRUSTED_PROXIES list instead, over a chain
-// it reads and splits itself (see forwardedHops).
+// it reads and splits itself (see splitForwarded).
 //
 // With no trusted proxies configured it returns "" and NO IP is forwarded. That
 // is a deliberate product decision, not an oversight: falling back to the socket
@@ -504,22 +505,54 @@ func (auth *AuthClient) resolveClientIP(c fiber.Ctx) string {
 		return ""
 	}
 
-	peer := reqCtx.RemoteIP()
-	if peer == nil {
+	peer, ok := netip.AddrFromSlice(reqCtx.RemoteIP())
+	if !ok {
 		return ""
 	}
 
-	forwarded := forwardedHops(c)
+	values := c.Request().Header.PeekAll(forwardedHeader)
+
+	lines := make([]string, 0, len(values))
+	for _, value := range values {
+		lines = append(lines, string(value))
+	}
+
+	return clientIPFrom(peer, lines, auth.trustedProxies)
+}
+
+// resolveClientIPHTTP is resolveClientIP for a net/http request, with the same
+// rules: the peer is r.RemoteAddr, every X-Forwarded-For line is read in order,
+// and with no trusted proxies — or a RemoteAddr that is not an address and port,
+// as behind a unix socket — nothing is forwarded.
+func (auth *AuthClient) resolveClientIPHTTP(r *http.Request) string {
+	if len(auth.trustedProxies) == 0 {
+		return ""
+	}
+
+	peer, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+
+	return clientIPFrom(peer.Addr(), r.Header.Values(forwardedHeader), auth.trustedProxies)
+}
+
+// clientIPFrom walks the forwarded chain, anchored on the socket peer as the
+// rightmost hop, and returns the first hop that is not a trusted proxy. It is the
+// one derivation both adapters share, so they can never attribute a different
+// caller to the same request.
+func clientIPFrom(peer netip.Addr, forwardedLines []string, trusted []netip.Prefix) string {
+	forwarded := splitForwarded(forwardedLines)
 
 	hops := make([]string, 0, len(forwarded)+1)
 	hops = append(hops, forwarded...)
 	hops = append(hops, peer.String())
 
-	return firstUntrustedHop(hops, auth.trustedProxies)
+	return firstUntrustedHop(hops, trusted)
 }
 
-// forwardedHops reads the forwarded chain off the request and splits it here,
-// deliberately in place of c.IPs().
+// splitForwarded splits the forwarded chain here, deliberately in place of
+// c.IPs().
 //
 // c.IPs() reads the same header, but filters it through the embedding service's
 // app config first: with EnableIPValidation set, Fiber DROPS every token it does
@@ -546,16 +579,15 @@ func (auth *AuthClient) resolveClientIP(c fiber.Ctx) string {
 // header peek returns — would drop the rightmost, most trustworthy hops and let
 // the walk stop somewhere further left, crediting caller-supplied text in place
 // of a hop that a trusted proxy actually wrote.
-func forwardedHops(c fiber.Ctx) []string {
-	values := c.Request().Header.PeekAll(forwardedHeader)
-	if len(values) == 0 {
+func splitForwarded(lines []string) []string {
+	if len(lines) == 0 {
 		return nil
 	}
 
-	hops := make([]string, 0, len(values))
+	hops := make([]string, 0, len(lines))
 
-	for _, value := range values {
-		for _, token := range strings.Split(string(value), ",") {
+	for _, line := range lines {
+		for _, token := range strings.Split(line, ",") {
 			hops = append(hops, strings.TrimSpace(token))
 		}
 	}

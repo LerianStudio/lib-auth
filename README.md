@@ -181,9 +181,9 @@ AUTH_RETRY_MAX=0
 # value leaves the service starting with no address to forward, and announces
 # that in ONE wording at two levels. At construction it is an INFO disclosure,
 # in every NewAuthClient. It becomes an ERROR — once per client — only when
-# Authorize is mounted on a client configured to call the authorization service
-# (auth enabled and an address set), because that is the only path in this
-# library that resolves a caller IP. A token-only or gRPC-only client never
+# Authorize or AuthorizeHTTP is mounted on a client configured to call the
+# authorization service (auth enabled and an address set), because those are the
+# only paths in this library that resolve a caller IP. A token-only or gRPC-only client never
 # reaches it and is not paged for a feature it does not use.
 #
 # LEAVING IT UNSET CAN LOCK YOUR CALLERS OUT. With no trusted proxies the derived
@@ -654,6 +654,69 @@ Notes:
 - When `SubResolver` returns an empty string, the subject is derived from token claims.
  - If you already use multiple interceptors, prefer `grpc.ChainUnaryInterceptor(...)` and include the auth interceptor alongside telemetry/logging.
  - The interceptors do not forward a client IP in this version, so a gRPC-authorized call carries no address for the per-tenant IP allowlist to match, and takes whatever outcome the authorization service gives an addressless request. See [Client IP forwarding](#-client-ip-forwarding).
+
+## 🧩 net/http usage
+
+For a service that does not run Fiber, like a plain `net/http` sidecar, mount `AuthorizeHTTP`. It runs the same authorization flow as `Authorize` and publishes the same `Principal` and `RequestScope`. It reads the same `AUTH_*` and `TRUSTED_PROXIES` settings. You do not need to parse the bearer token yourself.
+
+```go
+import (
+    "errors"
+    "net/http"
+
+    "github.com/LerianStudio/lib-auth/v5/auth/middleware"
+)
+
+authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, logger).
+    // Optional: render refusals in your own envelope. Set it before serving.
+    WithHTTPErrorHandler(func(w http.ResponseWriter, r *http.Request, err error) {
+        var refusal *middleware.RefusalError
+        if errors.As(err, &refusal) {
+            writeProblem(w, refusal.Status, refusal.Message) // your renderer
+        }
+    })
+
+mux := http.NewServeMux()
+mux.Handle("GET /v1/organizations/{org}/accounts",
+    authClient.AuthorizeHTTP("midaz", "accounts", "get",
+        middleware.RequireScope("midaz", middleware.Dim("organizationId", middleware.FromPath).At("org")),
+    )(accountsHandler))
+
+// Inside accountsHandler:
+//   p, ok := middleware.PrincipalFromContext(r.Context())
+```
+
+### Bearer rules
+
+`AuthorizeHTTP` reads the credential through `auth/bearer`, a small package that uses only the standard library. You can also call `bearer.FromRequest` or `bearer.Parse` on their own. A request is accepted only when:
+
+- It has exactly one `Authorization` header. Two header lines are refused.
+- The header is `Bearer <token>`. The scheme is case-insensitive and one or more spaces may follow it. A bare token, another scheme, or two tokens are refused.
+- The token is at most `bearer.MaxTokenBytes` (8 KiB). The size is checked before any decoding.
+- The header has no control bytes (including TAB, CR and LF) and no bytes outside printable ASCII.
+- The token has exactly three non-empty segments separated by dots, each unpadded base64url. `=` padding and the standard `+` and `/` alphabet are refused.
+
+A missing or blank header answers `401 Missing Token`. Any other refusal answers `401 Unauthorized`. Neither calls the Access Manager.
+
+An empty signature segment is refused too, so an unsigned (`alg=none`) token never leaves the service. This is stricter than the copy the br-sfn `slc` mqbridge carried, which accepted an empty signature and a bare token.
+
+### What differs from `Authorize`
+
+- **`FromPath` reads `r.PathValue`,** which only the Go 1.22+ `http.ServeMux` fills in from a `{name}` pattern. Under another router a path dimension resolves empty, and the request is refused with 403. It is never sent without the dimension. `FromHeader` and `FromQuery` work under any router.
+- **Refusals go to an `HTTPErrorHandler`,** not to a returned error. `err` is always a `*middleware.RefusalError`, which carries `Status`, `Message`, and `Response`. `Response` is the Access Manager's decoded refusal body, when it sent one. `errors.As(err, &commons.Response{})` also recovers that body, as on the Fiber path. The handler must write the response. The default writes `Message` as plain text with `Status`, the same way Fiber's default handler renders the `*fiber.Error` from `Authorize`.
+- **The client IP** comes from `r.RemoteAddr` and every `X-Forwarded-For` line, read in order and walked against `TRUSTED_PROXIES` exactly as on the Fiber path. If `RemoteAddr` is not an address and port, as behind a unix socket, no IP is forwarded.
+- **A nil `*AuthClient`** passes every request through, as `Authorize` does. A nil `next` handler answers 500 instead of panicking.
+
+Everything else is shared:
+
+- `AUTH_REQUIRED`
+- `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED`
+- M2M inversion (`AUTH_M2M_INVERSION_ENABLED`) and product forwarding
+- the decision cache, retry, and breaker
+- local JWT verification
+- the 401/403/503 mapping
+
+The Fiber `Authorize` and the gRPC interceptors keep their existing, more lenient token extraction. `Authorize`, for example, still accepts a bare token without the `Bearer` prefix. Moving them onto `auth/bearer` would refuse requests existing consumers send today, so that change would be a separate, opt-in step.
 
 ## 🚧 Error Handling
 
