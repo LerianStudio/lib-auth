@@ -1,3 +1,11 @@
+## [5.1.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.1.0-beta.2...v5.1.0-beta.3) (2026-09-29)
+
+
+### Bug Fixes
+
+* **middleware:** forward the product for partner-bound credentials ([c85d95a](https://github.com/LerianStudio/lib-auth/commit/c85d95ad59916a4f63bce1f63e82c52930401a23))
+* **middleware:** stop the JWKS refresher from fetching after Close ([2d45deb](https://github.com/LerianStudio/lib-auth/commit/2d45deb0d45b0337ba6984ce00adf0c32d102f58))
+
 ## [5.1.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.1.0-beta.1...v5.1.0-beta.2) (2026-09-27)
 
 
