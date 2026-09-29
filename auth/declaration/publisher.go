@@ -412,6 +412,7 @@ func (p *Publisher) doPut(ctx context.Context, token string) error {
 
 		return &PublishError{Deterministic: false, Op: "put declaration", Err: err}
 	}
+
 	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
