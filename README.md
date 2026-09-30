@@ -208,6 +208,9 @@ AUTH_RETRY_MAX=0
 TRUSTED_PROXIES=10.0.0.0/8,<ingress-cidr>
 ```
 
+`middleware.EnvNames()` returns every `AUTH_*` variable above, for tests that clean or audit
+the client's configuration.
+
 ### 2. Create a new instance of the middleware:
 
 In your `config.go` file, configure the environment variables for the Auth Service:
@@ -322,6 +325,7 @@ type Principal struct {
     Sub      string // "sub" claim, verbatim
     Subject  string // "<owner>/<sub>" for normal-user, "<sub>" for application
     ClientID string // "azp" claim when present, else empty
+    TenantID string // "tenantId" claim verbatim, else empty
 }
 
 func PrincipalFromContext(ctx context.Context) (Principal, bool)
@@ -335,11 +339,18 @@ verbatim: `Owner` and `Sub` are the claims as the token wrote them, edge whitesp
 included, with no normalization. `Subject` is the string sent to the authorization
 service.
 
+`TenantID` is the token's `tenantId` claim — the same claim the gRPC interceptors
+forward as `md-tenant-id` — copied verbatim and empty when the claim is absent or
+not a string. It never affects authorization or whether `PrincipalFromContext`
+reports a principal, since single-tenant tokens may carry none. It is a claim, not a
+tenant-isolation decision: in multi-tenant deployments the tenant-manager remains
+the authority on which tenant a request belongs to.
+
 Publication covers the authorized decision, a decision-cache hit, and the
 `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` path below. A denied request publishes
 nothing, and neither does the default disabled pass-through. The only identity attribute any of
 these spans carries is `app.auth.principal.type`. The span copy of the authorization
-payload omits `sub`, so `Owner`, `Sub`, `Subject` and `ClientID` are recorded nowhere,
+payload omits `sub`, so `Owner`, `Sub`, `Subject`, `ClientID` and `TenantID` are recorded nowhere,
 and neither the access token nor any principal identifier reaches a span attribute
 or a log line written by this library — the request id is what correlates a span
 with the service's own audit trail. The one caller identifier this library hands

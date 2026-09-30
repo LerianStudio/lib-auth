@@ -394,7 +394,7 @@ func newAuthBreaker(maxFailures uint32, openTimeout time.Duration) *gobreaker.Ci
 // parseAuthTimeout reads AUTH_TIMEOUT (a Go duration, e.g. "5s"), falling back to
 // the behavior-neutral default when unset or invalid.
 func parseAuthTimeout() time.Duration {
-	if v := strings.TrimSpace(os.Getenv("AUTH_TIMEOUT")); v != "" {
+	if v := strings.TrimSpace(os.Getenv(timeoutEnv)); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			return d
 		}
@@ -408,7 +408,7 @@ func parseAuthTimeout() time.Duration {
 // revocation-propagation lag (up to the TTL) for load shedding and outage
 // resilience — a documented security tradeoff, kept tight by a small TTL.
 func newDecisionCacheFromEnv() *decisionCache {
-	v := strings.TrimSpace(os.Getenv("AUTH_CACHE_TTL"))
+	v := strings.TrimSpace(os.Getenv(cacheTTLEnv))
 	if v == "" {
 		return nil
 	}
@@ -424,7 +424,7 @@ func newDecisionCacheFromEnv() *decisionCache {
 // newBreakerFromEnv builds the circuit breaker when AUTH_BREAKER_ENABLED=="true",
 // and nil (disabled) otherwise.
 func newBreakerFromEnv() *gobreaker.CircuitBreaker {
-	if os.Getenv("AUTH_BREAKER_ENABLED") != "true" {
+	if os.Getenv(breakerEnabledEnv) != "true" {
 		return nil
 	}
 
@@ -434,7 +434,7 @@ func newBreakerFromEnv() *gobreaker.CircuitBreaker {
 // parseRetryMax reads AUTH_RETRY_MAX (the maximum number of retries applied to
 // transient failures), returning 0 (disabled) when unset or invalid.
 func parseRetryMax() uint {
-	v := strings.TrimSpace(os.Getenv("AUTH_RETRY_MAX"))
+	v := strings.TrimSpace(os.Getenv(retryMaxEnv))
 	if v == "" {
 		return 0
 	}

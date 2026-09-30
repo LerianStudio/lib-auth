@@ -135,7 +135,7 @@ func (auth *AuthClient) extractClaims(ctx context.Context, span trace.Span, acce
 // left disabled (the authz round-trip stays the trust anchor); it never silently
 // accepts a bad cert and never panics, keeping NewAuthClient's no-error signature.
 func loadVerification(logger obs.Logger) (keys []*rsa.PublicKey, issuer string) {
-	issuer = strings.TrimSpace(os.Getenv("AUTH_JWT_ISSUER"))
+	issuer = strings.TrimSpace(os.Getenv(jwtIssuerEnv))
 
 	pemData, err := loadVerifyCertPEM()
 	if err != nil {
@@ -165,11 +165,11 @@ func loadVerification(logger obs.Logger) (keys []*rsa.PublicKey, issuer string) 
 // AUTH_JWT_VERIFY_CERT_PATH. It returns (nil, nil) when neither is set, which
 // leaves verification off (opt-in by presence, like the M2M cert gate).
 func loadVerifyCertPEM() ([]byte, error) {
-	if inline := strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT")); inline != "" {
+	if inline := strings.TrimSpace(os.Getenv(jwtVerifyCertEnv)); inline != "" {
 		return []byte(inline), nil
 	}
 
-	path := strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT_PATH"))
+	path := strings.TrimSpace(os.Getenv(jwtVerifyCertPathEnv))
 	if path == "" {
 		return nil, nil
 	}

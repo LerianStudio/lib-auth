@@ -401,8 +401,8 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 	l := resolveLogger(logger)
 
 	verifyKeys, verifyIssuer := loadVerification(l)
-	staticVerificationConfigured := strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT")) != "" ||
-		strings.TrimSpace(os.Getenv("AUTH_JWT_VERIFY_CERT_PATH")) != ""
+	staticVerificationConfigured := strings.TrimSpace(os.Getenv(jwtVerifyCertEnv)) != "" ||
+		strings.TrimSpace(os.Getenv(jwtVerifyCertPathEnv)) != ""
 
 	// AUTH_M2M_PRODUCT_FORWARD_ENABLED is read with LookupEnv, not Getenv, so that
 	// "unset" and an explicit "false" are two distinguishable states. Both resolve
@@ -410,7 +410,7 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 	// explicit opt-OUT, which is what any non-false default would need as a kill
 	// switch. Any value other than the exact string "true" disables forwarding.
 	forwardM2MProduct := false
-	if v, ok := os.LookupEnv("AUTH_M2M_PRODUCT_FORWARD_ENABLED"); ok {
+	if v, ok := os.LookupEnv(m2mProductForwardEnv); ok {
 		forwardM2MProduct = v == "true"
 	}
 
@@ -423,9 +423,9 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 		Enabled:                       enabled,
 		Logger:                        l,
 		ForwardM2MProduct:             forwardM2MProduct,
-		M2MInversionEnabled:           os.Getenv("AUTH_M2M_INVERSION_ENABLED") == "true",
-		Required:                      os.Getenv("AUTH_REQUIRED") == "true",
-		PrincipalRequiredWhenDisabled: os.Getenv("AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED") == "true",
+		M2MInversionEnabled:           os.Getenv(m2mInversionEnv) == "true",
+		Required:                      os.Getenv(requiredEnv) == "true",
+		PrincipalRequiredWhenDisabled: os.Getenv(principalWhenDisabledEnv) == "true",
 		timeout:                       parseAuthTimeout(),
 		cache:                         newDecisionCacheFromEnv(),
 		breaker:                       newBreakerFromEnv(),
@@ -991,14 +991,19 @@ func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, clai
 // shouldForwardProduct reports whether the route product must be forwarded to the
 // auth service so it can isolate permissions by product (strip the "{product}/"
 // prefix from stored resources and dual-match a bare request). It is forwarded for
-// normal-user flows, and for M2M (application) flows when forwardM2MProduct is
-// enabled; an empty product is never forwarded (gate-by-presence).
-func shouldForwardProduct(userType, product string, forwardM2MProduct bool) bool {
+// normal-user flows, for partner-bound credentials, and for M2M (application) flows
+// when forwardM2MProduct is enabled; an empty product is never forwarded
+// (gate-by-presence).
+//
+// A partner-bound credential is an application token, but the auth service resolves
+// a partner's grants by product: without it every partner request is denied. So a
+// partner forwards the product regardless of the M2M forwarding keys.
+func shouldForwardProduct(userType, product string, forwardM2MProduct, partnerBound bool) bool {
 	if product == "" {
 		return false
 	}
 
-	return userType == normalUser || (userType == application && forwardM2MProduct)
+	return userType == normalUser || partnerBound || (userType == application && forwardM2MProduct)
 }
 
 // checkAuthorization builds and sends the authorization request to the auth
@@ -1079,9 +1084,10 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, p a
 
 	// M2M product forwarding only applies under the inversion model; the legacy
 	// path (inversion OFF) forwards product for normal-user flows only (pre-#122).
-	// shouldForwardProduct(userType, product, false) == the legacy normal-user rule.
+	// shouldForwardProduct(userType, product, false, false) == the legacy normal-user
+	// rule. A partner forwards the product in both paths.
 	forwardM2MProduct := auth.ForwardM2MProduct && auth.M2MInversionEnabled
-	if shouldForwardProduct(userType, p.product, forwardM2MProduct) {
+	if shouldForwardProduct(userType, p.product, forwardM2MProduct, partner != "") {
 		requestBody["product"] = p.product
 	}
 
@@ -1219,7 +1225,7 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 		return "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/login/oauth/access_token", auth.Address), bytes.NewBuffer(requestBodyJSON))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/v1/login/oauth/access_token", auth.Address), bytes.NewBuffer(requestBodyJSON))
 	if err != nil {
 		logErrorf(ctx, auth.Logger, "Failed to create request: %v", err)
 
