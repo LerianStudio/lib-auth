@@ -1,3 +1,18 @@
+## [5.1.0](https://github.com/LerianStudio/lib-auth/compare/v5.0.1...v5.1.0) (2026-09-30)
+
+
+### Features
+
+* **middleware:** export the AUTH_* names the auth client reads ([1ee927e](https://github.com/LerianStudio/lib-auth/commit/1ee927e0202a2e6be9e9a098d9fac2d418d5f734))
+* **middleware:** publish the tenantId claim on the caller principal ([d3ef117](https://github.com/LerianStudio/lib-auth/commit/d3ef117d5ae175b7674108dbba6ff82bd5531d9e))
+
+
+### Bug Fixes
+
+* **middleware:** forward the product for partner-bound credentials ([c85d95a](https://github.com/LerianStudio/lib-auth/commit/c85d95ad59916a4f63bce1f63e82c52930401a23))
+* **middleware:** honour caller context when minting an application token ([54cd60e](https://github.com/LerianStudio/lib-auth/commit/54cd60e7f629b13c4e520898ae961a11e5fbf9c4))
+* **middleware:** stop the JWKS refresher from fetching after Close ([2d45deb](https://github.com/LerianStudio/lib-auth/commit/2d45deb0d45b0337ba6984ce00adf0c32d102f58))
+
 ## [5.1.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.1.0-beta.2...v5.1.0-beta.3) (2026-09-29)
 
 
