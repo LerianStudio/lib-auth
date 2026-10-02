@@ -625,6 +625,50 @@ f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
 * Validation: `from` must be `path`; `name`, `param` and `collection` are
   required and names and params are unique; `label` is optional.
 
+### Reading dimensions from the request body
+
+Some routes carry the instance they address in the JSON body, not the path — for
+example `POST /v1/transfers` with `{"organizationId": "...", "items": [{"ledgerId": "..."}]}`.
+Declare those per route under `scope.routes`, since the same dimension comes from
+the path on other routes:
+
+```yaml
+scope:
+  dimensions: [ ... ]    # the catalog, unchanged
+  routes:
+    - method: POST
+      path: /v1/transfers            # full registered path, group prefix included
+      dimensions:
+        - { name: organizationId, from: body, field: organizationId }
+        - { name: ledgerId,       from: body, field: "items[].ledgerId" }
+```
+
+* `field` is a path of object keys separated by `.`; `key[]` is an array whose
+  every element is read (`transactions[].legs[].ledgerId` crosses two). The last
+  key holds a string.
+* **Every value must be inside the scope.** Each array element is one question to
+  the authorization service (repeated sets are asked once), and the request is
+  refused when any one is denied. Fields under the same element travel together;
+  a field of an enclosing element (or of the top level) joins every question of
+  the elements nested in it. A dimension may be read from more than one array
+  (`debits[].ledgerId` and `credits[].ledgerId`), but each question must carry
+  every dimension the route reads from the body. At most 100 distinct sets per
+  request.
+* The route still derives the dimensions its path carries; one dimension cannot
+  come from both.
+* A body that is not JSON, a field that is missing, empty or not a string, an
+  array that is missing or empty, or a key repeated in another letter case is
+  answered **400 naming the field**, with no authorization call and no handler
+  call. The handler reads the body untouched.
+* Validation at `WireScope`: `from` must be `body`, `field` is required, `name`
+  must be a catalog dimension, routes are unique by method and path, and the
+  fields must fit together; any error fails the boot.
+* `scope.routes` is read by this library only: it is never published and is not
+  part of `CanonicalHash`, so adding it changes neither.
+* Without a manifest, `RequireScope("midaz", authMiddleware.BodyDim("ledgerId", "items[].ledgerId"))`
+  declares the same on one route. `ScopeFromContext(...).Sets` lists every set
+  that was authorized; `Attributes` keeps the identifiers all sets share.
+
 **Publication.** The scope section is published to the access manager whenever
 the product's auth is on, independently of the permission declaration switch.
 With the permission declaration on, the full manifest (scope included) is

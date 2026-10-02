@@ -41,6 +41,10 @@ type AuthClient struct {
 	// SetManifestScope and read when a route is registered.
 	manifestScopes  map[string][]Dimension
 	manifestScopeMu sync.RWMutex
+	// manifestRouteScopes holds, per product, the dimensions single routes
+	// read from their request body, set by SetManifestRouteScope and keyed by
+	// method and path. Guarded by manifestScopeMu.
+	manifestRouteScopes map[string]map[string]routeBodyScope
 
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
@@ -658,7 +662,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		// sending it absent would quietly ask a question the route did not promise.
 		scope := scope
 		if derived != nil {
-			scope = derived.forPath(c.Route().Path)
+			scope = derived.forRoute(c.Route().Method, c.Route().Path)
 		}
 
 		attributes, missing := resolveAttributes(c, scope.dims)
@@ -670,45 +674,29 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			return auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
 		}
 
-		resolution, principal := auth.checkAuthorizationWithPrincipal(ctx, authzParams{
+		// A route that reads dimensions from its body asks one question per
+		// distinct set of identifiers the body names, and every one must be
+		// allowed. A body that cannot be read for them is the caller's to fix:
+		// refused before any call, naming the field, and never let through.
+		questions, badBody := scope.questions(c.Body(), attributes)
+		if badBody != nil {
+			span.End()
+
+			return auth.authorizeRefusal(c, http.StatusBadRequest, badBody.Error())
+		}
+
+		resolution, principal, refusal := auth.authorizeEvery(ctx, c, authzParams{
 			product:     product,
 			resource:    resource,
 			action:      action,
 			accessToken: accessToken,
 			clientIP:    clientIP,
-			attributes:  attributes,
 			declared:    scope.declared(),
-		})
-
-		// checkResult, not legacyResult: an Access Manager that never produced an
-		// answer must be refused as 503, not rendered as a 403 the caller reads as
-		// "you are Forbidden" or a 500 that names the wrong subsystem. Fail-closed
-		// is unchanged — the request is still refused — only the word is corrected,
-		// which is what puts the outage in the rail's 5xx alarms.
-		authorized, statusCode, err := resolution.checkResult()
-		if err != nil {
-			var commonsErr commons.Response
-			if errors.As(err, &commonsErr) {
-				span.End()
-
-				return auth.authorizeCommonsRefusal(c, statusCode, commonsErr)
-			}
-
+		}, questions)
+		if refusal != nil {
 			span.End()
 
-			return auth.authorizeRefusal(c, statusCode, http.StatusText(statusCode))
-		}
-
-		if !authorized {
-			span.End()
-
-			// The denial reason, not the transport status, picks the word: a
-			// credential the authorization service called finished is answered 401
-			// so its holder re-issues it, while every other denial stays the 403 it
-			// has always been.
-			status := denialStatus(resolution.reason)
-
-			return auth.authorizeRefusal(c, status, http.StatusText(status))
+			return refusal
 		}
 
 		publishPrincipal(c, span, principal)
@@ -721,7 +709,8 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			c.Locals(PartnerLocalsKey, resolution.partner)
 			c.SetContext(context.WithValue(c.Context(), requestScopeContextKey{}, RequestScope{
 				Partner:    resolution.partner,
-				Attributes: attributes,
+				Attributes: sharedAttributes(questions),
+				Sets:       questions,
 			}))
 		}
 
@@ -729,6 +718,54 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 
 		return c.Next()
 	}
+}
+
+// authorizeEvery asks the authorization service about every question and
+// returns the last resolution, or the refusal of the first one not allowed. With
+// no question it asks once, with no attributes — the request every route that
+// declares nothing has always sent.
+func (auth *AuthClient) authorizeEvery(ctx context.Context, c fiber.Ctx, params authzParams, questions []map[string]string) (authzResolution, Principal, error) {
+	if len(questions) == 0 {
+		questions = []map[string]string{nil}
+	}
+
+	var (
+		resolution authzResolution
+		principal  Principal
+	)
+
+	for _, attributes := range questions {
+		params.attributes = attributes
+
+		resolution, principal = auth.checkAuthorizationWithPrincipal(ctx, params)
+
+		// checkResult, not legacyResult: an Access Manager that never produced an
+		// answer must be refused as 503, not rendered as a 403 the caller reads as
+		// "you are Forbidden" or a 500 that names the wrong subsystem. Fail-closed
+		// is unchanged — the request is still refused — only the word is corrected,
+		// which is what puts the outage in the rail's 5xx alarms.
+		authorized, statusCode, err := resolution.checkResult()
+		if err != nil {
+			var commonsErr commons.Response
+			if errors.As(err, &commonsErr) {
+				return authzResolution{}, Principal{}, auth.authorizeCommonsRefusal(c, statusCode, commonsErr)
+			}
+
+			return authzResolution{}, Principal{}, auth.authorizeRefusal(c, statusCode, http.StatusText(statusCode))
+		}
+
+		if !authorized {
+			// The denial reason, not the transport status, picks the word: a
+			// credential the authorization service called finished is answered 401
+			// so its holder re-issues it, while every other denial stays the 403 it
+			// has always been.
+			status := denialStatus(resolution.reason)
+
+			return authzResolution{}, Principal{}, auth.authorizeRefusal(c, status, http.StatusText(status))
+		}
+	}
+
+	return resolution, principal, nil
 }
 
 func (auth *AuthClient) authorizeRefusal(_ fiber.Ctx, status int, message string) error {

@@ -84,7 +84,7 @@ func (d Dimension) resolve(c fiber.Ctx) string {
 		return c.Get(d.key)
 	case FromQuery:
 		return fiber.Query[string](c, d.key)
-	case SourceUnset:
+	case SourceUnset, FromBody:
 		return ""
 	default:
 		return ""
@@ -97,6 +97,9 @@ func (d Dimension) resolve(c fiber.Ctx) string {
 type ScopeDeclaration struct {
 	product string
 	dims    []Dimension
+	// body is the compiled plan of the dimensions read from the request body, or
+	// nil when the route reads none.
+	body *bodyPlan
 }
 
 // RequireScope declares the dimensions a route's requests carry, for the product
@@ -128,6 +131,12 @@ type RequestScope struct {
 	// Attributes are the resolved instance identifiers, keyed by declared field
 	// name — the same map that was sent to the authorization service.
 	Attributes map[string]string
+	// Sets are the identifier sets the request was authorized for, one per
+	// question asked. A route that reads its dimensions from the path asks one,
+	// equal to Attributes; a route that reads them from a body batch asks one per
+	// distinct set the body names, and Attributes then keeps only the
+	// identifiers every set shares.
+	Sets []map[string]string
 }
 
 // requestScopeContextKey is the unexported, typed key the scope is stored under.
@@ -157,6 +166,12 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (map[string]string, string
 	attributes := make(map[string]string, len(dims))
 
 	for _, dim := range dims {
+		// A body dimension is not one value of the request but one per question
+		// the body makes; the body plan reads those.
+		if dim.source == FromBody {
+			continue
+		}
+
 		value := dim.resolve(c)
 		if value == "" {
 			return nil, dim.name
@@ -246,6 +261,12 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 			return ScopeDeclaration{}, "scope dimension " + dim.name + " declares an empty request key"
 		}
 
+		// A body dimension may repeat, read from different arrays; the body plan
+		// checks each question still reads it once.
+		if dim.source == FromBody {
+			continue
+		}
+
 		// A repeated name is not a wider question, it is a narrower one: the
 		// resolved attributes live in a map, so the last occurrence silently
 		// overwrites every earlier one and the request asks about ONE dimension
@@ -256,6 +277,13 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 
 		seen[dim.name] = struct{}{}
 	}
+
+	plan, problem := compileBodyPlan(scope.dims, seen)
+	if problem != "" {
+		return ScopeDeclaration{}, problem
+	}
+
+	scope.body = plan
 
 	return scope, ""
 }
@@ -316,6 +344,9 @@ func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) erro
 
 	auth.manifestScopeMu.Lock()
 	defer auth.manifestScopeMu.Unlock()
+
+	// Route body scopes were checked against the catalog being replaced.
+	delete(auth.manifestRouteScopes, product)
 
 	if len(dims) == 0 {
 		delete(auth.manifestScopes, product)
@@ -400,16 +431,26 @@ func deriveRouteDimensions(catalog []Dimension, path string) []Dimension {
 type routeScope struct {
 	product string
 	catalog []Dimension
-	byPath  sync.Map // route path -> ScopeDeclaration
+	// routes are the product's route body scopes, keyed by method and path.
+	routes  map[string]routeBodyScope
+	byRoute sync.Map // method and route path -> ScopeDeclaration
 }
 
-func (r *routeScope) forPath(path string) ScopeDeclaration {
-	if cached, ok := r.byPath.Load(path); ok {
+func (r *routeScope) forRoute(method, path string) ScopeDeclaration {
+	key := routeScopeKey(method, path)
+
+	if cached, ok := r.byRoute.Load(key); ok {
 		return cached.(ScopeDeclaration)
 	}
 
 	scope := ScopeDeclaration{product: r.product, dims: deriveRouteDimensions(r.catalog, path)}
-	r.byPath.Store(path, scope)
+
+	if body, ok := r.routes[key]; ok {
+		scope.dims = append(scope.dims, body.dims...)
+		scope.body = body.plan
+	}
+
+	r.byRoute.Store(key, scope)
 
 	return scope
 }
@@ -429,7 +470,7 @@ func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclara
 
 	var derived *routeScope
 	if len(scopes) == 0 && len(catalog) > 0 {
-		derived = &routeScope{product: product, catalog: catalog}
+		derived = &routeScope{product: product, catalog: catalog, routes: auth.manifestRouteScopesFor(product)}
 	}
 
 	if declErr != "" && auth != nil {
