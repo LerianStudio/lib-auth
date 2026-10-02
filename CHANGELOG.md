@@ -1,3 +1,15 @@
+## [5.3.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.2.0...v5.3.0-beta.1) (2026-10-02)
+
+
+### Features
+
+* **middleware:** read scope dimensions from the request body ([9945e68](https://github.com/LerianStudio/lib-auth/commit/9945e68d2973b5511210f41c805757d4030d2ea4))
+
+
+### Bug Fixes
+
+* **middleware:** reach registered routes when the manifest scope changes ([d3d8e94](https://github.com/LerianStudio/lib-auth/commit/d3d8e94425263670a540d7a13939edbe032175e9))
+
 ## [5.2.0](https://github.com/LerianStudio/lib-auth/compare/v5.1.0...v5.2.0) (2026-10-02)
 
 
