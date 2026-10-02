@@ -84,7 +84,7 @@ func (d Dimension) resolve(c fiber.Ctx) string {
 		return c.Get(d.key)
 	case FromQuery:
 		return fiber.Query[string](c, d.key)
-	case SourceUnset:
+	case SourceUnset, FromBody:
 		return ""
 	default:
 		return ""
@@ -97,6 +97,9 @@ func (d Dimension) resolve(c fiber.Ctx) string {
 type ScopeDeclaration struct {
 	product string
 	dims    []Dimension
+	// body is the compiled plan of the dimensions read from the request body, or
+	// nil when the route reads none.
+	body *bodyPlan
 }
 
 // RequireScope declares the dimensions a route's requests carry, for the product
@@ -128,6 +131,12 @@ type RequestScope struct {
 	// Attributes are the resolved instance identifiers, keyed by declared field
 	// name — the same map that was sent to the authorization service.
 	Attributes map[string]string
+	// Sets are the identifier sets the request was authorized for, one per
+	// question asked. A route that reads its dimensions from the path asks one,
+	// equal to Attributes; a route that reads them from a body batch asks one per
+	// distinct set the body names, and Attributes then keeps only the
+	// identifiers every set shares.
+	Sets []map[string]string
 }
 
 // requestScopeContextKey is the unexported, typed key the scope is stored under.
@@ -157,6 +166,12 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (map[string]string, string
 	attributes := make(map[string]string, len(dims))
 
 	for _, dim := range dims {
+		// A body dimension is not one value of the request but one per question
+		// the body makes; the body plan reads those.
+		if dim.source == FromBody {
+			continue
+		}
+
 		value := dim.resolve(c)
 		if value == "" {
 			return nil, dim.name
@@ -231,19 +246,39 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 			", which is not the route's product " + product
 	}
 
-	seen := make(map[string]struct{}, len(scope.dims))
+	plan, problem := compileDims(scope.dims)
+	if problem != "" {
+		return ScopeDeclaration{}, problem
+	}
 
-	for _, dim := range scope.dims {
+	scope.body = plan
+
+	return scope, ""
+}
+
+// compileDims validates a route's dimensions, whatever their source, and
+// compiles the ones read from the body. It is the one check every declaration
+// passes — an explicit RequireScope and a manifest route alike.
+func compileDims(dims []Dimension) (*bodyPlan, string) {
+	seen := make(map[string]struct{}, len(dims))
+
+	for _, dim := range dims {
 		if dim.name == "" {
-			return ScopeDeclaration{}, "scope declaration carries a dimension with no name"
+			return nil, "scope declaration carries a dimension with no name"
 		}
 
 		if dim.source == SourceUnset {
-			return ScopeDeclaration{}, "scope dimension " + dim.name + " declares no source"
+			return nil, "scope dimension " + dim.name + " declares no source"
 		}
 
 		if dim.key == "" {
-			return ScopeDeclaration{}, "scope dimension " + dim.name + " declares an empty request key"
+			return nil, "scope dimension " + dim.name + " declares an empty request key"
+		}
+
+		// A body dimension may repeat, read from different arrays; the body plan
+		// checks each question still reads it once.
+		if dim.source == FromBody {
+			continue
 		}
 
 		// A repeated name is not a wider question, it is a narrower one: the
@@ -251,13 +286,13 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 		// overwrites every earlier one and the request asks about ONE dimension
 		// while the route declared several.
 		if _, duplicate := seen[dim.name]; duplicate {
-			return ScopeDeclaration{}, "scope dimension " + dim.name + " is declared more than once"
+			return nil, "scope dimension " + dim.name + " is declared more than once"
 		}
 
 		seen[dim.name] = struct{}{}
 	}
 
-	return scope, ""
+	return compileBodyPlan(dims, seen)
 }
 
 // SetManifestScope wires the product's scope catalog — the scope section of its
@@ -267,8 +302,9 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 // dims are the catalog in tree order, each read from a path parameter
 // (Dim(name, FromPath).At(param)). The declaration package builds them from the
 // embedded manifest: call declaration.WireScope(auth, manifest) rather than this
-// directly. Call it at boot, BEFORE registering routes: Authorize reads the
-// catalog when the route is registered.
+// directly. Call it at boot, BEFORE registering routes: a route registered
+// while its product has no catalog never derives one. A later call reaches the
+// routes already registered on a catalog: they derive from the new one.
 //
 // Once a product has a catalog, every route of that product that passes no
 // RequireScope sends, as attributes, the catalog dimensions whose parameter is a
@@ -316,6 +352,11 @@ func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) erro
 
 	auth.manifestScopeMu.Lock()
 	defer auth.manifestScopeMu.Unlock()
+
+	// Route body scopes were checked against the catalog being replaced, and
+	// routes already registered must stop using what they derived from it.
+	delete(auth.manifestRouteScopes, product)
+	auth.manifestGen++
 
 	if len(dims) == 0 {
 		delete(auth.manifestScopes, product)
@@ -398,18 +439,39 @@ func deriveRouteDimensions(catalog []Dimension, path string) []Dimension {
 // that relies on its product's catalog. One handler may be registered on several
 // routes, so the path — not the handler — is the key.
 type routeScope struct {
+	auth    *AuthClient
 	product string
-	catalog []Dimension
-	byPath  sync.Map // route path -> ScopeDeclaration
+	byRoute sync.Map // method and route path -> cachedRouteScope
 }
 
-func (r *routeScope) forPath(path string) ScopeDeclaration {
-	if cached, ok := r.byPath.Load(path); ok {
-		return cached.(ScopeDeclaration)
+// cachedRouteScope is a route's derived declaration together with the manifest
+// generation it was derived from, so a later SetManifestScope or
+// SetManifestRouteScope reaches routes registered before it.
+type cachedRouteScope struct {
+	generation uint64
+	scope      ScopeDeclaration
+}
+
+func (r *routeScope) forRoute(method, path string) ScopeDeclaration {
+	key := routeScopeKey(method, path)
+	generation := r.auth.manifestGeneration()
+
+	if cached, ok := r.byRoute.Load(key); ok {
+		if entry := cached.(cachedRouteScope); entry.generation == generation {
+			return entry.scope
+		}
 	}
 
-	scope := ScopeDeclaration{product: r.product, dims: deriveRouteDimensions(r.catalog, path)}
-	r.byPath.Store(path, scope)
+	generation, catalog, body, declared := r.auth.manifestRouteScope(r.product, key)
+
+	scope := ScopeDeclaration{product: r.product, dims: deriveRouteDimensions(catalog, path)}
+
+	if declared {
+		scope.dims = body.dims
+		scope.body = body.plan
+	}
+
+	r.byRoute.Store(key, cachedRouteScope{generation: generation, scope: scope})
 
 	return scope
 }
@@ -429,7 +491,7 @@ func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclara
 
 	var derived *routeScope
 	if len(scopes) == 0 && len(catalog) > 0 {
-		derived = &routeScope{product: product, catalog: catalog}
+		derived = &routeScope{auth: auth, product: product}
 	}
 
 	if declErr != "" && auth != nil {
