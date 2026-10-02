@@ -567,6 +567,12 @@ func (s *jwksKeySource) refreshLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// A tick queued while a cancel landed makes both cases ready, and select
+			// picks at random: re-check so Close never lets another fetch out.
+			if ctx.Err() != nil {
+				return
+			}
+
 			if err := s.refreshNow(ctx); err != nil {
 				s.logWarn(ctx, "background JWKS refresh failed; serving stale keys: %v", err)
 			}

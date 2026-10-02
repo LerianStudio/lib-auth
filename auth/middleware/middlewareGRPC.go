@@ -244,7 +244,10 @@ func authPayload(token, product, resource, action string, forwardM2MProduct bool
 		"action":   action,
 	}
 
-	if shouldForwardProduct(tokenTypeClaim(token), product, forwardM2MProduct) {
+	// partnerBound is false: a partner-bound token never reaches the auth service
+	// over gRPC (no route declares a scope dimension, so checkAuthorization fails
+	// closed before the call), so there is no forwarded body to mirror for it.
+	if shouldForwardProduct(tokenTypeClaim(token), product, forwardM2MProduct, false) {
 		payload["product"] = product
 	}
 

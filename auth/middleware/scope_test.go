@@ -184,7 +184,7 @@ func TestAuthorize_SendsDeclaredAttributes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	assert.JSONEq(t,
-		`{"action":"get","resource":"accounts","sub":"acme/app","attributes":{"organizationId":"org-1","ledgerId":"led-1"}}`,
+		`{"action":"get","product":"midaz","resource":"accounts","sub":"acme/app","attributes":{"organizationId":"org-1","ledgerId":"led-1"}}`,
 		rec.lastBody(t))
 }
 
