@@ -307,6 +307,13 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 	return stop, nil
 }
 
+// routeDimensionSources maps a scope.routes dimension's `from` to the source the
+// middleware reads it from. Validate accepts exactly these keys; a new source is
+// one entry here and one in the middleware.
+var routeDimensionSources = map[string]middleware.Source{
+	scopeFromBody: middleware.FromBody,
+}
+
 // WireScope wires the manifest's scope section into the authorization client, so
 // auth.Authorize derives each route's scope dimensions from the route path (see
 // middleware.AuthClient.SetManifestScope). It parses and validates the manifest
@@ -322,6 +329,10 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 //	}
 //	app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id",
 //		auth.Authorize("midaz", "ledgers", "get"), handler)
+//
+// The routes of scope.routes read the dimensions they declare from their JSON
+// request body (see middleware.AuthClient.SetManifestRouteScope); a route that
+// cannot be honoured fails here, at boot.
 //
 // A manifest without a scope section leaves the client exactly as it was.
 func WireScope(auth *middleware.AuthClient, manifest []byte) error {
@@ -349,6 +360,21 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 
 	if err := auth.SetManifestScope(m.Service, dims...); err != nil {
 		return fmt.Errorf("wire scope: %w", err)
+	}
+
+	if m.Scope == nil {
+		return nil
+	}
+
+	for _, r := range m.Scope.Routes {
+		routeDims := make([]middleware.Dimension, 0, len(r.Dimensions))
+		for _, d := range r.Dimensions {
+			routeDims = append(routeDims, middleware.Dim(d.Name, routeDimensionSources[d.From]).At(d.Field))
+		}
+
+		if err := auth.SetManifestRouteScope(m.Service, r.Method, r.Path, routeDims...); err != nil {
+			return fmt.Errorf("wire scope: %w", err)
+		}
 	}
 
 	return nil

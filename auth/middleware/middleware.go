@@ -41,6 +41,13 @@ type AuthClient struct {
 	// SetManifestScope and read when a route is registered.
 	manifestScopes  map[string][]Dimension
 	manifestScopeMu sync.RWMutex
+	// manifestRouteScopes holds, per product, the dimensions single routes
+	// read from their request body, set by SetManifestRouteScope and keyed by
+	// method and path. Guarded by manifestScopeMu.
+	manifestRouteScopes map[string]map[string]routeBodyScope
+	// manifestGen counts manifest scope changes; routes compare it to what they
+	// derived from. Guarded by manifestScopeMu.
+	manifestGen uint64
 
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
@@ -658,7 +665,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		// sending it absent would quietly ask a question the route did not promise.
 		scope := scope
 		if derived != nil {
-			scope = derived.forPath(c.Route().Path)
+			scope = derived.forRoute(c.Route().Method, c.Route().Path)
 		}
 
 		attributes, missing := resolveAttributes(c, scope.dims)
@@ -670,45 +677,18 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			return auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
 		}
 
-		resolution, principal := auth.checkAuthorizationWithPrincipal(ctx, authzParams{
+		resolution, principal, questions, refusal := auth.authorizeRequest(ctx, c, authzParams{
 			product:     product,
 			resource:    resource,
 			action:      action,
 			accessToken: accessToken,
 			clientIP:    clientIP,
-			attributes:  attributes,
 			declared:    scope.declared(),
-		})
-
-		// checkResult, not legacyResult: an Access Manager that never produced an
-		// answer must be refused as 503, not rendered as a 403 the caller reads as
-		// "you are Forbidden" or a 500 that names the wrong subsystem. Fail-closed
-		// is unchanged — the request is still refused — only the word is corrected,
-		// which is what puts the outage in the rail's 5xx alarms.
-		authorized, statusCode, err := resolution.checkResult()
-		if err != nil {
-			var commonsErr commons.Response
-			if errors.As(err, &commonsErr) {
-				span.End()
-
-				return auth.authorizeCommonsRefusal(c, statusCode, commonsErr)
-			}
-
+		}, scope, attributes)
+		if refusal != nil {
 			span.End()
 
-			return auth.authorizeRefusal(c, statusCode, http.StatusText(statusCode))
-		}
-
-		if !authorized {
-			span.End()
-
-			// The denial reason, not the transport status, picks the word: a
-			// credential the authorization service called finished is answered 401
-			// so its holder re-issues it, while every other denial stays the 403 it
-			// has always been.
-			status := denialStatus(resolution.reason)
-
-			return auth.authorizeRefusal(c, status, http.StatusText(status))
+			return refusal
 		}
 
 		publishPrincipal(c, span, principal)
@@ -721,7 +701,8 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			c.Locals(PartnerLocalsKey, resolution.partner)
 			c.SetContext(context.WithValue(c.Context(), requestScopeContextKey{}, RequestScope{
 				Partner:    resolution.partner,
-				Attributes: attributes,
+				Attributes: sharedAttributes(questions),
+				Sets:       questions,
 			}))
 		}
 
@@ -729,6 +710,100 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 
 		return c.Next()
 	}
+}
+
+// authorizeRequest decides one request: it derives the caller once, works out
+// the questions the request makes, and asks them in order under ONE deadline for
+// the whole request, stopping at the first that is not allowed. It returns the
+// last resolution and the questions asked, or the refusal.
+//
+// The body is read only for a partner-bound credential. The authorization
+// service consumes attributes only to decide for a partner; for every other
+// credential it ignores them. So any other caller is decided exactly as before
+// body dimensions existed: one question, carrying only the dimensions read from
+// the path, headers or query, and a body this layer never parses.
+//
+// The questions are asked one after another, not concurrently: they are few
+// (distinct sets, capped), the decision cache answers repeats without a call,
+// the first denial ends the request, and the single deadline bounds the total.
+func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, params authzParams, scope ScopeDeclaration, attributes map[string]string) (authzResolution, Principal, []map[string]string, error) {
+	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
+
+	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
+	defer span.End()
+
+	span.SetAttributes(attribute.String("app.request.request_id", reqID))
+
+	// One budget for the whole request, however many questions it makes.
+	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
+	defer cancel()
+
+	caller, failure := auth.deriveCaller(ctx, span, params.accessToken, params.product)
+	if failure != nil {
+		return authzResolution{}, Principal{}, nil, auth.refusalFor(c, *failure)
+	}
+
+	// A route that reads dimensions from its body asks one question per
+	// distinct set of identifiers the body names, and every one must be
+	// allowed. A body that cannot be read for them is the caller's to fix:
+	// refused before any call, naming the field, and never let through.
+	questions, badBody := scope.questions(c, attributes, caller.partner != "")
+	if badBody != nil {
+		return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, http.StatusBadRequest, badBody.Error())
+	}
+
+	asked := questions
+	if len(asked) == 0 {
+		asked = []map[string]string{nil}
+	}
+
+	var (
+		resolution authzResolution
+		principal  Principal
+	)
+
+	for _, question := range asked {
+		params.attributes = question
+
+		resolution, principal = auth.decide(ctx, span, params, caller)
+
+		if refusal := auth.refusalFor(c, resolution); refusal != nil {
+			return authzResolution{}, Principal{}, nil, refusal
+		}
+	}
+
+	return resolution, principal, questions, nil
+}
+
+// refusalFor is the error a resolution refuses the request with, or nil when it
+// allows it.
+func (auth *AuthClient) refusalFor(c fiber.Ctx, resolution authzResolution) error {
+	// checkResult, not legacyResult: an Access Manager that never produced an
+	// answer must be refused as 503, not rendered as a 403 the caller reads as
+	// "you are Forbidden" or a 500 that names the wrong subsystem. Fail-closed
+	// is unchanged — the request is still refused — only the word is corrected,
+	// which is what puts the outage in the rail's 5xx alarms.
+	authorized, statusCode, err := resolution.checkResult()
+	if err != nil {
+		var commonsErr commons.Response
+		if errors.As(err, &commonsErr) {
+			return auth.authorizeCommonsRefusal(c, statusCode, commonsErr)
+		}
+
+		return auth.authorizeRefusal(c, statusCode, http.StatusText(statusCode))
+	}
+
+	if !authorized {
+		// The denial reason, not the transport status, picks the word: a
+		// credential the authorization service called finished is answered 401
+		// so its holder re-issues it, while every other denial stays the 403 it
+		// has always been.
+		status := denialStatus(resolution.reason)
+
+		return auth.authorizeRefusal(c, status, http.StatusText(status))
+	}
+
+	return nil
 }
 
 func (auth *AuthClient) authorizeRefusal(_ fiber.Ctx, status int, message string) error {
@@ -860,7 +935,7 @@ func (auth *AuthClient) Check(ctx context.Context, product, resource, action, ac
 		return true, http.StatusOK, nil
 	}
 
-	resolution, _ := auth.checkAuthorizationWithPrincipal(ctx, authzParams{
+	resolution := auth.checkAuthorizationResolution(ctx, authzParams{
 		product:     product,
 		resource:    resource,
 		action:      action,
@@ -1023,7 +1098,7 @@ func shouldForwardProduct(userType, product string, forwardM2MProduct, partnerBo
 // the pre-IP behavior for every deployed access-manager. The auth service
 // interprets the IP; this layer never parses or validates it.
 func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resource, action, accessToken, clientIP string) (bool, int, error) {
-	resolution, _ := auth.checkAuthorizationWithPrincipal(ctx, authzParams{
+	resolution := auth.checkAuthorizationResolution(ctx, authzParams{
 		product:     product,
 		resource:    resource,
 		action:      action,
@@ -1034,21 +1109,15 @@ func (auth *AuthClient) checkAuthorization(ctx context.Context, product, resourc
 	return resolution.checkResult()
 }
 
-// checkAuthorizationWithPrincipal is checkAuthorization plus the caller identity it
-// derived on the way to the decision, so the Fiber middleware can publish it on the
-// request context. The identity is built BEFORE the decision cache is consulted, so
-// a cache hit carries the same principal a round-trip would have.
+// checkAuthorizationResolution decides one question for callers without a
+// request scope (checkAuthorization, Check): it derives the caller and asks once,
+// under one deadline. Authorize, which may ask several questions for one request,
+// runs the same two steps through authorizeRequest instead.
 //
-// It is the whole implementation; checkAuthorization is the narrower view of it
-// that callers without a request scope (the gRPC interceptors) use, which is why
-// it takes authzParams rather than the positional arguments: a scoped route adds
-// the declared dimensions and their values, and every caller that declares none
-// sends exactly what it sent before.
-//
-// It returns the full authzResolution rather than the legacy triple: Authorize and
-// Check read checkResult, so both tell an outage from a denial, while the gRPC
-// interceptors still read legacyResult and behave exactly as before.
-func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, p authzParams) (authzResolution, Principal) {
+// It returns the full authzResolution rather than the legacy triple: Check reads
+// checkResult, so it tells an outage from a denial, while the gRPC interceptors
+// still read legacyResult and behave exactly as before.
+func (auth *AuthClient) checkAuthorizationResolution(ctx context.Context, p authzParams) authzResolution {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -1064,15 +1133,42 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, p a
 	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
 	defer cancel()
 
-	principal, claims, statusCode, err := auth.derivePrincipalWithClaims(ctx, span, p.accessToken, p.product)
-	if err != nil {
-		// A local token failure: the request never reaches the Access Manager, so
-		// this is never an outage.
-		return authzResolution{statusCode: statusCode, err: err}, Principal{}
+	caller, failure := auth.deriveCaller(ctx, span, p.accessToken, p.product)
+	if failure != nil {
+		return *failure
 	}
 
-	userType, sub := principal.Type, principal.Subject
+	resolution, _ := auth.decide(ctx, span, p, caller)
+
+	return resolution
+}
+
+// authzCaller is who a request's credential is, derived once per request: the
+// principal and the partner the credential is bound to ("" when it is not).
+type authzCaller struct {
+	principal Principal
+	partner   string
+}
+
+// deriveCaller verifies the token and derives the caller from its claims. A
+// failure is local — the request never reaches the Access Manager — so it is
+// never an outage.
+func (auth *AuthClient) deriveCaller(ctx context.Context, span trace.Span, accessToken, product string) (authzCaller, *authzResolution) {
+	principal, claims, statusCode, err := auth.derivePrincipalWithClaims(ctx, span, accessToken, product)
+	if err != nil {
+		return authzCaller{}, &authzResolution{statusCode: statusCode, err: err}
+	}
+
 	partner, _ := claims["partner"].(string)
+
+	return authzCaller{principal: principal, partner: partner}, nil
+}
+
+// decide asks the authorization service the question p carries, for a caller
+// already derived. ctx carries the request's deadline.
+func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzParams, caller authzCaller) (authzResolution, Principal) {
+	principal, partner := caller.principal, caller.partner
+	userType, sub := principal.Type, principal.Subject
 
 	// Fail closed on an unscopeable partner. A credential bound to a partner is
 	// only ever allowed to reach SOME instances; a route that declares no
@@ -1125,7 +1221,7 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, p a
 		tracePayload[k] = v
 	}
 
-	err = tracing.SetSpanAttributesFromValue(span, "app.request.payload", tracePayload, nil)
+	err := tracing.SetSpanAttributesFromValue(span, "app.request.payload", tracePayload, nil)
 	if err != nil {
 		tracing.HandleSpanError(span, "Failed to convert request body to JSON string", err)
 
