@@ -373,12 +373,10 @@ func TestAuthorize_BodyScope_BadBodyIsABadRequest(t *testing.T) {
 			app := fiber.New()
 			app.Post(batchPath, auth.Authorize("midaz", "transactions", "post"), probe.handle)
 
-			for _, token := range []string{partnerToken("acme/p1"), userToken()} {
-				got := doPost(t, app, batchPath, token, tt.body)
+			got := doPost(t, app, batchPath, partnerToken("acme/p1"), tt.body)
 
-				assert.Equal(t, http.StatusBadRequest, got.status)
-				assert.Contains(t, got.body, `"`+tt.field+`"`, "the refusal names the field")
-			}
+			assert.Equal(t, http.StatusBadRequest, got.status)
+			assert.Contains(t, got.body, `"`+tt.field+`"`, "the refusal names the field")
 
 			assert.Equal(t, int64(0), srv.hits.Load(), "no authorization call")
 			assert.Equal(t, int64(0), probe.calls.Load(), "no handler call")

@@ -656,10 +656,15 @@ scope:
   request.
 * The route still derives the dimensions its path carries; one dimension cannot
   come from both.
-* A body that is not JSON, a field that is missing, empty or not a string, an
-  array that is missing or empty, or a key repeated in another letter case is
-  answered **400 naming the field**, with no authorization call and no handler
-  call. The handler reads the body untouched.
+* The body is read **only for a partner-bound credential**. Every other caller is
+  decided as before: one authorization call carrying only the dimensions read
+  from the path, headers or query, and the body left to the handler.
+* For a partner-bound credential, a body that is not JSON, a field that is
+  missing, empty or not a string, an array that is missing or empty, or a key
+  repeated in another letter case is answered **400 naming the field**, with no
+  authorization call and no handler call. The handler reads the body untouched.
+* All the questions of one request share one timeout (`AUTH_TIMEOUT`), the
+  token is verified once, and the first denial ends the request.
 * Validation at `WireScope`: `from` must be `body`, `field` is required, `name`
   must be a catalog dimension, routes are unique by method and path, and the
   fields must fit together; any error fails the boot.

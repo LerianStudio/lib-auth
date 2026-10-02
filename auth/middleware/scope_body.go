@@ -32,9 +32,11 @@ import (
 // once on a route, from different arrays, but each question must carry every
 // dimension the route reads from the body.
 //
-// A body that is not JSON, a field that is absent, empty or not a string, and an
-// array that is empty or not an array are refused with 400 naming the field,
-// before any authorization call and without calling the handler.
+// The body is read only for a partner-bound credential; any other caller is
+// decided on the dimensions from the other sources alone, as before. For a
+// partner, a body that is not JSON, a field that is absent, empty or not a
+// string, and an array that is empty or not an array are refused with 400 naming
+// the field, before any authorization call and without calling the handler.
 //
 // It is appended after the other sources so their values do not move.
 const FromBody Source = FromQuery + 1
@@ -566,25 +568,13 @@ func (auth *AuthClient) manifestRouteScope(product, key string) (uint64, []Dimen
 	return auth.manifestGen, auth.manifestScopes[product], body, declared
 }
 
-// resolve reads every declared dimension out of the request and returns each set
-// of identifiers the request must be authorized for: none when the route
-// declares nothing, one when no dimension is read from the body, and otherwise
-// one per question the body makes, each carrying the dimensions read from the
-// other sources. missing names a non-body dimension whose source carried
-// nothing; badBody describes a body that cannot be read for its dimensions.
-func (s ScopeDeclaration) resolve(c fiber.Ctx) ([]map[string]string, string, *errBodyScope) {
-	attributes, missing := resolveAttributes(c, s.dims)
-	if missing != "" {
-		return nil, missing, nil
-	}
-
-	questions, badBody := s.questions(c.Body(), attributes)
-
-	return questions, "", badBody
-}
-
-func (s ScopeDeclaration) questions(body []byte, attributes map[string]string) ([]map[string]string, *errBodyScope) {
-	if s.body == nil {
+// questions returns each set of identifiers the request must be authorized
+// for: none when the route declares nothing; the dimensions read from the path,
+// headers or query alone when the route reads nothing from the body or the
+// caller is not partner-bound (the body is then never read); and otherwise one
+// set per question the body makes, each carrying those other dimensions.
+func (s ScopeDeclaration) questions(c fiber.Ctx, attributes map[string]string, readBody bool) ([]map[string]string, *errBodyScope) {
+	if s.body == nil || !readBody {
 		if attributes == nil {
 			return nil, nil
 		}
@@ -592,7 +582,7 @@ func (s ScopeDeclaration) questions(body []byte, attributes map[string]string) (
 		return []map[string]string{attributes}, nil
 	}
 
-	return s.body.questions(body, attributes)
+	return s.body.questions(c.Body(), attributes)
 }
 
 // sharedAttributes returns the identifiers every question carries with the same
