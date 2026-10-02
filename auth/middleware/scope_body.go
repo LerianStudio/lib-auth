@@ -541,30 +541,29 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 		dims: routeDims,
 		plan: plan,
 	}
+	auth.manifestGen++
 
 	return nil
 }
 
-// manifestRouteScopesFor returns a copy of the product's route body scopes.
-func (auth *AuthClient) manifestRouteScopesFor(product string) map[string]routeBodyScope {
-	if auth == nil {
-		return nil
-	}
-
+// manifestGeneration is the count of manifest scope changes, read by routes to
+// tell whether what they derived is still current.
+func (auth *AuthClient) manifestGeneration() uint64 {
 	auth.manifestScopeMu.RLock()
 	defer auth.manifestScopeMu.RUnlock()
 
-	routes := auth.manifestRouteScopes[product]
-	if len(routes) == 0 {
-		return nil
-	}
+	return auth.manifestGen
+}
 
-	out := make(map[string]routeBodyScope, len(routes))
-	for k, v := range routes {
-		out[k] = v
-	}
+// manifestRouteScope returns, in one consistent read, the manifest generation,
+// the product's catalog and the scope declared for the route key, if any.
+func (auth *AuthClient) manifestRouteScope(product, key string) (uint64, []Dimension, routeBodyScope, bool) {
+	auth.manifestScopeMu.RLock()
+	defer auth.manifestScopeMu.RUnlock()
 
-	return out
+	body, declared := auth.manifestRouteScopes[product][key]
+
+	return auth.manifestGen, auth.manifestScopes[product], body, declared
 }
 
 // resolve reads every declared dimension out of the request and returns each set

@@ -302,8 +302,9 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 // dims are the catalog in tree order, each read from a path parameter
 // (Dim(name, FromPath).At(param)). The declaration package builds them from the
 // embedded manifest: call declaration.WireScope(auth, manifest) rather than this
-// directly. Call it at boot, BEFORE registering routes: Authorize reads the
-// catalog when the route is registered.
+// directly. Call it at boot, BEFORE registering routes: a route registered
+// while its product has no catalog never derives one. A later call reaches the
+// routes already registered on a catalog: they derive from the new one.
 //
 // Once a product has a catalog, every route of that product that passes no
 // RequireScope sends, as attributes, the catalog dimensions whose parameter is a
@@ -352,8 +353,10 @@ func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) erro
 	auth.manifestScopeMu.Lock()
 	defer auth.manifestScopeMu.Unlock()
 
-	// Route body scopes were checked against the catalog being replaced.
+	// Route body scopes were checked against the catalog being replaced, and
+	// routes already registered must stop using what they derived from it.
 	delete(auth.manifestRouteScopes, product)
+	auth.manifestGen++
 
 	if len(dims) == 0 {
 		delete(auth.manifestScopes, product)
@@ -436,28 +439,39 @@ func deriveRouteDimensions(catalog []Dimension, path string) []Dimension {
 // that relies on its product's catalog. One handler may be registered on several
 // routes, so the path — not the handler — is the key.
 type routeScope struct {
+	auth    *AuthClient
 	product string
-	catalog []Dimension
-	// routes are the product's route body scopes, keyed by method and path.
-	routes  map[string]routeBodyScope
-	byRoute sync.Map // method and route path -> ScopeDeclaration
+	byRoute sync.Map // method and route path -> cachedRouteScope
+}
+
+// cachedRouteScope is a route's derived declaration together with the manifest
+// generation it was derived from, so a later SetManifestScope or
+// SetManifestRouteScope reaches routes registered before it.
+type cachedRouteScope struct {
+	generation uint64
+	scope      ScopeDeclaration
 }
 
 func (r *routeScope) forRoute(method, path string) ScopeDeclaration {
 	key := routeScopeKey(method, path)
+	generation := r.auth.manifestGeneration()
 
 	if cached, ok := r.byRoute.Load(key); ok {
-		return cached.(ScopeDeclaration)
+		if entry := cached.(cachedRouteScope); entry.generation == generation {
+			return entry.scope
+		}
 	}
 
-	scope := ScopeDeclaration{product: r.product, dims: deriveRouteDimensions(r.catalog, path)}
+	generation, catalog, body, declared := r.auth.manifestRouteScope(r.product, key)
 
-	if body, ok := r.routes[key]; ok {
-		scope.dims = append(scope.dims, body.dims...)
+	scope := ScopeDeclaration{product: r.product, dims: deriveRouteDimensions(catalog, path)}
+
+	if declared {
+		scope.dims = body.dims
 		scope.body = body.plan
 	}
 
-	r.byRoute.Store(key, scope)
+	r.byRoute.Store(key, cachedRouteScope{generation: generation, scope: scope})
 
 	return scope
 }
@@ -477,7 +491,7 @@ func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclara
 
 	var derived *routeScope
 	if len(scopes) == 0 && len(catalog) > 0 {
-		derived = &routeScope{product: product, catalog: catalog, routes: auth.manifestRouteScopesFor(product)}
+		derived = &routeScope{auth: auth, product: product}
 	}
 
 	if declErr != "" && auth != nil {

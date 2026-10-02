@@ -689,3 +689,63 @@ func TestAuthorize_RouteScope_HeaderAndBodyShareOnePipeline(t *testing.T) {
 		{"organizationId": "org-1", "ledgerId": "led-2"},
 	}, srv.attributeCalls())
 }
+
+// A catalog reset after a route was registered reaches that route: it never
+// keeps reading the body with the plan the reset dropped.
+func TestSetManifestScope_ResetAfterRegistrationReachesTheRoute(t *testing.T) {
+	t.Parallel()
+
+	srv := newDecidingAuthServer(t)
+	auth := bodyScopedClient(t, srv.URL, http.MethodPost, batchPath,
+		Dim("organizationId", FromBody).At("organizationId"),
+		Dim("ledgerId", FromBody).At("items[].ledgerId"))
+
+	app := fiber.New()
+	app.Post(batchPath, auth.Authorize("midaz", "transactions", "post"), ok)
+
+	const body = `{"organizationId":"org-1","items":[{"ledgerId":"led-1"}],"target":{"id":"led-9"}}`
+
+	// Positive control: the route reads the body as declared.
+	require.Equal(t, http.StatusOK, doPost(t, app, batchPath, partnerToken("acme/p1"), body).status)
+	require.Equal(t, int64(1), srv.hits.Load())
+
+	// Reset: no catalog, no route scope. The partner request is refused before
+	// the call, as on any route that declares nothing.
+	require.NoError(t, auth.SetManifestScope("midaz"))
+	assert.Equal(t, http.StatusForbidden, doPost(t, app, batchPath, partnerToken("acme/p1"), body).status)
+	assert.Equal(t, int64(1), srv.hits.Load(), "the dropped plan is not used")
+
+	// Redeclared with another field: the route reads the new one.
+	require.NoError(t, auth.SetManifestScope("midaz", manifestDims()...))
+	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, batchPath,
+		Dim("organizationId", FromBody).At("organizationId"),
+		Dim("ledgerId", FromBody).At("target.id")))
+
+	assert.Equal(t, http.StatusOK, doPost(t, app, batchPath, partnerToken("acme/p1"), body).status)
+	calls := srv.attributeCalls()
+	assert.Equal(t, map[string]string{"organizationId": "org-1", "ledgerId": "led-9"}, calls[len(calls)-1])
+}
+
+// A route scope declared after the route already served a request reaches it.
+func TestSetManifestRouteScope_AfterARequestReachesTheRoute(t *testing.T) {
+	t.Parallel()
+
+	srv := newDecidingAuthServer(t)
+	auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
+	require.NoError(t, auth.SetManifestScope("midaz", manifestDims()...))
+
+	app := fiber.New()
+	app.Post(batchPath, auth.Authorize("midaz", "transactions", "post"), ok)
+
+	const body = `{"organizationId":"org-1"}`
+
+	// Nothing declared yet: refused before the call.
+	require.Equal(t, http.StatusForbidden, doPost(t, app, batchPath, partnerToken("acme/p1"), body).status)
+	require.Equal(t, int64(0), srv.hits.Load())
+
+	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, batchPath,
+		Dim("organizationId", FromBody).At("organizationId")))
+
+	assert.Equal(t, http.StatusOK, doPost(t, app, batchPath, partnerToken("acme/p1"), body).status)
+	assert.Equal(t, []map[string]string{{"organizationId": "org-1"}}, srv.attributeCalls())
+}

@@ -45,6 +45,9 @@ type AuthClient struct {
 	// read from their request body, set by SetManifestRouteScope and keyed by
 	// method and path. Guarded by manifestScopeMu.
 	manifestRouteScopes map[string]map[string]routeBodyScope
+	// manifestGen counts manifest scope changes; routes compare it to what they
+	// derived from. Guarded by manifestScopeMu.
+	manifestGen uint64
 
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
