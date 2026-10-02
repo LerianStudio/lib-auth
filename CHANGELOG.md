@@ -1,3 +1,10 @@
+## [5.3.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.3.0-beta.1...v5.3.0-beta.2) (2026-10-02)
+
+
+### Bug Fixes
+
+* **middleware:** read the body scope for partners only, under one deadline ([93877e3](https://github.com/LerianStudio/lib-auth/commit/93877e339c10e1822baa763794bd50b04240c531))
+
 ## [5.3.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.2.0...v5.3.0-beta.1) (2026-10-02)
 
 
