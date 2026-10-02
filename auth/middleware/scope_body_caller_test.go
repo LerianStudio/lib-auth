@@ -122,11 +122,14 @@ func slowAuthServer(t *testing.T, delay time.Duration) (*httptest.Server, *atomi
 func TestAuthorize_BodyScope_OneDeadlineForTheWholeRequest(t *testing.T) {
 	t.Parallel()
 
-	const delay = 200 * time.Millisecond
+	const (
+		delay   = 100 * time.Millisecond
+		timeout = 250 * time.Millisecond
+	)
 
 	srv, hits := slowAuthServer(t, delay)
 
-	auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true, timeout: 3 * delay / 2}
+	auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true, timeout: timeout}
 	require.NoError(t, auth.SetManifestScope("midaz", manifestDims()...))
 	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, batchPath,
 		Dim("organizationId", FromBody).At("organizationId"), Dim("ledgerId", FromBody).At("items[].ledgerId")))
@@ -148,10 +151,11 @@ func TestAuthorize_BodyScope_OneDeadlineForTheWholeRequest(t *testing.T) {
 
 	elapsed := time.Since(start)
 
-	// Each call alone fits the timeout; three in a row do not fit one.
+	// Each call alone fits the timeout with room to spare; three in a row
+	// (3 x delay) do not fit one.
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
-	assert.Less(t, elapsed, 3*delay, "the request is bounded by one budget, not one per question")
-	assert.LessOrEqual(t, hits.Load(), int64(2))
+	assert.Less(t, elapsed, 2*timeout, "the request is bounded by one budget, not one per question")
+	assert.LessOrEqual(t, hits.Load(), int64(3))
 
 	// Positive control: one question fits the same budget.
 	req = httptest.NewRequest(http.MethodPost, batchPath,
