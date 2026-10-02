@@ -149,8 +149,8 @@ func TestAuthorize_BodyScope_SingleValue(t *testing.T) {
 
 	srv := newDecidingAuthServer(t)
 	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath,
-		BodyDim("organizationId", "organizationId"),
-		BodyDim("ledgerId", "ledgerId"))
+		Dim("organizationId", FromBody).At("organizationId"),
+		Dim("ledgerId", FromBody).At("ledgerId"))
 
 	probe := &handlerProbe{}
 	app := fiber.New()
@@ -170,8 +170,8 @@ func TestAuthorize_BodyScope_SingleValueOutsideIsRefused(t *testing.T) {
 
 	srv := newDecidingAuthServer(t, "led-out")
 	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath,
-		BodyDim("organizationId", "organizationId"),
-		BodyDim("ledgerId", "ledgerId"))
+		Dim("organizationId", FromBody).At("organizationId"),
+		Dim("ledgerId", FromBody).At("ledgerId"))
 
 	probe := &handlerProbe{}
 	app := fiber.New()
@@ -193,8 +193,8 @@ func batchClient(t *testing.T, srv *decidingAuthServer) *AuthClient {
 	t.Helper()
 
 	return bodyScopedClient(t, srv.URL, http.MethodPost, batchPath,
-		BodyDim("organizationId", "organizationId"),
-		BodyDim("ledgerId", "items[].ledgerId"))
+		Dim("organizationId", FromBody).At("organizationId"),
+		Dim("ledgerId", FromBody).At("items[].ledgerId"))
 }
 
 // Every value of a batch is asked about. Repeated values are asked once.
@@ -251,10 +251,10 @@ func TestAuthorize_BodyScope_FieldsOfOneElementTravelTogether(t *testing.T) {
 
 	srv := newDecidingAuthServer(t)
 	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath,
-		BodyDim("organizationId", "debits[].organizationId"),
-		BodyDim("ledgerId", "debits[].ledgerId"),
-		BodyDim("organizationId", "credits[].organizationId"),
-		BodyDim("ledgerId", "credits[].ledgerId"))
+		Dim("organizationId", FromBody).At("debits[].organizationId"),
+		Dim("ledgerId", FromBody).At("debits[].ledgerId"),
+		Dim("organizationId", FromBody).At("credits[].organizationId"),
+		Dim("ledgerId", FromBody).At("credits[].ledgerId"))
 
 	app := fiber.New()
 	app.Post(directPath, auth.Authorize("midaz", "transactions", "post"), ok)
@@ -276,8 +276,8 @@ func TestAuthorize_BodyScope_NestedArraysInheritTheEnclosingElement(t *testing.T
 
 	srv := newDecidingAuthServer(t, "led-out")
 	auth := bodyScopedClient(t, srv.URL, http.MethodPost, batchPath,
-		BodyDim("organizationId", "transactions[].organizationId"),
-		BodyDim("ledgerId", "transactions[].legs[].ledgerId"))
+		Dim("organizationId", FromBody).At("transactions[].organizationId"),
+		Dim("ledgerId", FromBody).At("transactions[].legs[].ledgerId"))
 
 	app := fiber.New()
 	app.Post(batchPath, auth.Authorize("midaz", "transactions", "post"), ok)
@@ -433,7 +433,7 @@ func TestAuthorize_BodyScope_PathAndBodyOnOneRoute(t *testing.T) {
 	const route = "/v1/organizations/:organization_id/transactions"
 
 	srv := newDecidingAuthServer(t, "led-out")
-	auth := bodyScopedClient(t, srv.URL, http.MethodPost, route, BodyDim("ledgerId", "items[].ledgerId"))
+	auth := bodyScopedClient(t, srv.URL, http.MethodPost, route, Dim("ledgerId", FromBody).At("items[].ledgerId"))
 
 	app := fiber.New()
 	app.Post(route, auth.Authorize("midaz", "transactions", "post"), ok)
@@ -459,7 +459,7 @@ func TestAuthorize_BodyScope_OnlyForItsRoute(t *testing.T) {
 	t.Parallel()
 
 	srv := newDecidingAuthServer(t)
-	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath, BodyDim("organizationId", "organizationId"))
+	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath, Dim("organizationId", FromBody).At("organizationId"))
 
 	handler := auth.Authorize("midaz", "transactions", "post")
 
@@ -524,7 +524,7 @@ func TestAuthorize_BodyScope_ExplicitDeclaration(t *testing.T) {
 
 	app := fiber.New()
 	app.Post(batchPath, auth.Authorize("midaz", "transactions", "post",
-		RequireScope("midaz", BodyDim("organizationId", "organizationId"), BodyDim("ledgerId", "items[].ledgerId"))), ok)
+		RequireScope("midaz", Dim("organizationId", FromBody).At("organizationId"), Dim("ledgerId", FromBody).At("items[].ledgerId"))), ok)
 
 	got := doPost(t, app, batchPath, partnerToken("acme/p1"), `{"organizationId":"org-1","items":[{"ledgerId":"led-1"}]}`)
 	assert.Equal(t, http.StatusOK, got.status)
@@ -581,23 +581,23 @@ func TestSetManifestRouteScope_Validation(t *testing.T) {
 		wantErr string
 	}{
 		{name: "no_dims", method: "POST", path: directPath, wantErr: "no dimension"},
-		{name: "empty_method", method: "", path: directPath, dims: []Dimension{BodyDim("organizationId", "organizationId")}, wantErr: "method"},
-		{name: "relative_path", method: "POST", path: "v2/x", dims: []Dimension{BodyDim("organizationId", "organizationId")}, wantErr: "path"},
-		{name: "path_dim", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromPath).At("organization_id")}, wantErr: "body"},
-		{name: "outside_catalog", method: "POST", path: directPath, dims: []Dimension{BodyDim("portfolioId", "portfolioId")}, wantErr: "portfolioId"},
-		{name: "empty_field", method: "POST", path: directPath, dims: []Dimension{BodyDim("organizationId", "")}, wantErr: "field"},
-		{name: "empty_segment", method: "POST", path: directPath, dims: []Dimension{BodyDim("organizationId", "a..b")}, wantErr: "a..b"},
-		{name: "trailing_array", method: "POST", path: directPath, dims: []Dimension{BodyDim("organizationId", "ids[]")}, wantErr: "ids[]"},
-		{name: "bad_brackets", method: "POST", path: directPath, dims: []Dimension{BodyDim("organizationId", "a[0].b")}, wantErr: "a[0].b"},
+		{name: "empty_method", method: "", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("organizationId")}, wantErr: "method"},
+		{name: "relative_path", method: "POST", path: "v2/x", dims: []Dimension{Dim("organizationId", FromBody).At("organizationId")}, wantErr: "path"},
+		{name: "path_dim", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromPath).At("organization_id")}, wantErr: "derived from the path"},
+		{name: "outside_catalog", method: "POST", path: directPath, dims: []Dimension{Dim("portfolioId", FromBody).At("portfolioId")}, wantErr: "portfolioId"},
+		{name: "empty_field", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("")}, wantErr: "empty request key"},
+		{name: "empty_segment", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("a..b")}, wantErr: "a..b"},
+		{name: "trailing_array", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("ids[]")}, wantErr: "ids[]"},
+		{name: "bad_brackets", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("a[0].b")}, wantErr: "a[0].b"},
 		{name: "same_name_same_element", method: "POST", path: directPath, dims: []Dimension{
-			BodyDim("organizationId", "items[].organizationId"), BodyDim("organizationId", "items[].orgId"),
+			Dim("organizationId", FromBody).At("items[].organizationId"), Dim("organizationId", FromBody).At("items[].orgId"),
 		}, wantErr: "more than once"},
 		{name: "element_misses_a_dimension", method: "POST", path: directPath, dims: []Dimension{
-			BodyDim("organizationId", "debits[].organizationId"), BodyDim("ledgerId", "debits[].ledgerId"),
-			BodyDim("organizationId", "credits[].organizationId"),
+			Dim("organizationId", FromBody).At("debits[].organizationId"), Dim("ledgerId", FromBody).At("debits[].ledgerId"),
+			Dim("organizationId", FromBody).At("credits[].organizationId"),
 		}, wantErr: "ledgerId"},
 		{name: "also_on_the_path", method: "POST", path: "/v1/organizations/:organization_id/x", dims: []Dimension{
-			BodyDim("organizationId", "organizationId"),
+			Dim("organizationId", FromBody).At("organizationId"),
 		}, wantErr: "path"},
 	}
 
@@ -620,11 +620,11 @@ func TestSetManifestRouteScope_NeedsTheCatalog(t *testing.T) {
 
 	auth := &AuthClient{Logger: &testLogger{}}
 
-	err := auth.SetManifestRouteScope("midaz", http.MethodPost, directPath, BodyDim("organizationId", "organizationId"))
+	err := auth.SetManifestRouteScope("midaz", http.MethodPost, directPath, Dim("organizationId", FromBody).At("organizationId"))
 	require.Error(t, err)
 
 	var nilAuth *AuthClient
-	require.Error(t, nilAuth.SetManifestRouteScope("midaz", http.MethodPost, directPath, BodyDim("organizationId", "organizationId")))
+	require.Error(t, nilAuth.SetManifestRouteScope("midaz", http.MethodPost, directPath, Dim("organizationId", FromBody).At("organizationId")))
 }
 
 // Resetting the catalog drops the routes declared against it.
@@ -632,7 +632,7 @@ func TestSetManifestScope_ResetDropsRouteScopes(t *testing.T) {
 	t.Parallel()
 
 	srv := newDecidingAuthServer(t)
-	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath, BodyDim("organizationId", "organizationId"))
+	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath, Dim("organizationId", FromBody).At("organizationId"))
 	require.NoError(t, auth.SetManifestScope("midaz"))
 	require.NoError(t, auth.SetManifestScope("midaz", manifestDims()...))
 
@@ -643,7 +643,7 @@ func TestSetManifestScope_ResetDropsRouteScopes(t *testing.T) {
 	assert.Equal(t, int64(0), srv.hits.Load())
 }
 
-func TestRequireScope_BodyDimValidation(t *testing.T) {
+func TestRequireScope_BodyFieldValidation(t *testing.T) {
 	t.Parallel()
 
 	srv := newDecidingAuthServer(t)
@@ -651,12 +651,41 @@ func TestRequireScope_BodyDimValidation(t *testing.T) {
 
 	app := fiber.New()
 	app.Post("/bad", auth.Authorize("midaz", "transactions", "post",
-		RequireScope("midaz", BodyDim("organizationId", "items[]"))), ok)
+		RequireScope("midaz", Dim("organizationId", FromBody).At("items[]"))), ok)
 	app.Post("/split", auth.Authorize("midaz", "transactions", "post",
-		RequireScope("midaz", BodyDim("organizationId", "a[].organizationId"), BodyDim("ledgerId", "b[].ledgerId"))), ok)
+		RequireScope("midaz", Dim("organizationId", FromBody).At("a[].organizationId"), Dim("ledgerId", FromBody).At("b[].ledgerId"))), ok)
 
 	assert.Equal(t, http.StatusForbidden, doPost(t, app, "/bad", userToken(), `{"items":["x"]}`).status)
 	assert.Equal(t, http.StatusForbidden, doPost(t, app, "/split", userToken(),
 		`{"a":[{"organizationId":"o"}],"b":[{"ledgerId":"l"}]}`).status)
 	assert.Equal(t, int64(0), srv.hits.Load(), "a misdeclared route refuses before the call")
+}
+
+// A route's dimensions go through one pipeline whatever their source: a header
+// dimension declared on the route joins every question its body makes.
+func TestAuthorize_RouteScope_HeaderAndBodyShareOnePipeline(t *testing.T) {
+	t.Parallel()
+
+	srv := newDecidingAuthServer(t)
+	auth := bodyScopedClient(t, srv.URL, http.MethodPost, batchPath,
+		Dim("organizationId", FromHeader).At("X-Organization-Id"),
+		Dim("ledgerId", FromBody).At("items[].ledgerId"))
+
+	app := fiber.New()
+	app.Post(batchPath, auth.Authorize("midaz", "transactions", "post"), ok)
+
+	req := httptest.NewRequest(http.MethodPost, batchPath, strings.NewReader(`{"items":[{"ledgerId":"led-1"},{"ledgerId":"led-2"}]}`))
+	req.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
+	req.Header.Set("X-Organization-Id", "org-1")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, []map[string]string{
+		{"organizationId": "org-1", "ledgerId": "led-1"},
+		{"organizationId": "org-1", "ledgerId": "led-2"},
+	}, srv.attributeCalls())
 }

@@ -104,7 +104,7 @@ type DeclarationRouteDimension struct {
 	From string `json:"from,omitempty" yaml:"from,omitempty"`
 	// Field is the value's path in the JSON body: object keys separated by '.',
 	// a key followed by "[]" being an array whose every element is read
-	// ("organizationId", "items[].ledgerId"). See middleware.BodyDim.
+	// ("id", "items[].id"). See middleware.FromBody.
 	Field string `json:"field,omitempty" yaml:"field,omitempty"`
 }
 
@@ -514,7 +514,7 @@ func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) [
 				violations = append(violations, fmt.Sprintf("%s: %q is not a scope dimension of the catalog", dimPrefix, d.Name))
 			}
 
-			if d.From != scopeFromBody {
+			if _, ok := routeDimensionSources[d.From]; !ok {
 				violations = append(violations, fmt.Sprintf("%s: from must be %q, got %q", dimPrefix, scopeFromBody, d.From))
 			}
 

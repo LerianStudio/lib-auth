@@ -665,7 +665,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			scope = derived.forRoute(c.Route().Method, c.Route().Path)
 		}
 
-		attributes, missing := resolveAttributes(c, scope.dims)
+		questions, missing, badBody := scope.resolve(c)
 		if missing != "" {
 			logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
 
@@ -678,7 +678,6 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		// distinct set of identifiers the body names, and every one must be
 		// allowed. A body that cannot be read for them is the caller's to fix:
 		// refused before any call, naming the field, and never let through.
-		questions, badBody := scope.questions(c.Body(), attributes)
 		if badBody != nil {
 			span.End()
 

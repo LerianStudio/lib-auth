@@ -6,10 +6,35 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/gofiber/fiber/v3"
 )
 
-// FromBody reads a field of the JSON request body. The dimension's key is the
-// field's path in the body (see BodyDim for the syntax).
+// FromBody reads a field of the JSON request body. Declare it like any other
+// source, with the field's path as the key: Dim(name, FromBody).At(field).
+//
+// field is a path of object keys separated by '.', where a key followed by "[]"
+// is an array whose every element is read:
+//
+//	"id"                      the top-level key
+//	"target.id"               a key of a nested object
+//	"items[].id"              the key in every element of the array
+//	"groups[].items[].id"     the key in every element of nested arrays
+//
+// The last key names a string; keys cannot contain '.', '[' or ']'.
+//
+// Every value the path reaches must be inside the credential's scope: each array
+// element is its own question to the authorization service, and the request is
+// refused when any one of them is denied. Fields under the same array element
+// travel together in one question, and a field of an enclosing element — and
+// every dimension read from another source (path, header, query) — joins every
+// question of the elements nested in it. A dimension can be declared more than
+// once on a route, from different arrays, but each question must carry every
+// dimension the route reads from the body.
+//
+// A body that is not JSON, a field that is absent, empty or not a string, and an
+// array that is empty or not an array are refused with 400 naming the field,
+// before any authorization call and without calling the handler.
 //
 // It is appended after the other sources so their values do not move.
 const FromBody Source = FromQuery + 1
@@ -19,34 +44,6 @@ const FromBody Source = FromQuery + 1
 // batch could turn one request into an unbounded number of calls to the
 // authorization service. A body over the cap is refused, never partly checked.
 const maxBodyScopeQuestions = 100
-
-// BodyDim declares a dimension read from the JSON request body, at field.
-//
-// field is a path of object keys separated by '.', where a key followed by "[]"
-// is an array whose every element is read:
-//
-//	"organizationId"                  the top-level key
-//	"source.ledgerId"                 a key of a nested object
-//	"items[].ledgerId"                the key in every element of the array
-//	"transactions[].legs[].ledgerId"  the key in every element of nested arrays
-//
-// The last key names a string; keys cannot contain '.', '[' or ']'.
-//
-// Every value the path reaches must be inside the credential's scope: each array
-// element is its own question to the authorization service, and the request is
-// refused when any one of them is denied. Fields under the same array element
-// travel together in one question (a leg's organization with that leg's ledger),
-// and a field of an enclosing element joins every question of the elements
-// nested in it. A dimension can be declared more than once on a route, from
-// different arrays (the debit legs and the credit legs), but each question must
-// carry every dimension the route reads from the body.
-//
-// A body that is not JSON, a field that is absent, empty or not a string, and an
-// array that is empty or not an array are refused with 400 naming the field,
-// before any authorization call and without calling the handler.
-func BodyDim(name, field string) Dimension {
-	return Dimension{name: name, source: FromBody, key: field}
-}
 
 // bodySegment is one key of a body field path.
 type bodySegment struct {
@@ -156,7 +153,7 @@ func compileBodyPlan(dims []Dimension, constants map[string]struct{}) (*bodyPlan
 		}
 
 		if _, clash := constants[dim.name]; clash {
-			return nil, "scope dimension " + dim.name + " is read from the body and also from the route path or headers"
+			return nil, "scope dimension " + dim.name + " is read from the body and also from the path, a header or the query"
 		}
 
 		segments, problem := parseBodyField(dim.key)
@@ -454,7 +451,8 @@ func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 	return w.set.add(values)
 }
 
-// routeBodyScope is one route's body dimensions, as declared by the manifest.
+// routeBodyScope is one route's dimensions — those its path carries and those
+// the manifest declares for it — compiled once.
 type routeBodyScope struct {
 	dims []Dimension
 	plan *bodyPlan
@@ -465,14 +463,15 @@ func routeScopeKey(method, path string) string {
 }
 
 // SetManifestRouteScope declares the dimensions ONE route of the product reads
-// from its JSON request body, for a product whose catalog SetManifestScope
-// already wired: some routes carry the organization or ledger they address in
-// the body, not in the path, and only the route knows where.
+// from somewhere other than its path — its JSON body (FromBody) — for a product
+// whose catalog SetManifestScope already wired: some routes carry the instance
+// they address in the body, and only the route knows where.
 //
 // method and path identify the route exactly as it is registered (the full path,
-// group prefixes included, with its ':' parameters). dims are BodyDim
-// declarations of catalog dimensions. The route still derives the dimensions its
-// path carries; a dimension cannot be read from both. The declaration package
+// group prefixes included, with its ':' parameters). dims are catalog
+// dimensions declared with Dim(name, source).At(key), validated exactly as a
+// RequireScope declaration is. The route still derives the dimensions its path
+// carries; a dimension cannot be read from both. The declaration package
 // builds these from the manifest's scope.routes: call declaration.WireScope
 // rather than this directly, at boot, BEFORE registering routes.
 //
@@ -510,8 +509,11 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 	}
 
 	for _, dim := range dims {
-		if dim.source != FromBody {
-			return errors.New("manifest route scope: dimension " + dim.name + " on " + method + " " + path + " must be read from the body")
+		// The route's path dimensions are derived from its path, as on every
+		// other route; the manifest route declares the ones read elsewhere.
+		if dim.source == FromPath {
+			return errors.New("manifest route scope: dimension " + dim.name + " on " + method + " " + path +
+				" is derived from the path and must not be declared on the route")
 		}
 
 		if _, ok := known[dim.name]; !ok {
@@ -520,12 +522,9 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 		}
 	}
 
-	onPath := make(map[string]struct{})
-	for _, dim := range deriveRouteDimensions(catalog, path) {
-		onPath[dim.name] = struct{}{}
-	}
+	routeDims := append(deriveRouteDimensions(catalog, path), dims...)
 
-	plan, problem := compileBodyPlan(dims, onPath)
+	plan, problem := compileDims(routeDims)
 	if problem != "" {
 		return errors.New("manifest route scope: " + method + " " + path + ": " + problem)
 	}
@@ -539,7 +538,7 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 	}
 
 	auth.manifestRouteScopes[product][routeScopeKey(method, path)] = routeBodyScope{
-		dims: append([]Dimension(nil), dims...),
+		dims: routeDims,
 		plan: plan,
 	}
 
@@ -568,10 +567,23 @@ func (auth *AuthClient) manifestRouteScopesFor(product string) map[string]routeB
 	return out
 }
 
-// questions returns every set of identifiers the request must be authorized
-// for: none when the route declares nothing, the resolved attributes alone when
-// it reads nothing from the body, and otherwise one set per question the body
-// makes.
+// resolve reads every declared dimension out of the request and returns each set
+// of identifiers the request must be authorized for: none when the route
+// declares nothing, one when no dimension is read from the body, and otherwise
+// one per question the body makes, each carrying the dimensions read from the
+// other sources. missing names a non-body dimension whose source carried
+// nothing; badBody describes a body that cannot be read for its dimensions.
+func (s ScopeDeclaration) resolve(c fiber.Ctx) ([]map[string]string, string, *errBodyScope) {
+	attributes, missing := resolveAttributes(c, s.dims)
+	if missing != "" {
+		return nil, missing, nil
+	}
+
+	questions, badBody := s.questions(c.Body(), attributes)
+
+	return questions, "", badBody
+}
+
 func (s ScopeDeclaration) questions(body []byte, attributes map[string]string) ([]map[string]string, *errBodyScope) {
 	if s.body == nil {
 		if attributes == nil {

@@ -665,8 +665,9 @@ scope:
   fields must fit together; any error fails the boot.
 * `scope.routes` is read by this library only: it is never published and is not
   part of `CanonicalHash`, so adding it changes neither.
-* Without a manifest, `RequireScope("midaz", authMiddleware.BodyDim("ledgerId", "items[].ledgerId"))`
-  declares the same on one route. `ScopeFromContext(...).Sets` lists every set
+* Without a manifest, `RequireScope(product, authMiddleware.Dim("ledgerId", authMiddleware.FromBody).At("items[].ledgerId"))`
+  declares the same on one route — a body field is one more source of the same
+  `Dim`, next to `FromPath`, `FromHeader` and `FromQuery`. `ScopeFromContext(...).Sets` lists every set
   that was authorized; `Attributes` keeps the identifiers all sets share.
 
 **Publication.** The scope section is published to the access manager whenever

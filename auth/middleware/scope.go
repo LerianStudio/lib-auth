@@ -246,19 +246,33 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 			", which is not the route's product " + product
 	}
 
-	seen := make(map[string]struct{}, len(scope.dims))
+	plan, problem := compileDims(scope.dims)
+	if problem != "" {
+		return ScopeDeclaration{}, problem
+	}
 
-	for _, dim := range scope.dims {
+	scope.body = plan
+
+	return scope, ""
+}
+
+// compileDims validates a route's dimensions, whatever their source, and
+// compiles the ones read from the body. It is the one check every declaration
+// passes — an explicit RequireScope and a manifest route alike.
+func compileDims(dims []Dimension) (*bodyPlan, string) {
+	seen := make(map[string]struct{}, len(dims))
+
+	for _, dim := range dims {
 		if dim.name == "" {
-			return ScopeDeclaration{}, "scope declaration carries a dimension with no name"
+			return nil, "scope declaration carries a dimension with no name"
 		}
 
 		if dim.source == SourceUnset {
-			return ScopeDeclaration{}, "scope dimension " + dim.name + " declares no source"
+			return nil, "scope dimension " + dim.name + " declares no source"
 		}
 
 		if dim.key == "" {
-			return ScopeDeclaration{}, "scope dimension " + dim.name + " declares an empty request key"
+			return nil, "scope dimension " + dim.name + " declares an empty request key"
 		}
 
 		// A body dimension may repeat, read from different arrays; the body plan
@@ -272,20 +286,13 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 		// overwrites every earlier one and the request asks about ONE dimension
 		// while the route declared several.
 		if _, duplicate := seen[dim.name]; duplicate {
-			return ScopeDeclaration{}, "scope dimension " + dim.name + " is declared more than once"
+			return nil, "scope dimension " + dim.name + " is declared more than once"
 		}
 
 		seen[dim.name] = struct{}{}
 	}
 
-	plan, problem := compileBodyPlan(scope.dims, seen)
-	if problem != "" {
-		return ScopeDeclaration{}, problem
-	}
-
-	scope.body = plan
-
-	return scope, ""
+	return compileBodyPlan(dims, seen)
 }
 
 // SetManifestScope wires the product's scope catalog — the scope section of its
