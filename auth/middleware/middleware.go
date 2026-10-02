@@ -37,6 +37,11 @@ type AuthClient struct {
 	Enabled bool
 	Logger  obs.Logger
 
+	// manifestScopes holds each product's scope catalog, set by
+	// SetManifestScope and read when a route is registered.
+	manifestScopes  map[string][]Dimension
+	manifestScopeMu sync.RWMutex
+
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
 	// "{product}/" prefix from stored resources and dual-match a bare request.
@@ -559,7 +564,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 	// request: a misdeclared route is a programming error and every one of its
 	// requests is refused, which is what makes it visible on the first call
 	// instead of on the first partner.
-	scope, declErr := resolveDeclaration(product, scopes)
+	scope, derived, declErr := auth.registerRouteScope(product, scopes)
 
 	return func(c fiber.Ctx) error {
 		// Inherit the ambient request context instead of extracting inbound trace
@@ -651,6 +656,11 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		// the request does not carry is refused here, before the round-trip: an
 		// identifier with no value cannot be matched against a partner's scope, and
 		// sending it absent would quietly ask a question the route did not promise.
+		scope := scope
+		if derived != nil {
+			scope = derived.forPath(c.Route().Path)
+		}
+
 		attributes, missing := resolveAttributes(c, scope.dims)
 		if missing != "" {
 			logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)

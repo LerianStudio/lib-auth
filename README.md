@@ -588,6 +588,61 @@ if scope, ok := authMiddleware.ScopeFromContext(c.Context()); ok {
 }
 ```
 
+### Deriving the scope from the manifest
+
+A product that declares a `scope` section in its declaration manifest
+(`permissions.yaml`) does not need to repeat it on every route:
+
+```yaml
+scope:
+  dimensions:            # tree order: first = top of the funnel
+    - { name: organizationId, from: path, param: organization_id, required: true,  collection: organizations, label: "Organization" }
+    - { name: ledgerId,       from: path, param: ledger_id,       multi: true,     collection: ledgers,       label: "Ledger" }
+```
+
+```go
+auth := authMiddleware.NewAuthClient(authHost, authEnabled, logger)
+if err := declaration.WireScope(auth, embeddedManifest); err != nil { // before registering routes
+    return err
+}
+
+f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
+    auth.Authorize("midaz", "accounts", "get"), // no RequireScope
+    accountHandler.GetAccounts)
+```
+
+* The scope is registered under the manifest's `service`, which must be the
+  product the routes pass to `Authorize`. Routes of other products are untouched.
+* A dimension applies to a route when one **whole** path segment is
+  `:<param>` — `:organization_id`, not a literal `organization_id`, not
+  `:organization_id.json`. Applied dimensions are sent in manifest order, as the
+  same `attributes` an explicit declaration sends.
+* A route whose path carries none of the parameters behaves as a route that
+  declares nothing (a partner-bound credential is refused with 403).
+* An explicit `RequireScope` still works and wins, but may only name dimensions
+  the manifest declares; one that names another is refused on every request and
+  logged at ERROR when the route is registered.
+* Validation: `from` must be `path`; `name`, `param` and `collection` are
+  required and names and params are unique; `label` is optional.
+
+**Publication.** The scope section is published to the access manager whenever
+the product's auth is on, independently of the permission declaration switch.
+With the permission declaration on, the full manifest (scope included) is
+published as before. With it off, build the publisher anyway when auth is on and
+set `ScopeOnly`, which sends only `service`, `version` and `scope`:
+
+```go
+pub, err := declaration.New(declaration.Config{
+    // ... same fields as today ...
+    ScopeOnly: !declarationEnabled,
+})
+```
+
+`WireFromEnv` does this by itself: with `IDP_DECLARATION_ENABLED` off and
+`PLUGIN_AUTH_ENABLED=true` it publishes the scope alone. A manifest without a
+`scope` section publishes nothing in that mode. A scope that cannot be published
+(missing configuration, access manager down) is logged and never fails the boot.
+
 ## 📡 Expected Authorization Service Response
 
 The authorization service should return a JSON response in the following format:
