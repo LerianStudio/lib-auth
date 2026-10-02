@@ -1,3 +1,11 @@
+## [5.2.0](https://github.com/LerianStudio/lib-auth/compare/v5.1.0...v5.2.0) (2026-10-02)
+
+
+### Features
+
+* **declaration:** add scope dimensions to the manifest ([c64695b](https://github.com/LerianStudio/lib-auth/commit/c64695bf1d4bf8336fa22a3705a200f11e62c7d2))
+* **middleware:** derive route scope from the manifest ([ae4e3b4](https://github.com/LerianStudio/lib-auth/commit/ae4e3b4673c5733a15b3ac92770c606b536ade65))
+
 ## [5.2.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.1.0...v5.2.0-beta.1) (2026-10-02)
 
 
