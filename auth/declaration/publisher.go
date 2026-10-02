@@ -43,6 +43,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LerianStudio/lib-auth/v5/auth/endpoint"
 	"github.com/LerianStudio/lib-auth/v5/auth/obs"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/LerianStudio/lib-observability/v4/runtime"
@@ -75,6 +76,9 @@ const (
 	// spanName / componentName label observability signals.
 	spanName      = "declaration.publisher.publish"
 	componentName = "declaration"
+
+	// componentPublisher names the publisher in an *endpoint.InsecureError.
+	componentPublisher = "declaration publisher"
 )
 
 // TokenMinter mints an M2M access token via client_credentials. Both lib-auth v2
@@ -136,6 +140,17 @@ type Config struct {
 	// A zero Timeout on the copy becomes 30s. Minting the M2M token does not go
 	// through this client; it goes through Auth.
 	HTTPClient *http.Client
+	// RequireHTTPS makes New refuse an IdentityAddr that is not an absolute https
+	// URL with a host (http in any letter case, loopback included), with an
+	// *endpoint.InsecureError matching endpoint.ErrInsecure. It also refuses an
+	// Auth that declares, through a RequiresHTTPS() bool method, that it allows a
+	// plaintext Access Manager: *middleware.AuthClient built without
+	// middleware.WithRequireHTTPS(true) would otherwise mint the M2M token by
+	// sending ClientSecret over http. A TokenMinter with no such method declares no
+	// posture and is accepted; its transport is then the consumer's responsibility.
+	// Off by default: the consumer decides the posture (typically every posture but
+	// development) and the library reads no environment variable for it.
+	RequireHTTPS bool
 }
 
 // Publisher publishes the plugin's permissions manifest to the access-manager at
@@ -311,10 +326,14 @@ func validateConfig(cfg Config) error {
 		return errors.New("config: ClientSecret is required")
 	}
 
-	// IdentityAddr must be an absolute http(s) URL: parse cleanly, carry an http or
-	// https scheme, and a non-empty host. A hostless or wrong-scheme value would
-	// otherwise pass here and only fail later inside doPut as a *retryable* PUT
-	// error, masking a boot-time misconfiguration.
+	if cfg.RequireHTTPS {
+		return validateHTTPSPosture(cfg)
+	}
+
+	// Without RequireHTTPS, IdentityAddr must be an absolute http or https URL:
+	// parse cleanly, carry an http or https scheme, and a non-empty host. A hostless
+	// or wrong-scheme value would otherwise pass here and only fail later inside
+	// doPut as a *retryable* PUT error, masking a boot-time misconfiguration.
 	u, err := url.Parse(cfg.IdentityAddr)
 	if err != nil {
 		return fmt.Errorf("config: IdentityAddr is not a valid URL: %w", err)
@@ -322,6 +341,28 @@ func validateConfig(cfg Config) error {
 
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("config: IdentityAddr must be an absolute http(s) URL, got %q", cfg.IdentityAddr)
+	}
+
+	return nil
+}
+
+// httpsPosture is what a TokenMinter implements to declare whether it refuses a
+// plaintext Access Manager; *middleware.AuthClient does.
+type httpsPosture interface {
+	RequiresHTTPS() bool
+}
+
+// validateHTTPSPosture is validateConfig's IdentityAddr rule under RequireHTTPS:
+// the PUT target must be https, and a minter that declares a posture must
+// require https too, or the token mint would carry ClientSecret over http.
+func validateHTTPSPosture(cfg Config) error {
+	if err := endpoint.RequireHTTPS(componentPublisher, cfg.IdentityAddr); err != nil {
+		return fmt.Errorf("config: IdentityAddr: %w", err)
+	}
+
+	if posture, ok := cfg.Auth.(httpsPosture); ok && !posture.RequiresHTTPS() {
+		return errors.New("config: RequireHTTPS is set but Auth allows a plaintext Access Manager; " +
+			"build it with middleware.NewAuthClientWithOptions(..., middleware.WithRequireHTTPS(true)) so the M2M token is never minted over http")
 	}
 
 	return nil

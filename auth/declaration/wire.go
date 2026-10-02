@@ -23,6 +23,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/LerianStudio/lib-auth/v5/auth/endpoint"
 	"github.com/LerianStudio/lib-auth/v5/auth/middleware"
 	"github.com/LerianStudio/lib-auth/v5/auth/obs"
 )
@@ -123,6 +124,14 @@ type WireInput struct {
 	// the publisher's default. It is passed to Config.HTTPClient, so the same
 	// guarantees hold: the publisher uses a copy that never follows a redirect.
 	HTTPClient *http.Client
+	// RequireHTTPS refuses a plaintext Access Manager or identity: the auth host
+	// (PLUGIN_AUTH_HOST / PLUGIN_AUTH_ADDRESS) and IDP_HOST must both be https URLs
+	// with a host, checked before anything is dialled, and the error names the
+	// variable that is not. It flows into middleware.WithRequireHTTPS and
+	// Config.RequireHTTPS. Off by default. There is deliberately no environment
+	// variable for it: the posture is the consumer's decision (typically every
+	// posture but development), passed in code.
+	RequireHTTPS bool
 }
 
 // WireFromEnv builds and starts the D7 declaration publisher from the FIXED,
@@ -144,6 +153,10 @@ type WireInput struct {
 //     can never succeed, and since the publish fail-opens, omitting them used to
 //     produce a green pod that silently never declared. Deeper URL validation is
 //     delegated to New.
+//   - in.RequireHTTPS => IDP_HOST and then the auth host must be https URLs with a
+//     host; a refusal wraps *endpoint.InsecureError and starts with the variable
+//     name (IDP_HOST, or PLUGIN_AUTH_HOST naming its alias PLUGIN_AUTH_ADDRESS).
+//     Nothing is dialled before both pass.
 //
 // Fail-open by design: on the happy path Start never blocks on identity
 // reachability (a failing initial publish is logged in the background, not
@@ -187,11 +200,23 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 			envAuthEnabled, envDeclarationEnabled)
 	}
 
-	// Build the token minter. NewAuthClient takes an obs.Logger and resolves a
-	// nil one to its own default, so the caller's logger goes straight through.
-	// Host and enablement were validated above, so this cannot be handed the
-	// empty-host/disabled combination that silently yields an empty token.
-	auth := middleware.NewAuthClient(authHost, authEnabled, in.Logger)
+	// Under the https requirement the identity host is checked first, so a refused
+	// IDP_HOST stops the boot before the auth client's health check dials anything.
+	if in.RequireHTTPS {
+		if err := endpoint.RequireHTTPS(componentPublisher, identityHost); err != nil {
+			return noop, fmt.Errorf("%s: %w", envIdentityHost, err)
+		}
+	}
+
+	// Build the token minter. NewAuthClientWithOptions takes an obs.Logger and
+	// resolves a nil one to its own default, so the caller's logger goes straight
+	// through. Host and enablement were validated above, so this cannot be handed
+	// the empty-host/disabled combination that silently yields an empty token.
+	auth, err := middleware.NewAuthClientWithOptions(authHost, authEnabled, in.Logger,
+		middleware.WithRequireHTTPS(in.RequireHTTPS))
+	if err != nil {
+		return noop, fmt.Errorf("%s (or its alias %s): %w", envAuthHost, envAuthHostDeprecated, err)
+	}
 
 	// Assemble the Config. Cache/Interval/FailFast are hardcoded to the
 	// pilot-safe values (no extra env knobs now): no dedup cache, startup-only,
@@ -208,6 +233,7 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 		FailFast:     false,
 		Logger:       in.Logger,
 		HTTPClient:   in.HTTPClient,
+		RequireHTTPS: in.RequireHTTPS,
 	}
 
 	pub, err := New(cfg)

@@ -746,6 +746,43 @@ Any 3xx from the identity service fails the publish with a deterministic `*decla
 
 An injected client cannot turn redirect-following back on. The publisher takes a shallow copy of your client, so your client is never changed, and sets the copy's redirect policy to refuse. If your client has no `Timeout`, the copy gets the 30s default, so a `FailFast` boot cannot hang. Minting the M2M token does not use this client. It goes through the auth client, which already refuses redirects.
 
+## 🔐 Requiring https to the Access Manager
+
+By default the library talks to whatever address you give it, `http` included. You can make it refuse anything but `https` for every outbound call it makes to the Access Manager and the identity provider. The requirement is opt-in, and existing callers are unaffected: `NewAuthClient` behaves exactly as before.
+
+```go
+// Your service decides the posture; the library reads no ENV_NAME for it.
+requireHTTPS := !isDevelopment
+
+authClient, err := middleware.NewAuthClientWithOptions(address, enabled, logger,
+    middleware.WithRequireHTTPS(requireHTTPS))
+if err != nil {
+    return err // *endpoint.InsecureError: the address is not https
+}
+
+stop, err := declaration.WireFromEnv(ctx, declaration.WireInput{
+    Slug:         "plugin-fees",
+    Manifest:     manifest,
+    Logger:       logger,
+    RequireHTTPS: requireHTTPS,
+})
+```
+
+With the requirement on, an address passes only when it is an absolute `https` URL with a host. `http` in any letter case is refused, loopback included, and so are a missing scheme, any other scheme, a missing host and an address that does not parse. The address is checked exactly as it will be dialled, without trimming.
+
+| Outbound call | How you turn it on | What happens to a non-https address |
+|---|---|---|
+| Authorization client: health check at construction | `NewAuthClientWithOptions(..., WithRequireHTTPS(true))` | Construction fails before anything is dialled. An empty address is accepted, because it never dials. |
+| Authorization: Fiber `Authorize`, `AuthorizeHTTP`, `Check`, gRPC unary and stream interceptors | Same option | `Address` is re-checked on every call, because it is an exported field. A changed address is answered `503` (gRPC `Unavailable`) without a call, a retry, a breaker failure or a cache write. |
+| Token minting, `GetApplicationToken` | Same option | Returns the typed error before the request is built, so the client secret never travels over `http`. |
+| Declaration publisher, `IdentityAddr` | `declaration.Config.RequireHTTPS` | `New` fails. It also refuses an `Auth` that declares it allows plaintext (an `AuthClient` built without the option). A `TokenMinter` that declares no posture is accepted, and its transport is your responsibility. |
+| `WireFromEnv` | `WireInput.RequireHTTPS` | Fails before anything is dialled, naming `IDP_HOST` or `PLUGIN_AUTH_HOST` (alias `PLUGIN_AUTH_ADDRESS`). There is no environment variable for the requirement. |
+| JWKS key source | `JWKSConfig.RequireHTTPS` | `NewJWKSKeySource` fails, loopback `http` included. Every redirect hop must be `https` too. Setting it together with `AllowInsecureURL` is a construction error. |
+
+Every refusal is an `*endpoint.InsecureError` that matches `endpoint.ErrInsecure` with `errors.Is`. It carries the component that refused, the reason, the parsed scheme and the address with any userinfo password masked. An address that does not parse is never echoed.
+
+A redirect cannot downgrade an `https` address. The authorization client and the declaration publisher never follow a redirect, and the JWKS source checks every hop against the same rule.
+
 ## 🚧 Error Handling
 
 The middleware captures and logs the following error types:

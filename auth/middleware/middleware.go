@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/LerianStudio/lib-auth/v5/auth/bearer"
+	"github.com/LerianStudio/lib-auth/v5/auth/endpoint"
 	"github.com/LerianStudio/lib-auth/v5/auth/obs"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
@@ -165,6 +166,10 @@ type AuthClient struct {
 	// httpErrorHandler renders AuthorizeHTTP's refusals. Nil means
 	// defaultHTTPErrorHandler. Set with WithHTTPErrorHandler.
 	httpErrorHandler HTTPErrorHandler
+
+	// requireHTTPS is set once by WithRequireHTTPS at construction and only read
+	// afterwards; see insecureAddress for how it is enforced at each call.
+	requireHTTPS bool
 }
 
 // AuthResponse is the decision body /v1/authorize returns on a 2xx. It is part of
@@ -402,7 +407,87 @@ func (auth *AuthClient) WithKeySource(source KeySource) *AuthClient {
 // NewAuthClient creates a new instance of AuthClient.
 // It checks the health of the authorization service if the client is enabled and the address is provided.
 // If the service is healthy, it logs a successful connection message; otherwise, it logs the failure reason.
+//
+// It is NewAuthClientWithOptions with no options, which can never fail, so its
+// behaviour is exactly what it was before options existed. A consumer that must
+// refuse a plaintext Access Manager uses NewAuthClientWithOptions with
+// WithRequireHTTPS instead.
 func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient {
+	c, _ := NewAuthClientWithOptions(address, enabled, logger)
+
+	return c
+}
+
+// componentAuthorizationClient names this client in an *endpoint.InsecureError.
+const componentAuthorizationClient = "authorization client"
+
+// ClientOption configures NewAuthClientWithOptions. A nil ClientOption is ignored.
+type ClientOption func(*clientOptions)
+
+type clientOptions struct {
+	requireHTTPS bool
+}
+
+// WithRequireHTTPS makes the client refuse to talk to the Access Manager over
+// anything but https. With required true:
+//   - NewAuthClientWithOptions returns an *endpoint.InsecureError (matching
+//     endpoint.ErrInsecure) for a non-empty address that is not an absolute https
+//     URL with a host, before the health check, so nothing is ever dialled;
+//   - every authorization call (Authorize, AuthorizeHTTP, Check and both gRPC
+//     interceptors) re-checks Address at the moment of the call and, if it was
+//     changed to a non-https value, refuses as unavailable (503, gRPC
+//     Unavailable) without dialling, retrying, tripping the breaker or caching;
+//   - GetApplicationToken re-checks Address the same way and returns the typed
+//     error, so the client secret never travels in plaintext.
+//
+// The consumer decides when it applies (typically: every posture except
+// development); the library reads no environment variable for it. The last
+// WithRequireHTTPS passed wins.
+func WithRequireHTTPS(required bool) ClientOption {
+	return func(o *clientOptions) { o.requireHTTPS = required }
+}
+
+// RequiresHTTPS reports whether the client was built with WithRequireHTTPS(true).
+// It is fixed at construction. A nil receiver reports false.
+func (auth *AuthClient) RequiresHTTPS() bool {
+	return auth != nil && auth.requireHTTPS
+}
+
+// insecureAddress returns the *endpoint.InsecureError for the client's current
+// Address when the client requires https and that address is not https, and nil
+// otherwise. It is evaluated at every outbound call because Address is an
+// exported field that can change after construction. A nil receiver returns nil.
+func (auth *AuthClient) insecureAddress() error {
+	if !auth.RequiresHTTPS() {
+		return nil
+	}
+
+	return endpoint.RequireHTTPS(componentAuthorizationClient, auth.Address)
+}
+
+// NewAuthClientWithOptions is NewAuthClient with options. With no options it
+// behaves exactly like NewAuthClient and never returns an error.
+//
+// With WithRequireHTTPS(true) and a non-empty address that is not https
+// (whether or not the client is enabled), it returns a nil client and an error
+// wrapping *endpoint.InsecureError, and makes no connection at all: the address
+// is validated before the health check. An empty address is accepted, because a
+// client with no address never dials; AUTH_REQUIRED decides what it does then.
+func NewAuthClientWithOptions(address string, enabled bool, logger obs.Logger, opts ...ClientOption) (*AuthClient, error) {
+	var o clientOptions
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+
+	if o.requireHTTPS && address != "" {
+		if err := endpoint.RequireHTTPS(componentAuthorizationClient, address); err != nil {
+			return nil, fmt.Errorf("new auth client: %w", err)
+		}
+	}
+
 	l := resolveLogger(logger)
 
 	verifyKeys, verifyIssuer := loadVerification(l)
@@ -440,6 +525,7 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 		staticVerificationConfigured:  staticVerificationConfigured,
 		trustedProxies:                trustedProxies,
 		noProxiesLine:                 noProxiesLine,
+		requireHTTPS:                  o.requireHTTPS,
 	}
 
 	if !enabled || address == "" {
@@ -448,7 +534,7 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 				"AUTH_REQUIRED is set but auth is disabled or address is empty: middleware will fail closed (refuse to serve)")
 		}
 
-		return c
+		return c, nil
 	}
 
 	client := sharedHTTPClient
@@ -460,21 +546,21 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 	if err != nil {
 		logErrorf(context.Background(), l, failedToConnectMsg, err)
 
-		return c
+		return c, nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logErrorf(context.Background(), l, failedToConnectMsg, resp.Status)
 
-		return c
+		return c, nil
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logErrorf(context.Background(), l, "Failed to read response body: %v", err)
 
-		return c
+		return c, nil
 	}
 
 	if string(body) == "healthy" {
@@ -483,7 +569,7 @@ func NewAuthClient(address string, enabled bool, logger obs.Logger) *AuthClient 
 		logErrorf(context.Background(), l, failedToConnectMsg, string(body))
 	}
 
-	return c
+	return c, nil
 }
 
 // canAuthorize reports whether the client is able to perform an authorization
@@ -863,6 +949,24 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, p a
 		attribute.String("app.request.request_id", reqID),
 	)
 
+	// The https requirement is checked before the token, the cache, the breaker and
+	// the retry: an address that is not https is a refused configuration, not an
+	// Access Manager outage, so it is answered as unavailable without dialling,
+	// without a retry, without a breaker failure and without a cache write.
+	if err := auth.insecureAddress(); err != nil {
+		logErrorf(ctx, auth.Logger, "Authorization refused (fail closed): %v", err)
+		tracing.HandleSpanError(span, "Access Manager address is not https", err)
+
+		return authzResolution{statusCode: http.StatusServiceUnavailable, unavailableErr: err}, Principal{}
+	}
+
+	return auth.authorizeWithPrincipal(ctx, span, p)
+}
+
+// authorizeWithPrincipal is checkAuthorizationWithPrincipal past its span and its
+// https guard: the deadline, the principal, the request body, the decision cache
+// and the resilience layers.
+func (auth *AuthClient) authorizeWithPrincipal(ctx context.Context, span trace.Span, p authzParams) (authzResolution, Principal) {
 	// Per-request deadline: propagate the caller's cancellation/deadline to the
 	// authz call (the request was previously built without a context, so an upstream
 	// cancel could not abort it) and cap the retry budget. Defaults to 30s.
@@ -1006,6 +1110,15 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 
 	if !auth.Enabled || auth.Address == "" {
 		return "", nil
+	}
+
+	// Checked before the request is built: with the https requirement on, the
+	// client secret never leaves over a plaintext address.
+	if err := auth.insecureAddress(); err != nil {
+		logErrorf(ctx, auth.Logger, "Failed to get application token: %v", err)
+		tracing.HandleSpanError(span, "Access Manager address is not https", err)
+
+		return "", fmt.Errorf("get application token: %w", err)
 	}
 
 	client := sharedHTTPClient
