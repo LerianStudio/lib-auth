@@ -18,6 +18,7 @@ package declaration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -120,6 +121,92 @@ type WireInput struct {
 	Logger obs.Logger
 }
 
+// wireScopeOnly publishes the manifest's scope section alone, for a deployment
+// whose permission declaration is off. It runs only when PLUGIN_AUTH_ENABLED is
+// true and the manifest declares a scope; otherwise it reads and validates
+// nothing else, which keeps the declaration-off boot exactly as it was for every
+// manifest without a scope.
+//
+// It never fails the boot. The scope is a catalog the identity provider uses to
+// validate partner writes; a deployment that cannot publish it keeps serving,
+// and the reason is logged at ERROR naming the missing variable.
+func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
+	noop := func() {}
+
+	if os.Getenv(envAuthEnabled) != "true" {
+		return noop, nil
+	}
+
+	logError := func(format string, args ...any) {
+		if !obs.IsNil(in.Logger) {
+			in.Logger.Log(ctx, obs.LevelError, fmt.Sprintf(format, args...))
+		}
+	}
+
+	// With the permission declaration off, an unparseable manifest never failed
+	// the boot; it still does not, but a scope it may carry cannot be published.
+	manifest, err := parseManifest(in.Manifest)
+	if err != nil {
+		logError("scope catalog for slug=%s not published: %v", in.Slug, err)
+
+		return noop, nil
+	}
+
+	if manifest.Scope == nil {
+		return noop, nil
+	}
+
+	identityHost := lookupWithDeprecatedAlias(envIdentityHost, envIdentityHostDeprecated, in.Logger)
+	clientID := lookupWithDeprecatedAlias(envM2MClientID, envM2MClientIDDeprecated, in.Logger)
+	clientSecret := lookupWithDeprecatedAlias(envM2MClientSecret, envM2MClientSecretDeprecated, in.Logger)
+	authHost := lookupWithDeprecatedAlias(envAuthHost, envAuthHostDeprecated, in.Logger)
+
+	missing := ""
+
+	switch {
+	case identityHost == "":
+		missing = envIdentityHost
+	case clientID == "":
+		missing = envM2MClientID
+	case clientSecret == "":
+		missing = envM2MClientSecret
+	case authHost == "":
+		missing = envAuthHost + " (or its alias " + envAuthHostDeprecated + ")"
+	}
+
+	if missing != "" {
+		logError("scope catalog for slug=%s not published: %s is required when %s=true; partner scopes for this product cannot be validated until it is",
+			in.Slug, missing, envAuthEnabled)
+
+		return noop, nil
+	}
+
+	pub, err := New(Config{
+		Slug:         in.Slug,
+		Manifest:     in.Manifest,
+		IdentityAddr: identityHost,
+		Auth:         middleware.NewAuthClient(authHost, true, in.Logger),
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Logger:       in.Logger,
+		ScopeOnly:    true,
+	})
+	if err != nil {
+		logError("scope catalog for slug=%s not published: %v", in.Slug, err)
+
+		return noop, nil
+	}
+
+	stop, err := pub.Start(ctx)
+	if err != nil {
+		logError("scope catalog for slug=%s not published: %v", in.Slug, err)
+
+		return noop, nil
+	}
+
+	return stop, nil
+}
+
 // WireFromEnv builds and starts the D7 declaration publisher from the FIXED,
 // un-prefixed env contract, absorbing the config/trim/validation/auth-client/
 // lifecycle boilerplate that each plugin used to hand-write. It returns a stop
@@ -128,9 +215,12 @@ type WireInput struct {
 // Contract (the IDP_* names below are the CANONICAL ones — see the const block:
 // each also accepts its legacy (pre-#4232) name as a DEPRECATED alias for one
 // release, and canonical always wins. New deployments must set the IDP_* names):
-//   - IDP_DECLARATION_ENABLED != "true"  => no-op: returns a non-nil func(){} and
-//     a nil error WITHOUT reading or validating any other env (default-off keeps
-//     the plugin boot unchanged when the flag is off).
+//   - IDP_DECLARATION_ENABLED != "true"  => the permission sections are not
+//     published. When PLUGIN_AUTH_ENABLED=true AND the manifest declares a scope,
+//     the scope section alone is published (see wireScopeOnly; it never fails the
+//     boot). Otherwise it is a no-op: returns a non-nil func(){} and a nil error
+//     WITHOUT reading or validating any other env, so a manifest without a scope
+//     keeps the plugin boot unchanged when the flag is off.
 //   - enabled => IDP_HOST, IDP_M2M_CLIENT_ID, IDP_M2M_CLIENT_SECRET, the auth
 //     host (PLUGIN_AUTH_HOST, or its alias PLUGIN_AUTH_ADDRESS) and
 //     PLUGIN_AUTH_ENABLED=true are required; each yields a clear, named error
@@ -149,11 +239,11 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 	// error path, so a deferred stop() is never nil.
 	noop := func() {}
 
-	// Default-off: when the flag is not exactly "true", validate nothing and
-	// leave the plugin boot untouched. The flag honors its deprecated alias for
-	// the #4232 rename window (canonical IDP_DECLARATION_ENABLED wins).
+	// The flag honors its deprecated alias for the #4232 rename window
+	// (canonical IDP_DECLARATION_ENABLED wins). Off, the permission sections are
+	// not published — but the scope catalog still is whenever auth is on.
 	if lookupWithDeprecatedAlias(envDeclarationEnabled, envDeclarationEnabledDeprecated, in.Logger) != "true" {
-		return noop, nil
+		return wireScopeOnly(ctx, in)
 	}
 
 	// Resolve every value through the canonical-wins / deprecated-alias helper
@@ -215,4 +305,51 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 	}
 
 	return stop, nil
+}
+
+// WireScope wires the manifest's scope section into the authorization client, so
+// auth.Authorize derives each route's scope dimensions from the route path (see
+// middleware.AuthClient.SetManifestScope). It parses and validates the manifest
+// — the same embedded bytes the product publishes — and registers its scope
+// under manifest.service, which must be the product name the routes pass to
+// Authorize.
+//
+// Call it at boot, after building the client and BEFORE registering routes:
+//
+//	auth := middleware.NewAuthClient(authHost, authEnabled, logger)
+//	if err := declaration.WireScope(auth, embeddedManifest); err != nil {
+//		return err
+//	}
+//	app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id",
+//		auth.Authorize("midaz", "ledgers", "get"), handler)
+//
+// A manifest without a scope section leaves the client exactly as it was.
+func WireScope(auth *middleware.AuthClient, manifest []byte) error {
+	if auth == nil {
+		return errors.New("wire scope: auth client is required")
+	}
+
+	m, err := parseManifest(manifest)
+	if err != nil {
+		return fmt.Errorf("wire scope: %w", err)
+	}
+
+	if err := m.Validate(); err != nil {
+		return fmt.Errorf("wire scope: %w", err)
+	}
+
+	var dims []middleware.Dimension
+
+	if m.Scope != nil {
+		dims = make([]middleware.Dimension, 0, len(m.Scope.Dimensions))
+		for _, d := range m.Scope.Dimensions {
+			dims = append(dims, middleware.Dim(d.Name, middleware.FromPath).At(d.Param))
+		}
+	}
+
+	if err := auth.SetManifestScope(m.Service, dims...); err != nil {
+		return fmt.Errorf("wire scope: %w", err)
+	}
+
+	return nil
 }

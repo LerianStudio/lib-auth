@@ -589,6 +589,7 @@ func (s *jwksKeySource) fetch(ctx context.Context) ([]*rsa.PublicKey, map[string
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch jwks: %w", err)
 	}
+
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {

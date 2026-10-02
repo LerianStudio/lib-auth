@@ -2,9 +2,11 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -256,4 +258,183 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 	}
 
 	return scope, ""
+}
+
+// SetManifestScope wires the product's scope catalog — the scope section of its
+// declaration manifest — into the client, so Authorize can derive each route's
+// dimensions from the route path instead of every route declaring them.
+//
+// dims are the catalog in tree order, each read from a path parameter
+// (Dim(name, FromPath).At(param)). The declaration package builds them from the
+// embedded manifest: call declaration.WireScope(auth, manifest) rather than this
+// directly. Call it at boot, BEFORE registering routes: Authorize reads the
+// catalog when the route is registered.
+//
+// Once a product has a catalog, every route of that product that passes no
+// RequireScope sends, as attributes, the catalog dimensions whose parameter is a
+// WHOLE segment of the route path (":organization_id"), in catalog order — the
+// same attributes an explicit declaration sends. A route whose path carries none
+// of them behaves as a route that declares nothing. A route that passes
+// RequireScope keeps its declaration, which must then name only catalog
+// dimensions.
+//
+// Calling it with no dims removes the product's catalog, leaving the client
+// exactly as if it had never been called.
+func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) error {
+	if auth == nil {
+		return errors.New("manifest scope: nil auth client")
+	}
+
+	if strings.TrimSpace(product) == "" {
+		return errors.New("manifest scope: product must not be empty")
+	}
+
+	names := make(map[string]struct{}, len(dims))
+	keys := make(map[string]struct{}, len(dims))
+
+	for _, dim := range dims {
+		switch {
+		case dim.name == "":
+			return errors.New("manifest scope: a dimension has no name")
+		case dim.source != FromPath:
+			return errors.New("manifest scope: dimension " + dim.name + " must be read from the path")
+		case dim.key == "":
+			return errors.New("manifest scope: dimension " + dim.name + " declares an empty path parameter")
+		}
+
+		if _, dup := names[dim.name]; dup {
+			return errors.New("manifest scope: dimension " + dim.name + " is declared more than once")
+		}
+
+		if _, dup := keys[dim.key]; dup {
+			return errors.New("manifest scope: path parameter " + dim.key + " is declared more than once")
+		}
+
+		names[dim.name] = struct{}{}
+		keys[dim.key] = struct{}{}
+	}
+
+	auth.manifestScopeMu.Lock()
+	defer auth.manifestScopeMu.Unlock()
+
+	if len(dims) == 0 {
+		delete(auth.manifestScopes, product)
+
+		return nil
+	}
+
+	if auth.manifestScopes == nil {
+		auth.manifestScopes = make(map[string][]Dimension)
+	}
+
+	auth.manifestScopes[product] = append([]Dimension(nil), dims...)
+
+	return nil
+}
+
+// manifestScopeFor returns the product's catalog, or nil when it has none. A nil
+// receiver has none.
+func (auth *AuthClient) manifestScopeFor(product string) []Dimension {
+	if auth == nil {
+		return nil
+	}
+
+	auth.manifestScopeMu.RLock()
+	defer auth.manifestScopeMu.RUnlock()
+
+	return auth.manifestScopes[product]
+}
+
+// checkAgainstCatalog reports the first dimension of an explicit declaration the
+// catalog does not declare. Sending it would ask the authorization service about
+// a field the product never published, which matches nothing — and a dimension
+// nobody matches never denies.
+func checkAgainstCatalog(scope ScopeDeclaration, catalog []Dimension) string {
+	if len(catalog) == 0 {
+		return ""
+	}
+
+	known := make(map[string]struct{}, len(catalog))
+	for _, dim := range catalog {
+		known[dim.name] = struct{}{}
+	}
+
+	for _, dim := range scope.dims {
+		if _, ok := known[dim.name]; !ok {
+			return "scope dimension " + dim.name + " is not declared in the manifest scope of product " + scope.product
+		}
+	}
+
+	return ""
+}
+
+// deriveRouteDimensions returns the catalog dimensions a route path addresses: a
+// dimension applies when one WHOLE segment of the path is its parameter with the
+// ':' marker. A literal segment spelling the parameter is text, and a segment
+// that merely contains it (":organization_id.json", ":organization_id?") is a
+// different parameter. The result keeps catalog order, whatever the order of the
+// segments, and is empty when the path carries none.
+func deriveRouteDimensions(catalog []Dimension, path string) []Dimension {
+	segments := make(map[string]struct{})
+
+	for _, segment := range strings.Split(path, "/") {
+		if strings.HasPrefix(segment, ":") {
+			segments[segment[1:]] = struct{}{}
+		}
+	}
+
+	dims := make([]Dimension, 0, len(catalog))
+
+	for _, dim := range catalog {
+		if _, ok := segments[dim.key]; ok {
+			dims = append(dims, dim)
+		}
+	}
+
+	return dims
+}
+
+// routeScope derives, and remembers per route path, the declaration of a route
+// that relies on its product's catalog. One handler may be registered on several
+// routes, so the path — not the handler — is the key.
+type routeScope struct {
+	product string
+	catalog []Dimension
+	byPath  sync.Map // route path -> ScopeDeclaration
+}
+
+func (r *routeScope) forPath(path string) ScopeDeclaration {
+	if cached, ok := r.byPath.Load(path); ok {
+		return cached.(ScopeDeclaration)
+	}
+
+	scope := ScopeDeclaration{product: r.product, dims: deriveRouteDimensions(r.catalog, path)}
+	r.byPath.Store(path, scope)
+
+	return scope
+}
+
+// registerRouteScope resolves a route's scope at registration time: its explicit
+// declaration, validated and — when the product has a manifest scope — checked
+// against that catalog; or, when the route passes none and a catalog exists, the
+// deriver that reads the route's dimensions from its path. A misdeclaration is
+// logged here, in the boot log, and not only on the first request it refuses.
+func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclaration) (ScopeDeclaration, *routeScope, string) {
+	scope, declErr := resolveDeclaration(product, scopes)
+
+	catalog := auth.manifestScopeFor(product)
+	if declErr == "" && len(scopes) > 0 {
+		declErr = checkAgainstCatalog(scope, catalog)
+	}
+
+	var derived *routeScope
+	if len(scopes) == 0 && len(catalog) > 0 {
+		derived = &routeScope{product: product, catalog: catalog}
+	}
+
+	if declErr != "" && auth != nil {
+		logErrorf(context.Background(), auth.Logger, "Route for product %q is misdeclared and will refuse every request: %s", product, declErr)
+	}
+
+	return scope, derived, declErr
 }
