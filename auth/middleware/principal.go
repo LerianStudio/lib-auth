@@ -137,6 +137,13 @@ func (auth *AuthClient) derivePrincipalWithClaims(ctx context.Context, span trac
 // Access Manager is not available to anchor trust. An explicitly configured static
 // key source that failed to load must not degrade this path to ParseUnverified.
 func (auth *AuthClient) derivePrincipalWithoutRoundTrip(ctx context.Context, span trace.Span, accessToken, product string) (Principal, int, error) {
+	if err := auth.insecureKeySource(); err != nil {
+		logErrorf(ctx, auth.Logger, "Local JWT verification refused (fail closed): %v", err)
+		tracing.HandleSpanError(span, "Key source allows plaintext", err)
+
+		return Principal{}, http.StatusServiceUnavailable, err
+	}
+
 	if auth.staticVerificationConfigured && len(auth.verifyKeys) == 0 && auth.source == nil {
 		err := errors.New("local JWT verification is configured but unavailable")
 		tracing.HandleSpanError(span, "Local JWT verification unavailable", err)

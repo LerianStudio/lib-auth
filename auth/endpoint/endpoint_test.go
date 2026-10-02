@@ -143,3 +143,12 @@ func TestInsecureError_NilReceiver(t *testing.T) {
 		assert.True(t, e.Is(ErrInsecure))
 	})
 }
+
+func TestInsecureError_PlaintextAllowedNamesTheFix(t *testing.T) {
+	t.Parallel()
+
+	err := &InsecureError{Component: "jwks key source", Reason: ReasonPlaintextAllowed}
+
+	assert.ErrorIs(t, err, ErrInsecure)
+	assert.Equal(t, "lib-auth: access manager address must be https: jwks key source allows plaintext while the https requirement is on; build it with its own RequireHTTPS set", err.Error())
+}

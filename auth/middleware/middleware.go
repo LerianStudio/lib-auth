@@ -168,7 +168,7 @@ type AuthClient struct {
 	httpErrorHandler HTTPErrorHandler
 
 	// requireHTTPS is set once by WithRequireHTTPS at construction and only read
-	// afterwards; see insecureAddress for how it is enforced at each call.
+	// afterwards; see insecureEndpoint for how it is enforced at each call.
 	requireHTTPS bool
 }
 
@@ -394,12 +394,24 @@ func resolveLogger(logger obs.Logger) obs.Logger {
 // preserves the historical ParseUnverified behavior. When set, the KeySource takes
 // precedence over the env-PEM keys for the verified path. Returns the receiver for
 // fluent configuration after NewAuthClient; a nil receiver or nil source is a no-op.
+//
+// On a client built with WithRequireHTTPS(true), a source that declares through a
+// RequiresHTTPS() bool method that it allows plaintext (a NewJWKSKeySource built
+// without JWKSConfig.RequireHTTPS) is still attached, so verification can never
+// fall back to the env-PEM keys or ParseUnverified, but it is never consulted:
+// attaching it is logged at ERROR and every authorization is refused as
+// unavailable with an *endpoint.InsecureError. A source that declares no posture,
+// such as StaticKeySource, fetches nothing and is accepted.
 func (auth *AuthClient) WithKeySource(source KeySource) *AuthClient {
 	if auth == nil || source == nil {
 		return auth
 	}
 
 	auth.source = source
+
+	if err := auth.insecureKeySource(); err != nil {
+		logErrorf(context.Background(), auth.Logger, "Every authorization will be refused (fail closed): %v", err)
+	}
 
 	return auth
 }
@@ -438,7 +450,10 @@ type clientOptions struct {
 //     changed to a non-https value, refuses as unavailable (503, gRPC
 //     Unavailable) without dialling, retrying, tripping the breaker or caching;
 //   - GetApplicationToken re-checks Address the same way and returns the typed
-//     error, so the client secret never travels in plaintext.
+//     error, so the client secret never travels in plaintext;
+//   - a key source attached with WithKeySource that allows plaintext (a JWKS
+//     source built without JWKSConfig.RequireHTTPS) is never consulted, and
+//     every authorization is refused as unavailable instead.
 //
 // The consumer decides when it applies (typically: every posture except
 // development); the library reads no environment variable for it. The last
@@ -463,6 +478,38 @@ func (auth *AuthClient) insecureAddress() error {
 	}
 
 	return endpoint.RequireHTTPS(componentAuthorizationClient, auth.Address)
+}
+
+// httpsPosture is what a KeySource implements to declare whether it refuses to
+// fetch its keys over plaintext; the JWKS source from NewJWKSKeySource does.
+type httpsPosture interface {
+	RequiresHTTPS() bool
+}
+
+// insecureKeySource returns an *endpoint.InsecureError when the client requires
+// https and its key source declares that it allows plaintext, and nil otherwise:
+// the keys that verify every token must not come from a source that may fetch
+// them over http. A nil receiver returns nil.
+func (auth *AuthClient) insecureKeySource() error {
+	if !auth.RequiresHTTPS() || auth.source == nil {
+		return nil
+	}
+
+	if posture, ok := auth.source.(httpsPosture); ok && !posture.RequiresHTTPS() {
+		return &endpoint.InsecureError{Component: componentJWKSKeySource, Reason: endpoint.ReasonPlaintextAllowed}
+	}
+
+	return nil
+}
+
+// insecureEndpoint is the https guard every authorization runs first: the
+// Access Manager address, then the key source.
+func (auth *AuthClient) insecureEndpoint() error {
+	if err := auth.insecureAddress(); err != nil {
+		return err
+	}
+
+	return auth.insecureKeySource()
 }
 
 // NewAuthClientWithOptions is NewAuthClient with options. With no options it
@@ -955,12 +1002,13 @@ func (auth *AuthClient) checkAuthorizationWithPrincipal(ctx context.Context, p a
 	)
 
 	// The https requirement is checked before the token, the cache, the breaker and
-	// the retry: an address that is not https is a refused configuration, not an
-	// Access Manager outage, so it is answered as unavailable without dialling,
-	// without a retry, without a breaker failure and without a cache write.
-	if err := auth.insecureAddress(); err != nil {
+	// the retry: an address that is not https, or a key source that allows
+	// plaintext, is a refused configuration, not an Access Manager outage, so it is
+	// answered as unavailable without dialling, without a retry, without a breaker
+	// failure and without a cache write.
+	if err := auth.insecureEndpoint(); err != nil {
 		logErrorf(ctx, auth.Logger, "Authorization refused (fail closed): %v", err)
-		tracing.HandleSpanError(span, "Access Manager address is not https", err)
+		tracing.HandleSpanError(span, "Access Manager or identity provider is not https", err)
 
 		return authzResolution{statusCode: http.StatusServiceUnavailable, unavailableErr: err}, Principal{}
 	}

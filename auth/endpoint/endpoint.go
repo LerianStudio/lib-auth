@@ -35,6 +35,10 @@ const (
 	ReasonMissingHost = "missing host"
 	// ReasonUnparseable is an address url.Parse refuses.
 	ReasonUnparseable = "unparseable"
+	// ReasonPlaintextAllowed is a component that requires https but was handed a
+	// collaborator built to allow plaintext, such as a JWKS key source without
+	// its own https requirement. No address is involved, so none is shown.
+	ReasonPlaintextAllowed = "allows plaintext"
 )
 
 // InsecureError reports an address refused because https is required. It
@@ -60,6 +64,11 @@ type InsecureError struct {
 func (e *InsecureError) Error() string {
 	if e == nil {
 		return ErrInsecure.Error()
+	}
+
+	if e.Reason == ReasonPlaintextAllowed {
+		return fmt.Sprintf("%s: %s allows plaintext while the https requirement is on; build it with its own RequireHTTPS set",
+			ErrInsecure.Error(), e.Component)
 	}
 
 	address := e.Address

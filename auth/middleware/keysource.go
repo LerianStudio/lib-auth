@@ -383,6 +383,11 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
+// RequiresHTTPS reports whether the source was built with JWKSConfig.RequireHTTPS,
+// so a client that requires https can refuse a source that would fetch its trust
+// root over plaintext. It is fixed at construction.
+func (s *jwksKeySource) RequiresHTTPS() bool { return s.requireHTTPS }
+
 // Keys returns the currently cached verification keys without ever touching the
 // network (serve-from-cache, serve-stale). May be empty before the first
 // successful fetch when no bootstrap PEM was provided; verifyToken then fails closed.
