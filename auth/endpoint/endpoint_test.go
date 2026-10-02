@@ -87,6 +87,16 @@ func TestRequireHTTPS_NeverEchoesUserinfoSecret(t *testing.T) {
 		"http://user:secret@am.example",
 		"ftp://user:secret@am.example",
 		"//user:secret@am.example",
+		// Scheme-less with credentials: Go reads "admin" as the scheme and the
+		// rest as opaque text, which url.URL.Redacted does not mask.
+		"admin:secret@am.example:8443",
+		"admin:secret@am.example",
+		"https:admin:secret@am.example",
+		"HTTP:admin:secret@am.example",
+		// Credentials that land in the path or the query instead of userinfo.
+		"am.example/admin:secret@am.example",
+		"http://am.example/token?password=secret",
+		"http://am.example/#secret",
 	} {
 		t.Run(raw, func(t *testing.T) {
 			t.Parallel()

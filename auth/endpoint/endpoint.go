@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 // ErrInsecure is the sentinel every refusal matches with errors.Is, whatever the
@@ -43,8 +44,10 @@ type InsecureError struct {
 	// "authorization client", "declaration publisher" or "jwks key source".
 	Component string
 	// Address is the refused address with any userinfo password masked
-	// (url.URL.Redacted). It is empty when the address did not parse, because an
-	// unparseable string cannot be redacted and is never echoed.
+	// (url.URL.Redacted) and the query and fragment dropped. It is empty whenever
+	// a secret could hide in the part that would be echoed: an address that did
+	// not parse, an opaque one ("admin:pass@am.example" parses as scheme "admin"),
+	// or one with "@" in its path.
 	Address string
 	// Scheme is the parsed, lowercased scheme; empty when there is none.
 	Scheme string
@@ -93,7 +96,7 @@ func RequireHTTPS(component, raw string) error {
 	}
 
 	refuse := func(reason string) error {
-		return &InsecureError{Component: component, Address: u.Redacted(), Scheme: u.Scheme, Reason: reason}
+		return &InsecureError{Component: component, Address: displayAddress(u), Scheme: u.Scheme, Reason: reason}
 	}
 
 	switch u.Scheme {
@@ -110,4 +113,22 @@ func RequireHTTPS(component, raw string) error {
 	default:
 		return refuse(ReasonUnsupportedScheme)
 	}
+}
+
+// displayAddress is the part of a refused address that is safe to echo: the
+// redacted userinfo, host and path, never the query or the fragment. It returns ""
+// when the address is opaque or carries "@" in its path, because there
+// url.URL.Redacted cannot see credentials a scheme-less address put in plain text.
+func displayAddress(u *url.URL) string {
+	if u.Opaque != "" || strings.Contains(u.Path, "@") || strings.Contains(u.RawPath, "@") {
+		return ""
+	}
+
+	shown := *u
+	shown.RawQuery = ""
+	shown.ForceQuery = false
+	shown.Fragment = ""
+	shown.RawFragment = ""
+
+	return shown.Redacted()
 }

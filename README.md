@@ -779,7 +779,7 @@ With the requirement on, an address passes only when it is an absolute `https` U
 | `WireFromEnv` | `WireInput.RequireHTTPS` | Fails before anything is dialled, naming `IDP_HOST` or `PLUGIN_AUTH_HOST` (alias `PLUGIN_AUTH_ADDRESS`). There is no environment variable for the requirement. |
 | JWKS key source | `JWKSConfig.RequireHTTPS` | `NewJWKSKeySource` fails, loopback `http` included. Every redirect hop must be `https` too. Setting it together with `AllowInsecureURL` is a construction error. |
 
-Every refusal is an `*endpoint.InsecureError` that matches `endpoint.ErrInsecure` with `errors.Is`. It carries the component that refused, the reason, the parsed scheme and the address with any userinfo password masked. An address that does not parse is never echoed.
+Every refusal is an `*endpoint.InsecureError` that matches `endpoint.ErrInsecure` with `errors.Is`. It carries the component that refused, the reason, the parsed scheme and the address with any userinfo password masked and the query and fragment dropped. The address is not echoed at all when a secret could hide in it: when it does not parse, when it has no `//` (Go reads `admin:pass@am.example` as scheme `admin` followed by plain text), or when its path contains `@`.
 
 A redirect cannot downgrade an `https` address. The authorization client and the declaration publisher never follow a redirect, and the JWKS source checks every hop against the same rule.
 
