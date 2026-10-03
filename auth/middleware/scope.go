@@ -106,30 +106,35 @@ func (d Dimension) read(c fiber.Ctx) (values []string, present bool, problem str
 
 		return []string{value}, value != "", ""
 	case FromHeader:
-		var raw [][]byte
+		var raw []string
 
 		// Compared without regard to letter case, whatever the app's header
 		// normalization: the header the handler reads is the header checked.
 		for k, v := range c.Request().Header.All() {
 			if strings.EqualFold(string(k), d.key) {
-				raw = append(raw, v)
+				raw = append(raw, string(v))
 			}
 		}
 
 		return splitValues(raw)
 	case FromQuery:
-		return splitValues(c.Request().URI().QueryArgs().PeekMulti(d.key))
-	case SourceUnset, FromBody:
+		var raw []string
+		for _, v := range c.Request().URI().QueryArgs().PeekMulti(d.key) {
+			raw = append(raw, string(v))
+		}
+
+		return splitValues(raw)
+	case SourceUnset, FromBody, FromForm:
 		return nil, false, ""
 	default:
 		return nil, false, ""
 	}
 }
 
-// splitValues splits every occurrence of a query parameter or header into its
-// comma-separated elements, trimmed, keeping each distinct value once in the
-// order first named.
-func splitValues(raw [][]byte) ([]string, bool, string) {
+// splitValues splits every occurrence of a query parameter, header or form
+// field into its comma-separated elements, trimmed, keeping each distinct value
+// once in the order first named.
+func splitValues(raw []string) ([]string, bool, string) {
 	if len(raw) == 0 {
 		return nil, false, ""
 	}
@@ -139,7 +144,7 @@ func splitValues(raw [][]byte) ([]string, bool, string) {
 	seen := make(map[string]struct{})
 
 	for _, occurrence := range raw {
-		for _, element := range strings.Split(string(occurrence), ",") {
+		for _, element := range strings.Split(occurrence, ",") {
 			value := strings.TrimSpace(element)
 			if value == "" {
 				return nil, true, "must not name an empty value"
@@ -169,6 +174,8 @@ func (d Dimension) location() string {
 		return "query parameter " + strconv.Quote(d.key)
 	case FromBody:
 		return "body field " + strconv.Quote(d.key)
+	case FromForm:
+		return "form field " + strconv.Quote(d.key)
 	case SourceUnset:
 		return "nowhere"
 	default:
@@ -313,8 +320,9 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
 
 	for _, dim := range dims {
 		// A body dimension is not one value of the request but one per question
-		// the body makes; the body plan reads those.
-		if dim.source == FromBody {
+		// the body makes; the body plan reads those. A form field is read with
+		// the body, only for the callers whose body is read.
+		if dim.source == FromBody || dim.source == FromForm {
 			continue
 		}
 
@@ -418,8 +426,11 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 // Reading it twice from the SAME carrier is a mistake, not a wider question.
 func compileDims(dims []Dimension) (*bodyPlan, string) {
 	seen := make(map[string]struct{}, len(dims))
+	sources := make(map[Source]struct{}, len(dims))
 
 	for _, dim := range dims {
+		sources[dim.source] = struct{}{}
+
 		if dim.name == "" {
 			return nil, "scope declaration carries a dimension with no name"
 		}
@@ -444,6 +455,13 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 		}
 
 		seen[key] = struct{}{}
+	}
+
+	_, readsJSON := sources[FromBody]
+	_, readsForm := sources[FromForm]
+
+	if readsJSON && readsForm {
+		return nil, "scope declaration reads the request body both as JSON (FromBody) and as a form (FromForm)"
 	}
 
 	return compileBodyPlan(dims)

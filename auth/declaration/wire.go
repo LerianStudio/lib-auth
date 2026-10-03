@@ -319,6 +319,7 @@ var (
 	}
 	routeDimensionSources = map[string]middleware.Source{
 		scopeFromBody:   middleware.FromBody,
+		scopeFromForm:   middleware.FromForm,
 		scopeFromQuery:  middleware.FromQuery,
 		scopeFromHeader: middleware.FromHeader,
 	}
@@ -341,7 +342,7 @@ var (
 //		auth.Authorize("midaz", "ledgers", "get"), handler)
 //
 // The routes of scope.routes read the dimensions they declare from their JSON
-// request body, the query or headers (see
+// request body, a urlencoded form body, the query or headers (see
 // middleware.AuthClient.SetManifestRouteScope); a route that cannot be honoured
 // fails here, at boot.
 //
