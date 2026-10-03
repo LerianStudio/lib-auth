@@ -196,6 +196,13 @@ type AuthResponse struct {
 	// been, and are never told apart to the end caller: which axis failed is an
 	// enumeration oracle over another partner's identifiers.
 	Reason string `json:"reason,omitempty"`
+	// Allowed answers a request that asked to filter (its "filter" member names
+	// dimensions it left out): per dimension, the values the partner may see.
+	// It is read only on a grant and only for the dimensions the request named
+	// in its filter; an empty list or null means the partner may see none. A
+	// grant without it confines nothing on the dimension, except on a request
+	// that names no dimension at all, which is then refused.
+	Allowed map[string][]string `json:"allowed,omitempty"`
 }
 
 // Denial reasons the authorization service publishes. Only the two that mean
@@ -233,6 +240,10 @@ type authzParams struct {
 	// nothing, or optional dimensions the request left out — is unscopeable, not
 	// unscoped.
 	declared bool
+	// filter names the dimensions the question leaves out and asks the service
+	// to answer with allowed values for, instead of refusing. Nil on every route
+	// that does not filter, and for every caller that is not partner-bound.
+	filter []string
 }
 
 type oauth2Token struct {
@@ -708,6 +719,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 				Partner:    resolution.partner,
 				Attributes: sharedAttributes(questions),
 				Sets:       questions,
+				allowed:    resolution.allowed,
 			}))
 		}
 
@@ -765,21 +777,44 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 	var (
 		resolution authzResolution
 		principal  Principal
+		allowed    allowedValues
 	)
 
 	for _, question := range asked {
 		params.attributes = question
+
+		// On a route that filters, a partner's question that leaves a filtered
+		// dimension out asks for the values it may see instead of a refusal.
+		params.filter = nil
+		if caller.partner != "" {
+			params.filter = absentFilter(scope.filter, question)
+		}
+
 		// A question that names no dimension cannot be scoped, whatever the
 		// route declares: an optional dimension the request left out is not a
-		// value the partner's scope can be matched against.
-		params.declared = len(question) > 0
+		// value the partner's scope can be matched against. Unless it asks to
+		// filter: the list is then confined by the values the answer carries.
+		params.declared = len(question) > 0 || len(params.filter) > 0
 
 		resolution, principal = auth.decide(ctx, span, params, caller)
 
 		if refusal := auth.refusalFor(c, resolution); refusal != nil {
 			return authzResolution{}, Principal{}, nil, refusal
 		}
+
+		// With no dimension named, the allowed values are the only thing that
+		// confines the request: a grant without them for every filtered
+		// dimension is refused, never served unconfined.
+		if len(question) == 0 && !coversAll(params.filter, resolution.allowed) {
+			logErrorf(ctx, auth.Logger, "Partner-bound credential granted a filtered request naming no dimension without allowed values; denying (fail closed)")
+
+			return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, http.StatusForbidden, http.StatusText(http.StatusForbidden))
+		}
+
+		allowed.add(params.filter, resolution.allowed)
 	}
+
+	resolution.allowed = allowed.values
 
 	return resolution, principal, questions, nil
 }
@@ -1250,6 +1285,10 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 		payload["attributes"] = p.attributes
 	}
 
+	if len(p.filter) > 0 {
+		payload["filter"] = p.filter
+	}
+
 	requestBodyJSON, err := json.Marshal(payload)
 	if err != nil {
 		logErrorf(ctx, auth.Logger, "Failed to marshal request body: %v", err)
@@ -1275,14 +1314,15 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 		product:     requestBody["product"],
 		clientIP:    p.clientIP,
 		attributes:  attributesCacheKey(p.attributes),
+		filter:      foldFilter(p.filter),
 	}
 
 	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so
 	// the breaker only ever runs on a miss — its open state then denies (never
 	// serving a stale grant).
 	if auth.cache != nil {
-		if authorized, reason, hit := auth.cache.get(key); hit {
-			return authzResolution{authorized: authorized, statusCode: http.StatusOK, reason: reason, partner: partner}, principal
+		if authorized, reason, allowed, hit := auth.cache.get(key); hit {
+			return authzResolution{authorized: authorized, statusCode: http.StatusOK, reason: reason, allowed: allowed, partner: partner}, principal
 		}
 	}
 

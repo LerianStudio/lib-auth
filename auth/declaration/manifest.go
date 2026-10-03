@@ -103,6 +103,11 @@ type DeclarationScopeRoute struct {
 	// than its path. The dimensions its path carries are still derived from the
 	// path; one read from both must name the same values in each.
 	Dimensions []DeclarationRouteDimension `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
+	// Filter names catalog dimensions the route filters its list on: when a
+	// partner request leaves one out, the authorization service is asked for
+	// the values of it the partner may see instead of refusing, and the handler
+	// confines its list to them (see middleware.RequestScope.Allowed).
+	Filter []string `json:"filter,omitempty" yaml:"filter,omitempty"`
 }
 
 // DeclarationRouteDimension declares where in a route's request ONE catalog
@@ -693,9 +698,11 @@ func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) [
 
 		seenRoutes[key] = struct{}{}
 
-		if len(r.Dimensions) == 0 {
-			violations = append(violations, prefix+": must declare at least one dimension")
+		if len(r.Dimensions) == 0 && len(r.Filter) == 0 {
+			violations = append(violations, prefix+": must declare at least one dimension or a filter")
 		}
+
+		violations = append(violations, validateRouteFilter(prefix, r.Filter, catalog)...)
 
 		bodyAs := make(map[string]struct{}, len(r.Dimensions))
 
@@ -709,6 +716,35 @@ func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) [
 
 		if readsJSON && readsForm {
 			violations = append(violations, prefix+": reads the request body both as JSON (from: body) and as a form (from: form)")
+		}
+	}
+
+	return violations
+}
+
+// validateRouteFilter validates a route's filter: every entry names a catalog
+// dimension, once.
+func validateRouteFilter(prefix string, filter []string, catalog map[string]struct{}) []string {
+	var violations []string
+
+	seen := make(map[string]struct{}, len(filter))
+
+	for i, name := range filter {
+		entry := fmt.Sprintf("%s.filter[%d]", prefix, i)
+
+		if _, dup := seen[name]; dup {
+			violations = append(violations, fmt.Sprintf("%s: duplicate dimension %q", entry, name))
+
+			continue
+		}
+
+		seen[name] = struct{}{}
+
+		switch _, known := catalog[name]; {
+		case strings.TrimSpace(name) == "":
+			violations = append(violations, entry+": must not be empty")
+		case !known:
+			violations = append(violations, fmt.Sprintf("%s: %q is not a scope dimension of the catalog", entry, name))
 		}
 	}
 

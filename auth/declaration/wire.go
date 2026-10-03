@@ -326,6 +326,33 @@ var (
 	}
 )
 
+// routeDimensions builds the middleware dimensions one scope.routes entry
+// declares.
+func routeDimensions(r DeclarationScopeRoute) []middleware.Dimension {
+	dims := make([]middleware.Dimension, 0, len(r.Dimensions))
+
+	for _, d := range r.Dimensions {
+		source, ok := routeDimensionSources[d.From]
+		if !ok {
+			// Validate admits no other: a path parameter whose value is resolved.
+			source = middleware.FromPath
+		}
+
+		dim := middleware.Dim(d.Name, source).At(d.Field)
+		if d.Optional {
+			dim = dim.Optional()
+		}
+
+		if d.Resolve != "" {
+			dim = dim.Resolve(d.Resolve)
+		}
+
+		dims = append(dims, dim)
+	}
+
+	return dims
+}
+
 // WireScope wires the manifest's scope section into the authorization client, so
 // auth.Authorize derives each route's scope dimensions from the route path, the
 // query and headers (see middleware.AuthClient.SetManifestScope). It parses and validates the manifest
@@ -385,28 +412,18 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 	}
 
 	for _, r := range m.Scope.Routes {
-		routeDims := make([]middleware.Dimension, 0, len(r.Dimensions))
-		for _, d := range r.Dimensions {
-			source, ok := routeDimensionSources[d.From]
-			if !ok {
-				// Validate admits no other: a path parameter whose value is resolved.
-				source = middleware.FromPath
-			}
+		routeDims := routeDimensions(r)
 
-			dim := middleware.Dim(d.Name, source).At(d.Field)
-			if d.Optional {
-				dim = dim.Optional()
+		if len(routeDims) > 0 {
+			if err := auth.SetManifestRouteScope(m.Service, r.Method, r.Path, routeDims...); err != nil {
+				return fmt.Errorf("wire scope: %w", err)
 			}
-
-			if d.Resolve != "" {
-				dim = dim.Resolve(d.Resolve)
-			}
-
-			routeDims = append(routeDims, dim)
 		}
 
-		if err := auth.SetManifestRouteScope(m.Service, r.Method, r.Path, routeDims...); err != nil {
-			return fmt.Errorf("wire scope: %w", err)
+		if len(r.Filter) > 0 {
+			if err := auth.SetManifestRouteFilter(m.Service, r.Method, r.Path, r.Filter...); err != nil {
+				return fmt.Errorf("wire scope: %w", err)
+			}
 		}
 	}
 

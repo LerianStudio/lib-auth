@@ -60,6 +60,11 @@ type cacheKey struct {
 	// reading an instance it was never granted. Empty for a route that declares
 	// no dimension, so those entries key exactly as they did before.
 	attributes string
+	// filter is the dimensions the question asked the service to answer with
+	// allowed values for, folded like attributes. The same question with and
+	// without it are two different questions: one may be allowed with values
+	// where the other is refused.
+	filter string
 }
 
 // cacheEntry is a cached authorization decision with its expiry.
@@ -69,7 +74,11 @@ type cacheEntry struct {
 	// decision because it selects the HTTP status the caller is answered with: a
 	// cached "suspended" denial that replayed without its reason would silently
 	// downgrade a 401 to a 403 for the rest of the TTL.
-	reason    string
+	reason string
+	// allowed are the allowed values the decision carried. They are cached with
+	// it because a filtered list is confined by them: a cached grant replayed
+	// without them would serve the list unconfined.
+	allowed   map[string][]string
 	expiresAt time.Time
 }
 
@@ -103,7 +112,7 @@ func newDecisionCache(ttl time.Duration) *decisionCache {
 func (c *decisionCache) shardFor(k cacheKey) *cacheShard {
 	h := fnv.New32a()
 	_, _ = h.Write(k.tokenDigest[:])
-	_, _ = h.Write([]byte("\x00" + k.sub + "\x00" + k.resource + "\x00" + k.action + "\x00" + k.product + "\x00" + k.clientIP + "\x00" + k.attributes))
+	_, _ = h.Write([]byte("\x00" + k.sub + "\x00" + k.resource + "\x00" + k.action + "\x00" + k.product + "\x00" + k.clientIP + "\x00" + k.attributes + "\x00" + k.filter))
 
 	return c.shards[h.Sum32()%decisionCacheShards]
 }
@@ -112,7 +121,7 @@ func (c *decisionCache) shardFor(k cacheKey) *cacheShard {
 // expired entry is treated as absent (and evicted); callers therefore never see a
 // stale decision — critical for the breaker-open path, which must not serve
 // expired grants.
-func (c *decisionCache) get(k cacheKey) (authorized bool, reason string, ok bool) {
+func (c *decisionCache) get(k cacheKey) (authorized bool, reason string, allowed map[string][]string, ok bool) {
 	shard := c.shardFor(k)
 
 	shard.mu.Lock()
@@ -120,22 +129,22 @@ func (c *decisionCache) get(k cacheKey) (authorized bool, reason string, ok bool
 
 	entry, found := shard.entries[k]
 	if !found {
-		return false, "", false
+		return false, "", nil, false
 	}
 
 	if time.Now().After(entry.expiresAt) {
 		delete(shard.entries, k)
 
-		return false, "", false
+		return false, "", nil, false
 	}
 
-	return entry.authorized, entry.reason, true
+	return entry.authorized, entry.reason, entry.allowed, true
 }
 
 // set stores a decision for k with the cache TTL. When the shard is at its soft
 // cap it first sweeps expired entries and, if still full, evicts a single entry so
 // the cache stays bounded.
-func (c *decisionCache) set(k cacheKey, authorized bool, reason string) {
+func (c *decisionCache) set(k cacheKey, authorized bool, reason string, allowed map[string][]string) {
 	shard := c.shardFor(k)
 
 	shard.mu.Lock()
@@ -145,7 +154,7 @@ func (c *decisionCache) set(k cacheKey, authorized bool, reason string) {
 		evictShard(shard)
 	}
 
-	shard.entries[k] = cacheEntry{authorized: authorized, reason: reason, expiresAt: time.Now().Add(c.ttl)}
+	shard.entries[k] = cacheEntry{authorized: authorized, reason: reason, allowed: allowed, expiresAt: time.Now().Add(c.ttl)}
 }
 
 // evictShard drops expired entries; if none were expired it removes one arbitrary

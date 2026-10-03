@@ -724,6 +724,9 @@ func readBodyField(f bodyField, node any, location string) (string, string, *err
 type routeBodyScope struct {
 	dims []Dimension
 	plan *bodyPlan
+	// filter names the dimensions the route filters its list on (see
+	// SetManifestRouteFilter).
+	filter []string
 }
 
 func routeScopeKey(method, path string) string {
@@ -799,9 +802,12 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 		auth.manifestRouteScopes[product] = make(map[string]routeBodyScope)
 	}
 
-	auth.manifestRouteScopes[product][routeScopeKey(method, path)] = routeBodyScope{
-		dims: routeDims,
-		plan: plan,
+	key := routeScopeKey(method, path)
+
+	auth.manifestRouteScopes[product][key] = routeBodyScope{
+		dims:   routeDims,
+		plan:   plan,
+		filter: auth.manifestRouteScopes[product][key].filter,
 	}
 	auth.manifestGen++
 

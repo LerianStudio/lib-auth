@@ -150,7 +150,7 @@ AUTH_REQUIRED=false
 AUTH_TIMEOUT=30s
 # AUTH_CACHE_TTL enables a short-lived decision cache when > 0, keyed by
 # (SHA-256 digest of the bearer token, subject, resource, action, product,
-# clientIp, scope attributes) — never the raw token. Empty/0 disables it
+# clientIp, scope attributes, filter) — never the raw token. Empty/0 disables it
 # (default). Security tradeoff: a permission revocation takes up to
 # the TTL to propagate, so keep it small (5–15s). It sheds load and, with the
 # breaker, survives brief authz outages by serving fresh positive decisions.
@@ -572,7 +572,8 @@ Two refusals are deliberate and both answer **403**, before any call is made:
    that declares none, or one whose dimensions are all optional and all left out.
    Such a credential is only ever allowed to reach *some* instances, and a request
    that cannot say which instance it points at leaves the "where" with nothing to
-   decide on.
+   decide on. A route that filters its list is the one exception (see
+   [Filtering a list](#filtering-a-list-by-the-partners-allowed-values-filter)).
 2. A required dimension the request carries no value for (header or query
    parameter absent, empty path parameter). An identifier with no value cannot be
    matched, and sending it absent would quietly ask a question the route did not
@@ -872,6 +873,64 @@ if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after r
 * `resolve` is read by this library only: it is never published and is not
   part of `CanonicalHash`.
 
+### Filtering a list by the partner's allowed values (`filter`)
+
+A route that lists instances — `GET .../accounts` — usually does not name the
+one the partner is scoped on: it asks for all of them. Instead of refusing such
+a request, a route can opt in to filtering: the authorization service answers
+with the values the partner may see, and the handler confines its list to them.
+
+```yaml
+scope:
+  routes:
+    - method: GET
+      path: /v1/organizations/:organization_id/ledgers/:ledger_id/accounts
+      filter: [accountId]
+    - method: GET
+      path: /v1/organizations
+      filter: [organizationId]
+```
+
+```go
+func (h *Handler) ListAccounts(c fiber.Ctx) error {
+    filter := AccountFilter{}
+
+    if scope, ok := authMiddleware.ScopeFromContext(c.Context()); ok {
+        if ids, ok := scope.Allowed("accountId"); ok {
+            filter.IDs = ids // WHERE id IN (...); an empty list lists nothing
+        }
+    }
+    // ...
+}
+```
+
+* `filter` names catalog dimensions, each once. A `scope.routes` entry may
+  declare a filter, dimensions, or both. Without a manifest,
+  `RequireScope(...).Filter("accountId")` declares the same on one route.
+* For a **partner-bound credential**, every question that leaves a filtered
+  dimension out carries it in a `filter` member (see
+  [the response](#-expected-authorization-service-response)). The service may
+  then allow the request and answer with `allowed` values for it.
+* `RequestScope.Allowed(dimension)` returns those values and `true`. **An empty
+  list means the partner may see none** — list nothing; it never means "no
+  restriction". `false` means the service confined nothing on that dimension.
+  Values the service returns for a dimension the request did not ask to filter
+  are ignored. When the request asked several questions, `Allowed` returns the
+  values any of them returned.
+* A filter route whose request names **no dimension at all** (`GET
+  /v1/organizations`) is asked instead of refused, and must be answered with
+  `allowed` values for every filtered dimension: a grant without them is
+  refused with 403, since nothing else confines the list.
+* A dimension the request does name is asked about, as on any other route, and
+  is not filtered.
+* Callers that are not partner-bound, and routes that do not filter, send no
+  `filter` member and read no allowed values: their requests are unchanged.
+* A service that does not know `filter` keeps denying the request as before.
+  The allowed values are cached with the decision, and the filter is part of
+  the cache key.
+* `filter` lives under `scope.routes`, which this library reads alone: it is
+  never published and is not part of `CanonicalHash`.
+
 **Publication.** The scope section is published to the access manager whenever
 the product's auth is on, independently of the permission declaration switch.
 With the permission declaration on, the full manifest (scope included) is
@@ -967,6 +1026,40 @@ answered with:
 
 The field is optional and additive. A service that never publishes it produces
 exactly the behavior this middleware had before the field existed.
+
+A partner-bound request on a route that [filters](#filtering-a-list-by-the-partners-allowed-values-filter)
+names, in a `filter` member of the request, the filtered dimensions it leaves
+out:
+
+```json
+{
+    "sub": "acme/app",
+    "resource": "accounts",
+    "action": "get",
+    "product": "midaz",
+    "attributes": {"organizationId": "org-1", "ledgerId": "led-1"},
+    "filter": ["accountId"]
+}
+```
+
+Instead of denying because `accountId` is absent, the service may allow the
+request and answer with the values the partner may see:
+
+```json
+{
+    "authorized": true,
+    "timestamp": "2025-03-03T12:00:00Z",
+    "allowed": {"accountId": ["acc-1", "acc-2"]}
+}
+```
+
+* `allowed` is read only on a grant, and only for the dimensions the request
+  named in `filter`. A list, possibly empty, of non-empty strings; `null` reads
+  as an empty list. Any other shape is the service failing to answer (503).
+* A grant without `allowed` for a dimension confines nothing on it, except on a
+  request that names no dimension at all, which is then refused.
+* A request without `filter` never needs `allowed`, and a denial is a denial
+  whatever it carries.
 
 ## 🔒 gRPC usage
 

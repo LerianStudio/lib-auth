@@ -207,6 +207,8 @@ type ScopeDeclaration struct {
 	// body is the compiled plan of the dimensions read from the request body, or
 	// nil when the route reads none.
 	body *bodyPlan
+	// filter names the dimensions the route filters its list on (see Filter).
+	filter []string
 }
 
 // RequireScope declares the dimensions a route's requests carry, for the product
@@ -239,6 +241,9 @@ type RequestScope struct {
 	// distinct set the body names, and Attributes then keeps only the
 	// identifiers every set shares.
 	Sets []map[string]string
+	// allowed are the values the authorization service returned per filtered
+	// dimension; read them with Allowed.
+	allowed map[string][]string
 }
 
 // requestScopeContextKey is the unexported, typed key the scope is stored under.
@@ -439,6 +444,10 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 		return ScopeDeclaration{}, problem
 	}
 
+	if filterErr := filterProblem(scope.filter); filterErr != "" {
+		return ScopeDeclaration{}, filterErr
+	}
+
 	scope.body = plan
 
 	return scope, ""
@@ -611,6 +620,12 @@ func checkAgainstCatalog(scope ScopeDeclaration, catalog []Dimension) string {
 		}
 	}
 
+	for _, name := range scope.filter {
+		if _, ok := known[name]; !ok {
+			return "scope filter dimension " + name + " is not declared in the manifest scope of product " + scope.product
+		}
+	}
+
 	return ""
 }
 
@@ -683,6 +698,7 @@ func (r *routeScope) forRoute(method, path string) ScopeDeclaration {
 	if declared {
 		scope.dims = body.dims
 		scope.body = body.plan
+		scope.filter = body.filter
 	}
 
 	r.byRoute.Store(key, cachedRouteScope{generation: generation, scope: scope})
