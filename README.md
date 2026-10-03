@@ -625,6 +625,35 @@ f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
 * Validation: `from` must be `path`; `name`, `param` and `collection` are
   required and names and params are unique; `label` is optional.
 
+#### Confining related collections (`covers`)
+
+A dimension's `collection` is where its instances live. A partner scoped on the
+dimension is confined when a request does not name it and the request's resource
+is that collection. When other collections hold items that belong to the
+dimension's instances, list them under `covers` so a request against them that
+does not name the dimension is confined the same way:
+
+```yaml
+scope:
+  dimensions:
+    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations }
+    - name: accountId
+      from: path
+      param: account_id
+      multi: true
+      collection: accounts
+      covers: [balances, operations]   # items that belong to an account
+```
+
+* `covers` is optional. The authorization service enforces it; this library
+  validates it, publishes it (also on a scope-only publication) and includes it
+  in the manifest hash, so a change to `covers` alone is republished.
+* Entries must be non-empty, unique within the dimension and different from the
+  dimension's own `collection`; collections are compared trimmed and
+  case-insensitively.
+* The order of the entries is content, like the order of the dimensions.
+* A manifest without `covers` publishes the same body and hash as before.
+
 ### Reading dimensions from the request body
 
 Some routes carry the instance they address in the JSON body, not the path — for

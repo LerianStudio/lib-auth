@@ -127,6 +127,16 @@ type DeclarationDimension struct {
 	// Collection names the product collection the values are identifiers of
 	// (e.g. "organizations"). Required.
 	Collection string `json:"collection,omitempty" yaml:"collection,omitempty"`
+	// Covers optionally names OTHER product collections whose items belong to
+	// the dimension's instances (e.g. an accountId dimension, whose collection is
+	// "accounts", covering "balances" and "operations"). A partner scoped on the
+	// dimension is confined on a request that does not name it when the request's
+	// resource is the dimension's own collection; Covers extends that confinement
+	// to the listed collections. The authorization service enforces it; this
+	// library declares, validates and publishes it. Entries are non-empty, unique
+	// and distinct from Collection, all compared case-insensitively. The order is
+	// content: it is hashed like the dimensions' order.
+	Covers []string `json:"covers,omitempty" yaml:"covers,omitempty"`
 	// Label is an optional human-readable name for consoles.
 	Label string `json:"label,omitempty" yaml:"label,omitempty"`
 }
@@ -265,6 +275,12 @@ func (m *DeclarationManifest) serverProjection() *DeclarationManifest {
 // (plugin-access-manager/components/identity/pkg/model/declaration.go:277): the
 // server stores this hex in the app's `declaration-hash` Tag and no-ops the PUT
 // when it matches, so the two implementations MUST agree.
+//
+// A dimension's Covers is hashed with the rest of the scope. The publisher skips
+// a PUT whose hash it already published, so a field left out of the hash would
+// make a covers-only change never reach the service; and because Covers is
+// omitempty, a manifest that declares none serializes to the same bytes, and
+// hashes to the same value, as before the field existed.
 func (m *DeclarationManifest) CanonicalHash() (string, error) {
 	published := m.serverProjection()
 
@@ -421,7 +437,8 @@ func (m *DeclarationManifest) validatePermissions(declaredRoles map[string]struc
 
 // validateScope validates the scope catalog: every dimension names itself, reads
 // from a path parameter, names the parameter and the collection, and no two
-// dimensions share a name or a parameter. A shared name would make two
+// dimensions share a name or a parameter; a dimension's covers are checked by
+// validateCovers. A shared name would make two
 // dimensions one attribute; a shared parameter would make one path segment answer
 // for two dimensions. An absent scope, or one with no dimensions, is valid.
 func (m *DeclarationManifest) validateScope() []string {
@@ -466,9 +483,44 @@ func (m *DeclarationManifest) validateScope() []string {
 		if strings.TrimSpace(d.Collection) == "" {
 			violations = append(violations, prefix+": collection must not be empty")
 		}
+
+		violations = append(violations, validateCovers(prefix, d)...)
 	}
 
 	return append(violations, m.validateScopeRoutes(seenNames)...)
+}
+
+// validateCovers validates one dimension's covers: every entry names a
+// collection, none repeats another, and none repeats the dimension's own
+// collection. Collections are compared trimmed and case-insensitively, as the
+// authorization service compares them, so two spellings of one collection are
+// one collection.
+func validateCovers(prefix string, d DeclarationDimension) []string {
+	var violations []string
+
+	own := strings.TrimSpace(d.Collection)
+	seen := make(map[string]struct{}, len(d.Covers))
+
+	for j, c := range d.Covers {
+		entry := fmt.Sprintf("%s.covers[%d]", prefix, j)
+		trimmed := strings.TrimSpace(c)
+		key := strings.ToLower(trimmed)
+
+		switch {
+		case trimmed == "":
+			violations = append(violations, entry+": must not be empty")
+		case strings.EqualFold(trimmed, own):
+			violations = append(violations, fmt.Sprintf("%s: must not repeat the dimension's own collection %q", entry, own))
+		default:
+			if _, dup := seen[key]; dup {
+				violations = append(violations, fmt.Sprintf("%s: duplicate collection %q", entry, trimmed))
+			} else {
+				seen[key] = struct{}{}
+			}
+		}
+	}
+
+	return violations
 }
 
 // validateScopeRoutes validates scope.routes against the catalog: every route
