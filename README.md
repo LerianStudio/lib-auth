@@ -822,6 +822,30 @@ pub, err := declaration.New(declaration.Config{
 `scope` section publishes nothing in that mode. A scope that cannot be published
 (missing configuration, access manager down) is logged and never fails the boot.
 
+### Declaring the level of a resource (`level`)
+
+A permission may say how wide one instance of its resource is, so the access
+manager can refuse to grant a partner a write on a resource wider than the
+partner's scope:
+
+```yaml
+permissions:
+  - { resource: organizations, action: update, effect: allow, roles: [admin], level: tenant }
+  - { resource: ledgers,       action: update, effect: allow, roles: [admin], level: organization }
+  - { resource: accounts,      action: update, effect: allow, roles: [admin], level: ledger }
+  - { resource: balances,      action: update, effect: allow, roles: [admin], level: accountId }
+```
+
+* `level` is `tenant`, `organization`, `ledger`, or the `name` of a dimension of
+  the manifest's `scope` catalog, spelled exactly. Anything else fails
+  validation, at boot.
+* It is optional, published with the permission, and part of `CanonicalHash`:
+  changing it republishes the manifest. It is the last member of a permission
+  on the wire and in the hash, and a permission without it serializes exactly
+  as before.
+* The access manager enforces it; this library declares, validates and
+  publishes it.
+
 ## 📡 Expected Authorization Service Response
 
 The authorization service should return a JSON response in the following format:

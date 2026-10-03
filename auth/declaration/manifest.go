@@ -171,6 +171,14 @@ type DeclarationPermission struct {
 	Action   string   `json:"action,omitempty" yaml:"action,omitempty"`
 	Effect   string   `json:"effect,omitempty" yaml:"effect,omitempty"`
 	Roles    []string `json:"roles,omitempty" yaml:"roles,omitempty"`
+	// Level optionally names how wide one instance of the resource is: "tenant"
+	// (the resource spans the whole tenant), "organization", "ledger", or the
+	// name of a scope dimension (scope.dimensions[].name) whose instances hold it.
+	// The access manager uses it to refuse granting a partner a write on a
+	// resource wider than the partner's narrowest scope. It is published and
+	// hashed; it is the LAST member of a permission, and omitted when empty, so a
+	// manifest that declares no level publishes the same bytes as before.
+	Level string `json:"level,omitempty" yaml:"level,omitempty"`
 }
 
 // DeclarationRole is a role declared by the plugin. A role names itself and
@@ -348,6 +356,7 @@ func (m *DeclarationManifest) Validate() error {
 	violations = append(violations, roleViolations...)
 	violations = append(violations, m.validatePermissions(declaredRoles)...)
 	violations = append(violations, m.validateScope()...)
+	violations = append(violations, m.validateLevels()...)
 
 	if len(violations) == 0 {
 		return nil
@@ -454,6 +463,52 @@ func (m *DeclarationManifest) validatePermissions(declaredRoles map[string]struc
 	}
 
 	return violations
+}
+
+// Resource levels a permission may name besides a scope dimension.
+const (
+	levelTenant       = "tenant"
+	levelOrganization = "organization"
+	levelLedger       = "ledger"
+)
+
+// validateLevels checks every permission's level is a level keyword or the
+// name of a scope dimension, spelled exactly: the access manager compares it
+// as written, so a near miss would be a level nobody recognizes.
+func (m *DeclarationManifest) validateLevels() []string {
+	var violations []string
+
+	for i, p := range m.Permissions {
+		switch p.Level {
+		case "", levelTenant, levelOrganization, levelLedger:
+			continue
+		}
+
+		if m.hasDimension(p.Level) {
+			continue
+		}
+
+		violations = append(violations, fmt.Sprintf(
+			`permissions[%d]: level %q must be %q, %q, %q or a scope dimension name`,
+			i, p.Level, levelTenant, levelOrganization, levelLedger))
+	}
+
+	return violations
+}
+
+// hasDimension reports whether the scope catalog declares a dimension named name.
+func (m *DeclarationManifest) hasDimension(name string) bool {
+	if m.Scope == nil {
+		return false
+	}
+
+	for _, d := range m.Scope.Dimensions {
+		if d.Name == name {
+			return true
+		}
+	}
+
+	return false
 }
 
 // validateScope validates the scope catalog: every dimension names itself, reads
