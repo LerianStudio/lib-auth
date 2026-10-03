@@ -120,8 +120,9 @@ type Config struct {
 	// Logger receives structured logs. Defaults to a no-op logger when nil.
 	Logger obs.Logger
 	// ScopeOnly publishes ONLY the manifest's scope section (with its service and
-	// version), leaving the permissions, roles and m2m sections out of the body
-	// so the access manager keeps what it already holds for them.
+	// version), the partner opt-in and the permissions' levels, leaving the
+	// permissions, roles and m2m sections out of the body so the access manager
+	// keeps what it already holds for them.
 	//
 	// The scope catalog is published whenever the product's auth is enabled,
 	// while the permission sections keep their own switch. A product whose
@@ -238,7 +239,7 @@ func New(cfg Config) (*Publisher, error) {
 		return nil, fmt.Errorf("slug %q must equal manifest.service %q (BOLA: DisplayName==slug==service)", cfg.Slug, manifest.Service)
 	}
 
-	published := manifest
+	var published publication = manifest
 	if cfg.ScopeOnly {
 		published = manifest.scopeOnly()
 	}
@@ -279,6 +280,13 @@ func New(cfg Config) (*Publisher, error) {
 		cacheTTL:             defaultCacheTTL,
 		httpClient:           &http.Client{Timeout: 30 * time.Second},
 	}, nil
+}
+
+// publication is a body the publisher sends: the full manifest, or its
+// scope-only projection.
+type publication interface {
+	wireJSON() ([]byte, error)
+	CanonicalHash() (string, error)
 }
 
 func validateConfig(cfg Config) error {

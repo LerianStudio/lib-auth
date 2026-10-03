@@ -245,6 +245,34 @@ type canonicalManifest struct {
 	// Partners is appended after Scope and omitted when false, for the same
 	// reason.
 	Partners bool `json:"partners,omitempty"`
+	// Levels is appended after Partners. Only the scope-only publication sets
+	// it (see scopeOnlyManifest); the full manifest carries each level inside
+	// its permission, so this member is omitted there and its hash is unchanged.
+	Levels []DeclarationLevel `json:"levels,omitempty"`
+}
+
+// DeclarationLevel is the level a permission declares, without its roles and
+// effect. The scope-only publication carries one per permission that declares a
+// level, so the authorization service knows how wide each resource is when the
+// permission declaration itself is not published.
+type DeclarationLevel struct {
+	Resource string `json:"resource,omitempty"`
+	Action   string `json:"action,omitempty"`
+	Level    string `json:"level,omitempty"`
+}
+
+// scopeOnlyManifest is the body a scope-only publication sends: the service and
+// version that identify it, the scope, the partner opt-in, and the permissions'
+// levels. Every other section is left out, so the receiver replaces nothing but
+// those. Levels is the LAST member and omitted when no permission declares a
+// level, so such a manifest publishes the same bytes and hash as before it
+// existed.
+type scopeOnlyManifest struct {
+	Service  string             `json:"service,omitempty"`
+	Version  int                `json:"version,omitempty"`
+	Scope    *DeclarationScope  `json:"scope,omitempty"`
+	Partners bool               `json:"partners,omitempty"`
+	Levels   []DeclarationLevel `json:"levels,omitempty"`
 }
 
 // ManifestError reports an invalid or unparseable manifest. It is the client-side
@@ -297,11 +325,49 @@ func (m *DeclarationManifest) wireJSON() ([]byte, error) {
 	return payload, nil
 }
 
-// scopeOnly is the projection a scope-only publication sends: the service and
-// version that identify it, the scope, and the partner opt-in. Every other
-// section is left out, so the receiver replaces nothing but those.
-func (m *DeclarationManifest) scopeOnly() *DeclarationManifest {
-	return &DeclarationManifest{Service: m.Service, Version: m.Version, Scope: m.Scope, Partners: m.Partners}
+// scopeOnly is the projection a scope-only publication sends (see
+// scopeOnlyManifest). The scope is the server projection's: scope.routes and the
+// dimensions' resolve stay with this library.
+func (m *DeclarationManifest) scopeOnly() *scopeOnlyManifest {
+	published := (&DeclarationManifest{Service: m.Service, Scope: m.Scope}).serverProjection()
+
+	var levels []DeclarationLevel
+
+	for _, p := range m.Permissions {
+		if p.Level != "" {
+			levels = append(levels, DeclarationLevel{Resource: p.Resource, Action: p.Action, Level: p.Level})
+		}
+	}
+
+	return &scopeOnlyManifest{
+		Service:  m.Service,
+		Version:  m.Version,
+		Scope:    published.Scope,
+		Partners: m.Partners,
+		Levels:   levels,
+	}
+}
+
+// wireJSON marshals the scope-only body PUT to the identity service.
+func (s *scopeOnlyManifest) wireJSON() ([]byte, error) {
+	payload, err := json.Marshal(s)
+	if err != nil {
+		return nil, fmt.Errorf("marshal scope-only manifest: %w", err)
+	}
+
+	return payload, nil
+}
+
+// CanonicalHash hashes the scope-only body the way DeclarationManifest.
+// CanonicalHash hashes the full one: the same canonical member order, the
+// version left out, and the levels as the LAST member.
+func (s *scopeOnlyManifest) CanonicalHash() (string, error) {
+	return hashCanonical(canonicalManifest{
+		Service:  s.Service,
+		Scope:    s.Scope,
+		Partners: s.Partners,
+		Levels:   s.Levels,
+	})
 }
 
 // hasScopeCatalog reports whether a scope-only publication has anything to
@@ -375,7 +441,7 @@ func resolveProblem(prefix, resolve string) string {
 func (m *DeclarationManifest) CanonicalHash() (string, error) {
 	published := m.serverProjection()
 
-	payload, err := json.Marshal(canonicalManifest{
+	return hashCanonical(canonicalManifest{
 		Service:     published.Service,
 		Permissions: published.Permissions,
 		Roles:       published.Roles,
@@ -383,6 +449,11 @@ func (m *DeclarationManifest) CanonicalHash() (string, error) {
 		Scope:       published.Scope,
 		Partners:    published.Partners,
 	})
+}
+
+// hashCanonical returns the hex-encoded SHA-256 of the canonical serialization.
+func hashCanonical(c canonicalManifest) (string, error) {
+	payload, err := json.Marshal(c)
 	if err != nil {
 		return "", fmt.Errorf("marshal canonical manifest: %w", err)
 	}

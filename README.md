@@ -935,7 +935,8 @@ func (h *Handler) ListAccounts(c fiber.Ctx) error {
 the product's auth is on, independently of the permission declaration switch.
 With the permission declaration on, the full manifest (scope included) is
 published as before. With it off, build the publisher anyway when auth is on and
-set `ScopeOnly`, which sends only `service`, `version`, `scope` and `partners`:
+set `ScopeOnly`, which sends only `service`, `version`, `scope`, `partners` and
+the permissions' `levels` (see below):
 
 ```go
 pub, err := declaration.New(declaration.Config{
@@ -991,6 +992,25 @@ permissions:
   changing it republishes the manifest. It is the last member of a permission
   on the wire and in the hash, and a permission without it serializes exactly
   as before.
+* The scope-only publication (`ScopeOnly`) carries no permissions, so it
+  carries the levels apart, as its last member: one `{resource, action, level}`
+  entry per permission that declares a level, in declaration order, without
+  roles or effect. For the manifest above:
+
+  ```json
+  "levels": [
+    {"resource": "organizations", "action": "update", "level": "tenant"},
+    {"resource": "ledgers", "action": "update", "level": "organization"},
+    {"resource": "accounts", "action": "update", "level": "ledger"},
+    {"resource": "balances", "action": "update", "level": "accountId"}
+  ]
+  ```
+
+  `levels` is part of the scope-only `CanonicalHash`, as its last member, after
+  `partners`; the version is left out as in the full hash. It is omitted when no
+  permission declares a level, so such a manifest publishes the same scope-only
+  bytes and hash as before. The full manifest never carries `levels`: each
+  level is already inside its permission.
 * The access manager enforces it; this library declares, validates and
   publishes it.
 
