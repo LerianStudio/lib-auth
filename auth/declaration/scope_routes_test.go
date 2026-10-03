@@ -226,9 +226,14 @@ func TestWireScope_RouteErrorsFailTheBoot(t *testing.T) {
 	require.NotEqual(t, routedYAML, unknownFrom)
 	require.ErrorContains(t, WireScope(auth, []byte(unknownFrom)), `got "path"`)
 
-	badField := strings.Replace(routedYAML, `"items[].ledgerId"`, `"items[]"`, 1)
+	badField := strings.Replace(routedYAML, `"items[].ledgerId"`, `"items[]."`, 1)
 	require.NotEqual(t, routedYAML, badField)
-	require.ErrorContains(t, WireScope(auth, []byte(badField)), "items[]")
+	require.ErrorContains(t, WireScope(auth, []byte(badField)), `"items[]."`)
+
+	// A field ending in "[]" is an array of strings: wired.
+	stringArray := strings.Replace(routedYAML, `"items[].ledgerId"`, `"ledgerIds[]"`, 1)
+	require.NotEqual(t, routedYAML, stringArray)
+	require.NoError(t, WireScope(&middleware.AuthClient{Logger: obs.Nop()}, []byte(stringArray)))
 
 	require.NoError(t, WireScope(auth, []byte(routedYAML)), "positive control")
 }

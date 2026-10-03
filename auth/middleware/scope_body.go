@@ -24,8 +24,10 @@ import (
 //	"target.id"               a key of a nested object
 //	"items[].id"              the key in every element of the array
 //	"groups[].items[].id"     the key in every element of nested arrays
+//	"target.ids[]"            every string of an array of strings
 //
-// The last key names a string; keys cannot contain '.', '[' or ']'.
+// The last key names a string, or an array of strings when it ends in "[]";
+// keys cannot contain '.', '[' or ']'.
 //
 // Every value the path reaches must be inside the credential's scope: each array
 // element is its own question to the authorization service, and the request is
@@ -51,6 +53,14 @@ import (
 // unless it is a non-empty string, and an array that is there must still be a
 // non-empty array. A question that ends up naming no dimension at all is refused
 // for a partner, as a route that declares none is.
+//
+// A field ending in "[]" reads an array of strings: every element is one value,
+// its own question, and an element that is not a non-empty string is refused
+// with 400 naming the element. Optional applies to the array as a whole: absent
+// or null, the dimension is absent. An empty array names no value, Optional or
+// not: the questions are asked without the dimension, and the other dimensions
+// are still asked. The elements of such an array are strings, so no other field
+// of the route may read inside them.
 //
 // It is appended after the other sources so their values do not move.
 const FromBody Source = FromQuery + 1
@@ -94,6 +104,9 @@ type bodyField struct {
 	segments  []bodySegment
 	prefixLen int
 	depth     int
+	// strings is set when the path ends in an array of strings: the element
+	// itself is the value, so prefixLen spans the whole path.
+	strings bool
 }
 
 // bodyGroup is one innermost array (or the body itself when no field crosses an
@@ -102,6 +115,8 @@ type bodyField struct {
 type bodyGroup struct {
 	prefix []bodySegment
 	fields []bodyField
+	// strings is set when the innermost array is an array of strings.
+	strings bool
 }
 
 // bodyPlan is a route's body dimensions, compiled once at registration.
@@ -135,10 +150,6 @@ func parseBodyField(field string) ([]bodySegment, string) {
 		}
 
 		segments = append(segments, bodySegment{key: key, array: array})
-	}
-
-	if segments[len(segments)-1].array {
-		return nil, "declares body field " + strconv.Quote(field) + ", which must end at a key holding a string, not at an array"
 	}
 
 	return segments, ""
@@ -208,12 +219,18 @@ func compileBodyPlan(dims []Dimension) (*bodyPlan, string) {
 			}
 		}
 
+		field.strings = segments[len(segments)-1].array
+
 		fields = append(fields, field)
 		names[dim.name] = struct{}{}
 	}
 
 	if len(fields) == 0 {
 		return nil, ""
+	}
+
+	if problem := readInsideStrings(fields); problem != "" {
+		return nil, problem
 	}
 
 	plan := &bodyPlan{fields: make([]string, 0, len(fields)), firstField: make(map[string]string), allOptional: true}
@@ -237,6 +254,28 @@ func compileBodyPlan(dims []Dimension) (*bodyPlan, string) {
 	}
 
 	return plan, ""
+}
+
+// readInsideStrings describes the first field that reads inside the elements of
+// an array another field reads as strings, or returns "".
+func readInsideStrings(fields []bodyField) string {
+	for _, s := range fields {
+		if !s.strings {
+			continue
+		}
+
+		for _, f := range fields {
+			if f.dim.key == s.dim.key || !isSegmentPrefix(s.segments, f.segments[:f.prefixLen]) {
+				continue
+			}
+
+			return "scope dimension " + f.dim.name + " reads body field " + strconv.Quote(f.dim.key) +
+				" inside the elements of " + strconv.Quote(s.dim.key) + ", which scope dimension " + s.dim.name +
+				" reads as strings"
+		}
+	}
+
+	return ""
 }
 
 // leafPrefixes returns the array prefixes no other field's prefix extends, in
@@ -291,6 +330,7 @@ func buildBodyGroup(leaf []bodySegment, fields []bodyField, names map[string]str
 
 		seen[f.dim.name] = struct{}{}
 		group.fields = append(group.fields, f)
+		group.strings = group.strings || f.strings
 	}
 
 	for _, f := range fields {
@@ -613,6 +653,19 @@ func (w groupWalk) walk(node any, i int, location string, chain []any, locations
 	}
 
 	elements, ok := child.([]any)
+
+	// The innermost array of a group of strings holds the values themselves:
+	// an empty one names none, and the question goes without them.
+	if w.group.strings && i == len(w.group.prefix)-1 {
+		if !ok {
+			return bodyFieldError(at, "must be a JSON array of strings")
+		}
+
+		if len(elements) == 0 {
+			return w.emit(chain, locations)
+		}
+	}
+
 	if !ok || len(elements) == 0 {
 		return bodyFieldError(at, "must be a non-empty JSON array")
 	}

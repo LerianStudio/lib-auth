@@ -585,7 +585,7 @@ func TestSetManifestRouteScope_Validation(t *testing.T) {
 		{name: "outside_catalog", method: "POST", path: directPath, dims: []Dimension{Dim("portfolioId", FromBody).At("portfolioId")}, wantErr: "portfolioId"},
 		{name: "empty_field", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("")}, wantErr: "empty request key"},
 		{name: "empty_segment", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("a..b")}, wantErr: "a..b"},
-		{name: "trailing_array", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("ids[]")}, wantErr: "ids[]"},
+		{name: "empty_key_after_array", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("ids[].")}, wantErr: `"ids[]."`},
 		{name: "bad_brackets", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("a[0].b")}, wantErr: "a[0].b"},
 		{name: "same_name_same_element", method: "POST", path: directPath, dims: []Dimension{
 			Dim("organizationId", FromBody).At("items[].organizationId"), Dim("organizationId", FromBody).At("items[].orgId"),
@@ -649,7 +649,7 @@ func TestRequireScope_BodyFieldValidation(t *testing.T) {
 
 	app := fiber.New()
 	app.Post("/bad", auth.Authorize("midaz", "transactions", "post",
-		RequireScope("midaz", Dim("organizationId", FromBody).At("items[]"))), ok)
+		RequireScope("midaz", Dim("organizationId", FromBody).At("items[]."))), ok)
 	app.Post("/split", auth.Authorize("midaz", "transactions", "post",
 		RequireScope("midaz", Dim("organizationId", FromBody).At("a[].organizationId"), Dim("ledgerId", FromBody).At("b[].ledgerId"))), ok)
 

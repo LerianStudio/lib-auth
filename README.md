@@ -739,7 +739,8 @@ scope:
 
 * `field` is a path of object keys separated by `.`; `key[]` is an array whose
   every element is read (`transactions[].legs[].ledgerId` crosses two). The last
-  key holds a string.
+  key holds a string — or, ending in `[]`, an array of strings
+  (`accountTarget.ids[]`), every string being one value.
 * **Every value must be inside the scope.** Each array element is one question to
   the authorization service (repeated sets are asked once), and the request is
   refused when any one is denied. Fields under the same element travel together;
@@ -754,6 +755,19 @@ scope:
   field sits in is absent or `null` and every field below it is optional, those
   fields are left out together. A present array must still be a non-empty array.
   With every body field optional, an empty body names none of them.
+* **An array of strings** (`field: "accountTarget.ids[]"`):
+  * every element is one value, its own question; an element that is empty or
+    not a string is answered **400 naming the element** (`accountTarget.ids[1]`);
+  * `optional` applies to the array as a whole: absent or `null`, the dimension
+    is absent from the question;
+  * an empty array (`[]`) names no value, with or without `optional`: the
+    questions are asked without the dimension, and every other dimension the
+    request names is still asked. A request left naming no dimension at all is
+    refused for a partner, as always;
+  * inside an array of objects (`targets[].ids[]`), each element's strings are
+    asked with that element's other fields;
+  * no other field may read inside its elements (`accountTarget.ids[].x`): the
+    route fails at `WireScope`.
 * The body is read **only for a partner-bound credential**. Every other caller is
   decided as before: one authorization call carrying only the dimensions read
   from the path, headers or query, and the body left to the handler.

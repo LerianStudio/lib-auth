@@ -121,7 +121,9 @@ type DeclarationRouteDimension struct {
 	From string `json:"from,omitempty" yaml:"from,omitempty"`
 	// Field is where under From the value is. For "body", its path in the JSON
 	// body: object keys separated by '.', a key followed by "[]" being an array
-	// whose every element is read ("id", "items[].id"); see middleware.FromBody.
+	// whose every element is read ("id", "items[].id"), and a path ending in "[]"
+	// an array of strings, every string one value ("target.ids[]"); see
+	// middleware.FromBody.
 	// For "form", the form field name; for "query", the parameter name; for
 	// "header", the header name, in any letter case. A form field, query
 	// parameter or header may list several values; see middleware.FromQuery and
