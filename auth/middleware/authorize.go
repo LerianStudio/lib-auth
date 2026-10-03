@@ -24,6 +24,14 @@ type requestView interface {
 	clientIP(auth *AuthClient) string
 	// dimension returns the value the request carries for d, or "".
 	dimension(d Dimension) string
+	// route returns the method and the registered path of the route serving the
+	// request, its parameters written ":name", which is how a route that relies
+	// on its product's manifest scope finds its dimensions. A path the adapter
+	// cannot tell is "", and such a route derives no dimension.
+	route() (method, path string)
+	// body returns the request body, read for a route that declares dimensions
+	// in it; a body the adapter cannot read is the refusal.
+	body() ([]byte, *RefusalError)
 }
 
 // authorizeRoute is what a mounted middleware knows about its route, fixed at
@@ -33,6 +41,10 @@ type authorizeRoute struct {
 	resource string
 	action   string
 	scope    ScopeDeclaration
+	// derived is set when the route passes no RequireScope and its product has
+	// a manifest scope: the route's dimensions are then derived per request
+	// from the route it is served on.
+	derived *routeScope
 	// declErr is non-empty when the scope declaration cannot be honoured; every
 	// request on the route is then refused.
 	declErr string
@@ -42,10 +54,21 @@ type authorizeRoute struct {
 // time, not per request: a misdeclared route is a programming error and every one
 // of its requests is refused, which is what makes it visible on the first call
 // instead of on the first partner.
-func newAuthorizeRoute(product, resource, action string, scopes []ScopeDeclaration) authorizeRoute {
-	scope, declErr := resolveDeclaration(product, scopes)
+func (auth *AuthClient) newAuthorizeRoute(product, resource, action string, scopes []ScopeDeclaration) authorizeRoute {
+	scope, derived, declErr := auth.registerRouteScope(product, scopes)
 
-	return authorizeRoute{product: product, resource: resource, action: action, scope: scope, declErr: declErr}
+	return authorizeRoute{product: product, resource: resource, action: action, scope: scope, derived: derived, declErr: declErr}
+}
+
+// scopeFor is the declaration the request in flight is decided on: the route's
+// own, or the one derived from its product's manifest scope for the route the
+// request is served on.
+func (route authorizeRoute) scopeFor(req requestView) ScopeDeclaration {
+	if route.derived == nil {
+		return route.scope
+	}
+
+	return route.derived.forRoute(req.route())
 }
 
 // authorizeOutcome is what the shared flow decided for one request. With neither
@@ -158,41 +181,25 @@ func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorize
 	// A declared dimension the request does not carry is refused here, before the
 	// round-trip: an identifier with no value cannot be matched against a
 	// partner's scope, and sending it absent would ask a narrower question.
-	attributes, missing := resolveAttributes(req, route.scope.dims)
+	scope := route.scopeFor(req)
+
+	attributes, missing := resolveAttributes(req, scope.dims)
 	if missing != "" {
 		logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
 
 		return authorizeOutcome{refusal: statusRefusal(http.StatusForbidden)}
 	}
 
-	resolution, principal := auth.checkAuthorizationWithPrincipal(ctx, authzParams{
+	resolution, principal, questions, refusal := auth.authorizeRequest(ctx, req, authzParams{
 		product:     route.product,
 		resource:    route.resource,
 		action:      route.action,
 		accessToken: accessToken,
 		clientIP:    clientIP,
-		attributes:  attributes,
-		declared:    route.scope.declared(),
-	})
-
-	// checkResult, not legacyResult: an Access Manager that never produced an
-	// answer is refused as 503, so the outage lands in the service's 5xx alarms
-	// instead of reading as "you are Forbidden".
-	authorized, statusCode, err := resolution.checkResult()
-	if err != nil {
-		var commonsErr commons.Response
-		if errors.As(err, &commonsErr) {
-			return authorizeOutcome{refusal: accessManagerRefusalAt(statusCode, commonsErr)}
-		}
-
-		return authorizeOutcome{refusal: statusRefusal(statusCode)}
-	}
-
-	if !authorized {
-		// The denial reason picks the word: a credential the Access Manager called
-		// finished is answered 401 so its holder re-issues it; every other denial
-		// stays 403.
-		return authorizeOutcome{refusal: statusRefusal(denialStatus(resolution.reason))}
+		declared:    scope.declared(),
+	}, scope, attributes)
+	if refusal != nil {
+		return authorizeOutcome{refusal: refusal}
 	}
 
 	recordPrincipalType(span, principal)
@@ -200,10 +207,107 @@ func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorize
 	outcome := authorizeOutcome{principal: &principal}
 
 	if resolution.partner != "" {
-		outcome.scope = &RequestScope{Partner: resolution.partner, Attributes: attributes}
+		outcome.scope = &RequestScope{
+			Partner:    resolution.partner,
+			Attributes: sharedAttributes(questions),
+			Sets:       questions,
+		}
 	}
 
 	return outcome
+}
+
+// authorizeRequest decides one request: it derives the caller once, works out
+// the questions the request makes, and asks them in order under ONE deadline for
+// the whole request, stopping at the first that is not allowed. It returns the
+// last resolution and the questions asked, or the refusal.
+//
+// The body is read only for a partner-bound credential. The authorization
+// service consumes attributes only to decide for a partner; for every other
+// credential it ignores them. So any other caller is decided exactly as before
+// body dimensions existed: one question, carrying only the dimensions read from
+// the path, headers or query, and a body this layer never parses.
+//
+// The questions are asked one after another, not concurrently: they are few
+// (distinct sets, capped), the decision cache answers repeats without a call,
+// the first denial ends the request, and the single deadline bounds the total.
+func (auth *AuthClient) authorizeRequest(ctx context.Context, req requestView, params authzParams, scope ScopeDeclaration, attributes map[string]string) (authzResolution, Principal, []map[string]string, *RefusalError) {
+	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
+
+	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
+	defer span.End()
+
+	span.SetAttributes(attribute.String("app.request.request_id", reqID))
+
+	if refused := auth.insecureEndpointResolution(ctx, span); refused != nil {
+		return authzResolution{}, Principal{}, nil, refusalFor(*refused)
+	}
+
+	// One budget for the whole request, however many questions it makes.
+	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
+	defer cancel()
+
+	caller, failure := auth.deriveCaller(ctx, span, params.accessToken, params.product)
+	if failure != nil {
+		return authzResolution{}, Principal{}, nil, refusalFor(*failure)
+	}
+
+	// A route that reads dimensions from its body asks one question per
+	// distinct set of identifiers the body names, and every one must be
+	// allowed. A body that cannot be read for them is the caller's to fix:
+	// refused before any call, naming the field, and never let through.
+	questions, badBody := scope.questions(req, attributes, caller.partner != "")
+	if badBody != nil {
+		return authzResolution{}, Principal{}, nil, badBody
+	}
+
+	asked := questions
+	if len(asked) == 0 {
+		asked = []map[string]string{nil}
+	}
+
+	var (
+		resolution authzResolution
+		principal  Principal
+	)
+
+	for _, question := range asked {
+		params.attributes = question
+
+		resolution, principal = auth.ask(ctx, span, params, caller)
+
+		if refusal := refusalFor(resolution); refusal != nil {
+			return authzResolution{}, Principal{}, nil, refusal
+		}
+	}
+
+	return resolution, principal, questions, nil
+}
+
+// refusalFor is the refusal a resolution answers the request with, or nil when
+// it allows it.
+func refusalFor(resolution authzResolution) *RefusalError {
+	// checkResult, not legacyResult: an Access Manager that never produced an
+	// answer is refused as 503, so the outage lands in the service's 5xx alarms
+	// instead of reading as "you are Forbidden".
+	authorized, statusCode, err := resolution.checkResult()
+	if err != nil {
+		var commonsErr commons.Response
+		if errors.As(err, &commonsErr) {
+			return accessManagerRefusalAt(statusCode, commonsErr)
+		}
+
+		return statusRefusal(statusCode)
+	}
+
+	if !authorized {
+		// The denial reason picks the word: a credential the Access Manager called
+		// finished is answered 401 so its holder re-issues it; every other denial
+		// stays 403.
+		return statusRefusal(denialStatus(resolution.reason))
+	}
+
+	return nil
 }
 
 // decideWithoutRoundTrip serves the PrincipalRequiredWhenDisabled path: the

@@ -664,6 +664,111 @@ if scope, ok := authMiddleware.ScopeFromContext(c.Context()); ok {
 }
 ```
 
+### Deriving the scope from the manifest
+
+A product that declares a `scope` section in its declaration manifest
+(`permissions.yaml`) does not need to repeat it on every route:
+
+```yaml
+scope:
+  dimensions:            # tree order: first = top of the funnel
+    - { name: organizationId, from: path, param: organization_id, required: true,  collection: organizations, label: "Organization" }
+    - { name: ledgerId,       from: path, param: ledger_id,       multi: true,     collection: ledgers,       label: "Ledger" }
+```
+
+```go
+auth := authMiddleware.NewAuthClient(authHost, authEnabled, logger)
+if err := declaration.WireScope(auth, embeddedManifest); err != nil { // before registering routes
+    return err
+}
+
+f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
+    auth.Authorize("midaz", "accounts", "get"), // no RequireScope
+    accountHandler.GetAccounts)
+```
+
+* The scope is registered under the manifest's `service`, which must be the
+  product the routes pass to `Authorize`. Routes of other products are untouched.
+* A dimension applies to a route when one **whole** path segment is
+  `:<param>` — `:organization_id`, not a literal `organization_id`, not
+  `:organization_id.json`. Applied dimensions are sent in manifest order, as the
+  same `attributes` an explicit declaration sends.
+* A route whose path carries none of the parameters behaves as a route that
+  declares nothing (a partner-bound credential is refused with 403).
+* An explicit `RequireScope` still works and wins, but may only name dimensions
+  the manifest declares; one that names another is refused on every request and
+  logged at ERROR when the route is registered.
+* Validation: `from` must be `path`; `name`, `param` and `collection` are
+  required and names and params are unique; `label` is optional.
+
+### Reading dimensions from the request body
+
+Some routes carry the instance they address in the JSON body, not the path — for
+example `POST /v1/transfers` with `{"organizationId": "...", "items": [{"ledgerId": "..."}]}`.
+Declare those per route under `scope.routes`, since the same dimension comes from
+the path on other routes:
+
+```yaml
+scope:
+  dimensions: [ ... ]    # the catalog, unchanged
+  routes:
+    - method: POST
+      path: /v1/transfers            # full registered path, group prefix included
+      dimensions:
+        - { name: organizationId, from: body, field: organizationId }
+        - { name: ledgerId,       from: body, field: "items[].ledgerId" }
+```
+
+* `field` is a path of object keys separated by `.`; `key[]` is an array whose
+  every element is read (`transactions[].legs[].ledgerId` crosses two). The last
+  key holds a string.
+* **Every value must be inside the scope.** Each array element is one question to
+  the authorization service (repeated sets are asked once), and the request is
+  refused when any one is denied. Fields under the same element travel together;
+  a field of an enclosing element (or of the top level) joins every question of
+  the elements nested in it. A dimension may be read from more than one array
+  (`debits[].ledgerId` and `credits[].ledgerId`), but each question must carry
+  every dimension the route reads from the body. At most 100 distinct sets per
+  request.
+* The route still derives the dimensions its path carries; one dimension cannot
+  come from both.
+* The body is read **only for a partner-bound credential**. Every other caller is
+  decided as before: one authorization call carrying only the dimensions read
+  from the path, headers or query, and the body left to the handler.
+* For a partner-bound credential, a body that is not JSON, a field that is
+  missing, empty or not a string, an array that is missing or empty, or a key
+  repeated in another letter case is answered **400 naming the field**, with no
+  authorization call and no handler call. The handler reads the body untouched.
+* All the questions of one request share one timeout (`AUTH_TIMEOUT`), the
+  token is verified once, and the first denial ends the request.
+* Validation at `WireScope`: `from` must be `body`, `field` is required, `name`
+  must be a catalog dimension, routes are unique by method and path, and the
+  fields must fit together; any error fails the boot.
+* `scope.routes` is read by this library only: it is never published and is not
+  part of `CanonicalHash`, so adding it changes neither.
+* Without a manifest, `RequireScope(product, authMiddleware.Dim("ledgerId", authMiddleware.FromBody).At("items[].ledgerId"))`
+  declares the same on one route — a body field is one more source of the same
+  `Dim`, next to `FromPath`, `FromHeader` and `FromQuery`. `ScopeFromContext(...).Sets` lists every set
+  that was authorized; `Attributes` keeps the identifiers all sets share.
+
+**Publication.** The scope section is published to the access manager whenever
+the product's auth is on, independently of the permission declaration switch.
+With the permission declaration on, the full manifest (scope included) is
+published as before. With it off, build the publisher anyway when auth is on and
+set `ScopeOnly`, which sends only `service`, `version` and `scope`:
+
+```go
+pub, err := declaration.New(declaration.Config{
+    // ... same fields as today ...
+    ScopeOnly: !declarationEnabled,
+})
+```
+
+`WireFromEnv` does this by itself: with `IDP_DECLARATION_ENABLED` off and
+`PLUGIN_AUTH_ENABLED=true` it publishes the scope alone. A manifest without a
+`scope` section publishes nothing in that mode. A scope that cannot be published
+(missing configuration, access manager down) is logged and never fails the boot.
+
 ## 📡 Expected Authorization Service Response
 
 The authorization service should return a JSON response in the following format:

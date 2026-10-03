@@ -50,6 +50,85 @@ type DeclarationManifest struct {
 	Roles []DeclarationRole `json:"roles,omitempty" yaml:"roles,omitempty"`
 	// M2M is the plugin's bilateral machine-to-machine contract.
 	M2M *DeclarationM2M `json:"m2m,omitempty" yaml:"m2m,omitempty"`
+	// Scope is the product's catalog of instance dimensions — the "where" a
+	// partner credential can be narrowed to (an organization, a ledger). It is a
+	// global, per-product catalog, published on its own switch (see
+	// Config.ScopeOnly), and it is what the middleware derives a route's scope
+	// from (see WireScope). Optional: a manifest without it behaves exactly as
+	// before the section existed, on the wire and in the hash.
+	Scope *DeclarationScope `json:"scope,omitempty" yaml:"scope,omitempty"`
+}
+
+// scopeFromPath is the only accepted dimension source for now: the value is read
+// from a route path parameter.
+const scopeFromPath = "path"
+
+// DeclarationScope is the product's catalog of scope dimensions.
+type DeclarationScope struct {
+	// Dimensions are listed in tree order: the first is the top of the funnel
+	// (an organization), each next one narrows the previous (a ledger inside
+	// it). The order is content — it is hashed and it is the order a route's
+	// identifiers are resolved in.
+	Dimensions []DeclarationDimension `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
+	// Routes declares, per route, the catalog dimensions that route reads from
+	// its JSON request body instead of its path. They are this library's to
+	// read: the identity service never receives them, and they are left out of
+	// the wire body and of CanonicalHash (see serverProjection), so declaring
+	// them changes nothing that is published.
+	Routes []DeclarationScopeRoute `json:"routes,omitempty" yaml:"routes,omitempty"`
+}
+
+// scopeFromBody is the only accepted source of a route dimension: the value is
+// read from the JSON request body.
+const scopeFromBody = "body"
+
+// DeclarationScopeRoute names one route and the dimensions it reads from its
+// request body.
+type DeclarationScopeRoute struct {
+	// Method is the route's HTTP method, in any letter case.
+	Method string `json:"method,omitempty" yaml:"method,omitempty"`
+	// Path is the route's full path exactly as it is registered, group prefixes
+	// included, with its ':' parameters (e.g. "/v2/transactions/direct").
+	Path string `json:"path,omitempty" yaml:"path,omitempty"`
+	// Dimensions are the catalog dimensions the route reads from its body. The
+	// dimensions its path carries are still derived from the path.
+	Dimensions []DeclarationRouteDimension `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
+}
+
+// DeclarationRouteDimension declares where in a route's body ONE catalog
+// dimension is read.
+type DeclarationRouteDimension struct {
+	// Name is a dimension of the catalog (scope.dimensions[].name).
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+	// From is where the request carries the value. Only "body" is accepted.
+	From string `json:"from,omitempty" yaml:"from,omitempty"`
+	// Field is the value's path in the JSON body: object keys separated by '.',
+	// a key followed by "[]" being an array whose every element is read
+	// ("id", "items[].id"). See middleware.FromBody.
+	Field string `json:"field,omitempty" yaml:"field,omitempty"`
+}
+
+// DeclarationDimension declares ONE instance dimension of the product.
+type DeclarationDimension struct {
+	// Name is the attribute key the authorization service knows the dimension
+	// by (e.g. "organizationId"). Unique within the scope.
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+	// From is where a request carries the value. Only "path" is accepted.
+	From string `json:"from,omitempty" yaml:"from,omitempty"`
+	// Param is the route path parameter carrying the value, without the ':'
+	// marker (e.g. "organization_id" for a route segment ":organization_id").
+	// Unique within the scope.
+	Param string `json:"param,omitempty" yaml:"param,omitempty"`
+	// Required means every partner scope line for this product must name a
+	// value for the dimension.
+	Required bool `json:"required,omitempty" yaml:"required,omitempty"`
+	// Multi means a partner scope line may name several values for it.
+	Multi bool `json:"multi,omitempty" yaml:"multi,omitempty"`
+	// Collection names the product collection the values are identifiers of
+	// (e.g. "organizations"). Required.
+	Collection string `json:"collection,omitempty" yaml:"collection,omitempty"`
+	// Label is an optional human-readable name for consoles.
+	Label string `json:"label,omitempty" yaml:"label,omitempty"`
 }
 
 // DeclarationPermission is a single declared permission. The action is a free-form
@@ -98,6 +177,10 @@ type canonicalManifest struct {
 	Permissions []DeclarationPermission `json:"permissions,omitempty"`
 	Roles       []DeclarationRole       `json:"roles,omitempty"`
 	M2M         *DeclarationM2M         `json:"m2m,omitempty"`
+	// Scope is appended LAST and omitted when absent, so a manifest without a
+	// scope serializes — and hashes — byte-for-byte as it did before the section
+	// existed.
+	Scope *DeclarationScope `json:"scope,omitempty"`
 }
 
 // ManifestError reports an invalid or unparseable manifest. It is the client-side
@@ -142,12 +225,34 @@ func parseManifest(raw []byte) (*DeclarationManifest, error) {
 // wireJSON marshals the manifest into the JSON body PUT to the identity service.
 // The server deserializes it into its own DeclarationManifest (tags are aligned).
 func (m *DeclarationManifest) wireJSON() ([]byte, error) {
-	payload, err := json.Marshal(m)
+	payload, err := json.Marshal(m.serverProjection())
 	if err != nil {
 		return nil, fmt.Errorf("marshal wire manifest: %w", err)
 	}
 
 	return payload, nil
+}
+
+// scopeOnly is the projection a scope-only publication sends: the service and
+// version that identify it, and the scope. Every other section is left out, so
+// the receiver replaces nothing but the scope.
+func (m *DeclarationManifest) scopeOnly() *DeclarationManifest {
+	return &DeclarationManifest{Service: m.Service, Version: m.Version, Scope: m.Scope}
+}
+
+// serverProjection is the manifest the identity service knows: everything but
+// scope.routes, which only this library reads. Both the wire body and
+// CanonicalHash are taken from it, so a manifest's routes never change what is
+// published nor the hash the service compares. The receiver is not modified.
+func (m *DeclarationManifest) serverProjection() *DeclarationManifest {
+	if m.Scope == nil || len(m.Scope.Routes) == 0 {
+		return m
+	}
+
+	projected := *m
+	projected.Scope = &DeclarationScope{Dimensions: m.Scope.Dimensions}
+
+	return &projected
 }
 
 // CanonicalHash returns a stable hex-encoded SHA-256 over a deterministic
@@ -161,11 +266,14 @@ func (m *DeclarationManifest) wireJSON() ([]byte, error) {
 // server stores this hex in the app's `declaration-hash` Tag and no-ops the PUT
 // when it matches, so the two implementations MUST agree.
 func (m *DeclarationManifest) CanonicalHash() (string, error) {
+	published := m.serverProjection()
+
 	payload, err := json.Marshal(canonicalManifest{
-		Service:     m.Service,
-		Permissions: m.Permissions,
-		Roles:       m.Roles,
-		M2M:         m.M2M,
+		Service:     published.Service,
+		Permissions: published.Permissions,
+		Roles:       published.Roles,
+		M2M:         published.M2M,
+		Scope:       published.Scope,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal canonical manifest: %w", err)
@@ -202,6 +310,7 @@ func (m *DeclarationManifest) Validate() error {
 	declaredRoles, roleViolations := m.validateRoles()
 	violations = append(violations, roleViolations...)
 	violations = append(violations, m.validatePermissions(declaredRoles)...)
+	violations = append(violations, m.validateScope()...)
 
 	if len(violations) == 0 {
 		return nil
@@ -308,6 +417,127 @@ func (m *DeclarationManifest) validatePermissions(declaredRoles map[string]struc
 	}
 
 	return violations
+}
+
+// validateScope validates the scope catalog: every dimension names itself, reads
+// from a path parameter, names the parameter and the collection, and no two
+// dimensions share a name or a parameter. A shared name would make two
+// dimensions one attribute; a shared parameter would make one path segment answer
+// for two dimensions. An absent scope, or one with no dimensions, is valid.
+func (m *DeclarationManifest) validateScope() []string {
+	if m.Scope == nil {
+		return nil
+	}
+
+	var violations []string
+
+	seenNames := make(map[string]struct{}, len(m.Scope.Dimensions))
+	seenParams := make(map[string]struct{}, len(m.Scope.Dimensions))
+
+	for i, d := range m.Scope.Dimensions {
+		prefix := fmt.Sprintf("scope.dimensions[%d]", i)
+
+		if strings.TrimSpace(d.Name) == "" {
+			violations = append(violations, prefix+": name must not be empty")
+		} else if _, dup := seenNames[d.Name]; dup {
+			violations = append(violations, fmt.Sprintf("%s: duplicate name %q", prefix, d.Name))
+		} else {
+			seenNames[d.Name] = struct{}{}
+		}
+
+		if d.From != scopeFromPath {
+			violations = append(violations, fmt.Sprintf("%s: from must be %q, got %q", prefix, scopeFromPath, d.From))
+		}
+
+		switch {
+		case strings.TrimSpace(d.Param) == "":
+			violations = append(violations, prefix+": param must not be empty")
+		case !isPathParamName(d.Param):
+			violations = append(violations, fmt.Sprintf(
+				"%s: param %q must be a bare path parameter name (no ':' marker, '/', or whitespace)", prefix, d.Param))
+		default:
+			if _, dup := seenParams[d.Param]; dup {
+				violations = append(violations, fmt.Sprintf("%s: duplicate param %q", prefix, d.Param))
+			} else {
+				seenParams[d.Param] = struct{}{}
+			}
+		}
+
+		if strings.TrimSpace(d.Collection) == "" {
+			violations = append(violations, prefix+": collection must not be empty")
+		}
+	}
+
+	return append(violations, m.validateScopeRoutes(seenNames)...)
+}
+
+// validateScopeRoutes validates scope.routes against the catalog: every route
+// names its method and an absolute path, appears once, and declares at least one
+// dimension; every dimension names a catalog dimension, reads from the body and
+// names its field. Whether the fields fit together on the route — a well-formed
+// path, every dimension read once for each array element — is checked by the
+// middleware when WireScope registers the route.
+func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) []string {
+	var violations []string
+
+	seenRoutes := make(map[string]struct{}, len(m.Scope.Routes))
+
+	for i, r := range m.Scope.Routes {
+		prefix := fmt.Sprintf("scope.routes[%d]", i)
+		method := strings.ToUpper(strings.TrimSpace(r.Method))
+
+		if method == "" {
+			violations = append(violations, prefix+": method must not be empty")
+		}
+
+		if !strings.HasPrefix(r.Path, "/") {
+			violations = append(violations, fmt.Sprintf("%s: path %q must start with '/'", prefix, r.Path))
+		}
+
+		key := method + " " + r.Path
+		if _, dup := seenRoutes[key]; dup {
+			violations = append(violations, fmt.Sprintf("%s: duplicate route %q", prefix, key))
+		}
+
+		seenRoutes[key] = struct{}{}
+
+		if len(r.Dimensions) == 0 {
+			violations = append(violations, prefix+": must declare at least one dimension")
+		}
+
+		for j, d := range r.Dimensions {
+			dimPrefix := fmt.Sprintf("%s.dimensions[%d]", prefix, j)
+
+			if strings.TrimSpace(d.Name) == "" {
+				violations = append(violations, dimPrefix+": name must not be empty")
+			} else if _, ok := catalog[d.Name]; !ok {
+				violations = append(violations, fmt.Sprintf("%s: %q is not a scope dimension of the catalog", dimPrefix, d.Name))
+			}
+
+			if _, ok := routeDimensionSources[d.From]; !ok {
+				violations = append(violations, fmt.Sprintf("%s: from must be %q, got %q", dimPrefix, scopeFromBody, d.From))
+			}
+
+			if strings.TrimSpace(d.Field) == "" {
+				violations = append(violations, dimPrefix+": field must not be empty")
+			}
+		}
+	}
+
+	return violations
+}
+
+// isPathParamName reports whether p can be a route parameter name as written
+// after the ':' marker of a path segment: no marker of its own, no segment
+// separator, no whitespace.
+func isPathParamName(p string) bool {
+	for _, r := range p {
+		if r == ':' || r == '/' || unicode.IsSpace(r) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // casdoorSafeName derives a deterministic, Casdoor-safe identity from the standard

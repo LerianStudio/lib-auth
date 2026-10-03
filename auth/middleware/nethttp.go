@@ -62,7 +62,7 @@ func (auth *AuthClient) WithHTTPErrorHandler(h HTTPErrorHandler) *AuthClient {
 func (auth *AuthClient) AuthorizeHTTP(product, resource, action string, scopes ...ScopeDeclaration) func(http.Handler) http.Handler {
 	auth.warnMissingTrustedProxies()
 
-	route := newAuthorizeRoute(product, resource, action, scopes)
+	route := auth.newAuthorizeRoute(product, resource, action, scopes)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +132,18 @@ func (v netHTTPRequest) clientIP(auth *AuthClient) string {
 
 func (v netHTTPRequest) dimension(d Dimension) string {
 	return d.resolveHTTP(v.r)
+}
+
+// route is unknown to this adapter yet: a route relying on the manifest scope
+// derives no dimension, so a partner-bound credential is refused (fail closed).
+func (v netHTTPRequest) route() (string, string) {
+	return "", ""
+}
+
+// body is not read by this adapter yet: a body-scoped route refuses a
+// partner-bound credential (fail closed).
+func (v netHTTPRequest) body() ([]byte, *RefusalError) {
+	return nil, statusRefusal(http.StatusForbidden)
 }
 
 // Both adapters satisfy the shared flow's view of a request.

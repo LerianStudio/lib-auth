@@ -1,3 +1,51 @@
+## [5.3.0](https://github.com/LerianStudio/lib-auth/compare/v5.2.0...v5.3.0) (2026-10-02)
+
+
+### Features
+
+* **middleware:** read scope dimensions from the request body ([9945e68](https://github.com/LerianStudio/lib-auth/commit/9945e68d2973b5511210f41c805757d4030d2ea4))
+
+
+### Bug Fixes
+
+* **middleware:** reach registered routes when the manifest scope changes ([d3d8e94](https://github.com/LerianStudio/lib-auth/commit/d3d8e94425263670a540d7a13939edbe032175e9))
+* **middleware:** read the body scope for partners only, under one deadline ([93877e3](https://github.com/LerianStudio/lib-auth/commit/93877e339c10e1822baa763794bd50b04240c531))
+
+## [5.3.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.3.0-beta.1...v5.3.0-beta.2) (2026-10-02)
+
+
+### Bug Fixes
+
+* **middleware:** read the body scope for partners only, under one deadline ([93877e3](https://github.com/LerianStudio/lib-auth/commit/93877e339c10e1822baa763794bd50b04240c531))
+
+## [5.3.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.2.0...v5.3.0-beta.1) (2026-10-02)
+
+
+### Features
+
+* **middleware:** read scope dimensions from the request body ([9945e68](https://github.com/LerianStudio/lib-auth/commit/9945e68d2973b5511210f41c805757d4030d2ea4))
+
+
+### Bug Fixes
+
+* **middleware:** reach registered routes when the manifest scope changes ([d3d8e94](https://github.com/LerianStudio/lib-auth/commit/d3d8e94425263670a540d7a13939edbe032175e9))
+
+## [5.2.0](https://github.com/LerianStudio/lib-auth/compare/v5.1.0...v5.2.0) (2026-10-02)
+
+
+### Features
+
+* **declaration:** add scope dimensions to the manifest ([c64695b](https://github.com/LerianStudio/lib-auth/commit/c64695bf1d4bf8336fa22a3705a200f11e62c7d2))
+* **middleware:** derive route scope from the manifest ([ae4e3b4](https://github.com/LerianStudio/lib-auth/commit/ae4e3b4673c5733a15b3ac92770c606b536ade65))
+
+## [5.2.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.1.0...v5.2.0-beta.1) (2026-10-02)
+
+
+### Features
+
+* **declaration:** add scope dimensions to the manifest ([c64695b](https://github.com/LerianStudio/lib-auth/commit/c64695bf1d4bf8336fa22a3705a200f11e62c7d2))
+* **middleware:** derive route scope from the manifest ([ae4e3b4](https://github.com/LerianStudio/lib-auth/commit/ae4e3b4673c5733a15b3ac92770c606b536ade65))
+
 ## [5.1.0](https://github.com/LerianStudio/lib-auth/compare/v5.0.1...v5.1.0) (2026-09-30)
 
 

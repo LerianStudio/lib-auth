@@ -14,6 +14,12 @@
 // retry) is optimization/resilience, not a correctness requirement — which is why
 // every degraded path (no cache, identity down) is fail-open by default.
 //
+// The manifest's optional scope section is the product's catalog of instance
+// dimensions. It is published whenever the product's auth is on — with the rest
+// of the manifest when the permission declaration is on, alone (Config.ScopeOnly)
+// when it is off — and WireScope hands it to the middleware so Authorize derives
+// each route's dimensions from the route path.
+//
 // Extension point (D10, deferred): manifest signing is out of scope. A future
 // cfg.Signer would compute an X-Declaration-Signature header over the wire JSON
 // here, before the PUT; the transport is untrusted by design (authority is the M2M
@@ -151,6 +157,20 @@ type Config struct {
 	// Off by default: the consumer decides the posture (typically every posture but
 	// development) and the library reads no environment variable for it.
 	RequireHTTPS bool
+	// ScopeOnly publishes ONLY the manifest's scope section (with its service and
+	// version), leaving the permissions, roles and m2m sections out of the body
+	// so the access manager keeps what it already holds for them.
+	//
+	// The scope catalog is published whenever the product's auth is enabled,
+	// while the permission sections keep their own switch. A product whose
+	// permission declaration is off therefore still builds a publisher when its
+	// auth is on, with ScopeOnly set:
+	//
+	//	ScopeOnly: !declarationEnabled
+	//
+	// A manifest without a scope section makes a ScopeOnly publisher a no-op: it
+	// never calls the identity service.
+	ScopeOnly bool
 }
 
 // Publisher publishes the plugin's permissions manifest to the access-manager at
@@ -171,6 +191,10 @@ type Publisher struct {
 	manifest *DeclarationManifest
 	wire     []byte
 	hash     string
+	// scopeOnly selects the scope-only body (see Config.ScopeOnly); nothing is
+	// true when that body would carry no scope, and Publish is then a no-op.
+	scopeOnly bool
+	nothing   bool
 
 	// retry knobs (exposed unexported for test overrides).
 	maxTries             uint
@@ -253,12 +277,17 @@ func New(cfg Config) (*Publisher, error) {
 		return nil, fmt.Errorf("slug %q must equal manifest.service %q (BOLA: DisplayName==slug==service)", cfg.Slug, manifest.Service)
 	}
 
-	wire, err := manifest.wireJSON()
+	published := manifest
+	if cfg.ScopeOnly {
+		published = manifest.scopeOnly()
+	}
+
+	wire, err := published.wireJSON()
 	if err != nil {
 		return nil, fmt.Errorf("marshal wire manifest: %w", err)
 	}
 
-	hash, err := manifest.CanonicalHash()
+	hash, err := published.CanonicalHash()
 	if err != nil {
 		return nil, fmt.Errorf("compute canonical hash: %w", err)
 	}
@@ -281,6 +310,8 @@ func New(cfg Config) (*Publisher, error) {
 		manifest:             manifest,
 		wire:                 wire,
 		hash:                 hash,
+		scopeOnly:            cfg.ScopeOnly,
+		nothing:              cfg.ScopeOnly && manifest.Scope == nil,
 		maxTries:             defaultMaxTries,
 		retryInitialInterval: defaultRetryInitialInterval,
 		retryMaxInterval:     defaultRetryMaxInterval,
@@ -369,7 +400,14 @@ func validateHTTPSPosture(cfg Config) error {
 }
 
 // cacheKey is the dedup key for the slug's hash.
+//
+// The scope-only body is a different publication with its own hash, so it keys
+// separately: sharing one entry would let either publication suppress the other.
 func (p *Publisher) cacheKey() string {
+	if p.scopeOnly {
+		return "declaration:" + p.slug + ":scope:hash"
+	}
+
 	return "declaration:" + p.slug + ":hash"
 }
 
@@ -377,6 +415,12 @@ func (p *Publisher) cacheKey() string {
 // store hash. It is idempotent (the server no-ops a matching hash) and, on failure,
 // returns a typed *PublishError; the caller decides whether that is fatal.
 func (p *Publisher) Publish(ctx context.Context) error {
+	if p.nothing {
+		p.logInfof(ctx, "declaration manifest for slug=%s declares no scope; nothing to publish", p.slug)
+
+		return nil
+	}
+
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, spanName)
