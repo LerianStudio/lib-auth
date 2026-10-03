@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -113,6 +114,9 @@ type bodyPlan struct {
 	// firstField locates, per dimension name, the first body field it is read
 	// from, for the refusal of a body that disagrees with another carrier.
 	firstField map[string]string
+	// resolves is set when a body field names a resolver: the questions are then
+	// collected whole, their keys translated in one batch, and only then asked.
+	resolves bool
 }
 
 // parseBodyField parses a field path, or describes what is wrong with it.
@@ -216,6 +220,7 @@ func compileBodyPlan(dims []Dimension) (*bodyPlan, string) {
 	for _, f := range fields {
 		plan.fields = append(plan.fields, f.dim.key)
 		plan.allOptional = plan.allOptional && f.dim.optional
+		plan.resolves = plan.resolves || f.dim.resolver != ""
 
 		if _, ok := plan.firstField[f.dim.name]; !ok {
 			plan.firstField[f.dim.name] = f.dim.location()
@@ -298,11 +303,24 @@ func buildBodyGroup(leaf []bodySegment, fields []bodyField, names map[string]str
 	return group, ""
 }
 
-// errBodyScope is the refusal of a request whose body cannot be read for its
-// declared dimensions. It carries the message the 400 answers with.
-type errBodyScope struct{ message string }
+// errBodyScope is the refusal of a request whose scope cannot be read for its
+// declared dimensions. It carries the message it answers with, and its status:
+// 400 unless set.
+type errBodyScope struct {
+	message string
+	status  int
+}
 
 func (e *errBodyScope) Error() string { return e.message }
+
+// statusCode is the status the request is refused with.
+func (e *errBodyScope) statusCode() int {
+	if e.status == 0 {
+		return http.StatusBadRequest
+	}
+
+	return e.status
+}
 
 func bodyFieldError(location, problem string) *errBodyScope {
 	return &errBodyScope{message: "scope field " + strconv.Quote(location) + " " + problem}
@@ -510,7 +528,7 @@ func containsValue(values []string, value string) bool {
 //
 // A request with no body names nothing; when every body dimension is optional
 // that is a body without them, not a malformed one.
-func (p *bodyPlan) questions(body []byte, readings requestValues) ([]map[string]string, *errBodyScope) {
+func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolution) ([]map[string]string, *errBodyScope) {
 	var root any
 
 	switch {
@@ -524,9 +542,20 @@ func (p *bodyPlan) questions(body []byte, readings requestValues) ([]map[string]
 
 	set := newQuestionSet(p, readings)
 
+	var raw *[]rawQuestion
+	if p.resolves {
+		raw = &[]rawQuestion{}
+	}
+
 	for _, group := range p.groups {
-		w := groupWalk{group: group, set: set}
+		w := groupWalk{group: group, set: set, raw: raw}
 		if err := w.walk(root, 0, "", []any{root}, []string{""}); err != nil {
+			return nil, err
+		}
+	}
+
+	if raw != nil {
+		if err := r.resolveBody(*raw, set, readings); err != nil {
 			return nil, err
 		}
 	}
@@ -541,6 +570,9 @@ func (p *bodyPlan) questions(body []byte, readings requestValues) ([]map[string]
 type groupWalk struct {
 	group bodyGroup
 	set   *questionSet
+	// raw, when non-nil, collects each question instead of adding it to set:
+	// the plan resolves body keys, which are translated in one batch first.
+	raw *[]rawQuestion
 }
 
 // walk descends the group's array prefix from node. chain holds the element of
@@ -615,6 +647,7 @@ func (w groupWalk) optionalFrom(depth int) bool {
 func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 	values := make(map[string]string, len(w.group.fields))
 	at := make(map[string]string, len(w.group.fields))
+	resolvers := make(map[string]string)
 
 	for _, f := range w.group.fields {
 		if f.depth >= len(chain) {
@@ -629,7 +662,17 @@ func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 		if location != "" {
 			values[f.dim.name] = value
 			at[f.dim.name] = "body field " + strconv.Quote(location)
+
+			if f.dim.resolver != "" {
+				resolvers[f.dim.name] = f.dim.resolver
+			}
 		}
+	}
+
+	if w.raw != nil {
+		*w.raw = append(*w.raw, rawQuestion{values: values, at: at, resolvers: resolvers})
+
+		return nil
 	}
 
 	return w.set.add(values, at)
@@ -736,16 +779,8 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 	}
 
 	for _, dim := range dims {
-		// The route's path dimensions are derived from its path, as on every
-		// other route; the manifest route declares the ones read elsewhere.
-		if dim.source == FromPath {
-			return errors.New("manifest route scope: dimension " + dim.name + " on " + method + " " + path +
-				" is derived from the path and must not be declared on the route")
-		}
-
-		if _, ok := known[dim.name]; !ok {
-			return errors.New("manifest route scope: dimension " + dim.name + " on " + method + " " + path +
-				" is not declared in the manifest scope of product " + product)
+		if problem := auth.checkRouteDimension(product, path, dim, known); problem != "" {
+			return errors.New("manifest route scope: dimension " + dim.name + " on " + method + " " + path + " " + problem)
 		}
 	}
 
@@ -771,6 +806,42 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 	auth.manifestGen++
 
 	return nil
+}
+
+// checkRouteDimension describes what is wrong with dim as a dimension declared
+// on one manifest route, or returns "". The route's path dimensions are derived
+// from its path, as on every other route; the manifest route declares the ones
+// read elsewhere, and a path parameter whose value is resolved into the
+// dimension.
+func (auth *AuthClient) checkRouteDimension(product, path string, dim Dimension, catalog map[string]struct{}) string {
+	switch {
+	case dim.source == FromPath && dim.resolver == "":
+		return "is derived from the path and must not be declared on the route unless it is resolved"
+	case dim.source == FromPath && !hasPathParam(path, dim.key):
+		return "reads path parameter " + strconv.Quote(dim.key) + ", which the route path does not carry"
+	}
+
+	if problem := auth.unregisteredResolver([]Dimension{dim}); problem != "" {
+		return "names resolver " + strconv.Quote(dim.resolver) + ", which is not registered; call RegisterScopeResolver first"
+	}
+
+	if _, ok := catalog[dim.name]; !ok {
+		return "is not declared in the manifest scope of product " + product
+	}
+
+	return ""
+}
+
+// hasPathParam reports whether one whole segment of path is the parameter
+// :param.
+func hasPathParam(path, param string) bool {
+	for _, segment := range strings.Split(path, "/") {
+		if segment == ":"+param {
+			return true
+		}
+	}
+
+	return false
 }
 
 // manifestGeneration is the count of manifest scope changes, read by routes to
@@ -799,13 +870,26 @@ func (auth *AuthClient) manifestRouteScope(product, key string) (uint64, []Dimen
 // caller is not partner-bound (the body is then never read) — one question per
 // combination of values when a carrier names several; and otherwise one set per
 // question the body makes, each carrying those other values.
-func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBody bool) ([]map[string]string, *errBodyScope) {
+//
+// Resolved dimensions are translated only when readBody is set — for a
+// partner-bound caller. Any other caller is asked without them, exactly as a
+// caller whose body is not read is asked without the body's dimensions.
+func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBody bool, r scopeResolution) ([]map[string]string, *errBodyScope) {
 	if readBody {
 		readings = readForm(c, s.dims, readings)
 	}
 
 	if readings.problem != nil {
 		return nil, readings.problem
+	}
+
+	if readBody && len(readings.pending) > 0 {
+		resolved, err := r.resolvePending(readings)
+		if err != nil {
+			return nil, err
+		}
+
+		readings = resolved
 	}
 
 	if s.body == nil || !readBody {
@@ -821,7 +905,7 @@ func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBod
 		return set.questions, nil
 	}
 
-	return s.body.questions(c.Body(), readings)
+	return s.body.questions(c.Body(), readings, r)
 }
 
 // sharedAttributes returns the identifiers every question carries with the same
@@ -883,7 +967,7 @@ func readForm(c fiber.Ctx, dims []Dimension, readings requestValues) requestValu
 		case !present:
 			readings.problem = &errBodyScope{message: "scope " + dim.location() + " is missing from the request body"}
 		default:
-			readings.add(dim, values)
+			readings.record(dim, values)
 		}
 	}
 

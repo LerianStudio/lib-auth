@@ -54,6 +54,10 @@ type Dimension struct {
 	source   Source
 	key      string
 	optional bool
+	// resolver names the registered ScopeResolver that translates what the
+	// request carries into the dimension's values; empty when the request
+	// carries the values themselves.
+	resolver string
 }
 
 // Dim declares a dimension read from source under the SAME key as its name. Use
@@ -261,6 +265,29 @@ type requestValues struct {
 	// problem is the first carrier found malformed, or the first dimension two
 	// carriers disagree on. It is reported once the caller is authenticated.
 	problem *errBodyScope
+	// pending are the values read for dimensions that are resolved: what the
+	// request carries is not the dimension's value but a key to translate.
+	// They join values only once resolved, for a partner-bound caller.
+	pending []pendingValues
+}
+
+// pendingValues are the values one carrier names for a resolved dimension,
+// still to be translated.
+type pendingValues struct {
+	dim    Dimension
+	values []string
+}
+
+// record records the values a carrier names for dim: as the dimension's values,
+// or as values still to resolve when the dimension is resolved.
+func (rv *requestValues) record(dim Dimension, values []string) {
+	if dim.resolver != "" {
+		rv.pending = append(rv.pending, pendingValues{dim: dim, values: values})
+
+		return
+	}
+
+	rv.add(dim, values)
 }
 
 // add records the values one carrier names for a dimension. A dimension already
@@ -337,7 +364,7 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
 		case !present:
 			return requestValues{}, dim.name
 		default:
-			rv.add(dim, values)
+			rv.record(dim, values)
 		}
 	}
 
@@ -520,6 +547,10 @@ func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) erro
 			return errors.New("manifest scope: " + dim.location() + " is declared more than once")
 		}
 
+		if problem := auth.unregisteredResolver([]Dimension{dim}); problem != "" {
+			return errors.New("manifest scope: " + problem)
+		}
+
 		names[dim.name] = struct{}{}
 		keys[dim.carrier()] = struct{}{}
 	}
@@ -670,6 +701,10 @@ func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclara
 	catalog := auth.manifestScopeFor(product)
 	if declErr == "" && len(scopes) > 0 {
 		declErr = checkAgainstCatalog(scope, catalog)
+	}
+
+	if declErr == "" {
+		declErr = auth.unregisteredResolver(scope.dims)
 	}
 
 	var derived *routeScope

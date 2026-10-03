@@ -128,6 +128,12 @@ type DeclarationRouteDimension struct {
 	// A value that is there must still be a non-empty string. See
 	// middleware.Dimension.Optional.
 	Optional bool `json:"optional,omitempty" yaml:"optional,omitempty"`
+	// Resolve optionally names the resolver (middleware.AuthClient.
+	// RegisterScopeResolver) that translates the value read at Field into the
+	// dimension's values: an account alias into the account id, a transaction
+	// id into the account ids of its legs. With it, From may also be "path",
+	// Field then naming a parameter of the route path.
+	Resolve string `json:"resolve,omitempty" yaml:"resolve,omitempty"`
 }
 
 // DeclarationDimension declares ONE instance dimension of the product.
@@ -166,6 +172,11 @@ type DeclarationDimension struct {
 	Covers []string `json:"covers,omitempty" yaml:"covers,omitempty"`
 	// Label is an optional human-readable name for consoles.
 	Label string `json:"label,omitempty" yaml:"label,omitempty"`
+	// Resolve optionally names the resolver (middleware.AuthClient.
+	// RegisterScopeResolver) that translates the value read at Param into the
+	// dimension's values. It is read by this library only: it is never
+	// published and is not part of CanonicalHash.
+	Resolve string `json:"resolve,omitempty" yaml:"resolve,omitempty"`
 }
 
 // DeclarationPermission is a single declared permission. The action is a free-form
@@ -295,18 +306,49 @@ func (m *DeclarationManifest) hasScopeCatalog() bool {
 }
 
 // serverProjection is the manifest the identity service knows: everything but
-// scope.routes, which only this library reads. Both the wire body and
-// CanonicalHash are taken from it, so a manifest's routes never change what is
-// published nor the hash the service compares. The receiver is not modified.
+// scope.routes and the dimensions' resolve, which only this library reads. Both
+// the wire body and CanonicalHash are taken from it, so neither ever changes
+// what is published nor the hash the service compares. The receiver is not
+// modified.
 func (m *DeclarationManifest) serverProjection() *DeclarationManifest {
-	if m.Scope == nil || len(m.Scope.Routes) == 0 {
+	if m.Scope == nil || (len(m.Scope.Routes) == 0 && !m.Scope.resolves()) {
 		return m
 	}
 
+	dims := m.Scope.Dimensions
+	if m.Scope.resolves() {
+		dims = make([]DeclarationDimension, len(m.Scope.Dimensions))
+		for i, d := range m.Scope.Dimensions {
+			d.Resolve = ""
+			dims[i] = d
+		}
+	}
+
 	projected := *m
-	projected.Scope = &DeclarationScope{Dimensions: m.Scope.Dimensions}
+	projected.Scope = &DeclarationScope{Dimensions: dims}
 
 	return &projected
+}
+
+// resolves reports whether a catalog dimension names a resolver.
+func (s *DeclarationScope) resolves() bool {
+	for _, d := range s.Dimensions {
+		if d.Resolve != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// resolveProblem describes what is wrong with resolve as a resolver name, or
+// returns "" when it is absent or valid.
+func resolveProblem(prefix, resolve string) string {
+	if resolve == "" || (strings.TrimSpace(resolve) == resolve) {
+		return ""
+	}
+
+	return fmt.Sprintf("%s: resolve %q must be a resolver name with no surrounding whitespace", prefix, resolve)
 }
 
 // CanonicalHash returns a stable hex-encoded SHA-256 over a deterministic
@@ -578,6 +620,10 @@ func (m *DeclarationManifest) validateScope() []string {
 		}
 
 		violations = append(violations, validateCovers(prefix, d)...)
+
+		if problem := resolveProblem(prefix, d.Resolve); problem != "" {
+			violations = append(violations, problem)
+		}
 	}
 
 	return append(violations, m.validateScopeRoutes(seenNames)...)
@@ -654,26 +700,8 @@ func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) [
 		bodyAs := make(map[string]struct{}, len(r.Dimensions))
 
 		for j, d := range r.Dimensions {
-			dimPrefix := fmt.Sprintf("%s.dimensions[%d]", prefix, j)
-
-			if strings.TrimSpace(d.Name) == "" {
-				violations = append(violations, dimPrefix+": name must not be empty")
-			} else if _, ok := catalog[d.Name]; !ok {
-				violations = append(violations, fmt.Sprintf("%s: %q is not a scope dimension of the catalog", dimPrefix, d.Name))
-			}
-
-			if _, ok := routeDimensionSources[d.From]; !ok {
-				violations = append(violations, fmt.Sprintf(`%s: from must be one of "body", "form", "query", "header", got %q`, dimPrefix, d.From))
-			}
-
+			violations = append(violations, validateRouteDimension(fmt.Sprintf("%s.dimensions[%d]", prefix, j), d, catalog)...)
 			bodyAs[d.From] = struct{}{}
-
-			switch problem := requestKeyProblem(d.From, d.Field); {
-			case strings.TrimSpace(d.Field) == "":
-				violations = append(violations, dimPrefix+": field must not be empty")
-			case problem != "":
-				violations = append(violations, fmt.Sprintf("%s: field %q %s", dimPrefix, d.Field, problem))
-			}
 		}
 
 		_, readsJSON := bodyAs[scopeFromBody]
@@ -682,6 +710,38 @@ func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) [
 		if readsJSON && readsForm {
 			violations = append(violations, prefix+": reads the request body both as JSON (from: body) and as a form (from: form)")
 		}
+	}
+
+	return violations
+}
+
+// validateRouteDimension validates one dimension of a scope.routes entry: it
+// names a catalog dimension, reads from a known carrier, and names its field
+// there. A path parameter is derived from the catalog; a route declares one only
+// to resolve its value into the dimension.
+func validateRouteDimension(prefix string, d DeclarationRouteDimension, catalog map[string]struct{}) []string {
+	var violations []string
+
+	if strings.TrimSpace(d.Name) == "" {
+		violations = append(violations, prefix+": name must not be empty")
+	} else if _, ok := catalog[d.Name]; !ok {
+		violations = append(violations, fmt.Sprintf("%s: %q is not a scope dimension of the catalog", prefix, d.Name))
+	}
+
+	if _, known := routeDimensionSources[d.From]; !known && (d.From != scopeFromPath || d.Resolve == "") {
+		violations = append(violations, fmt.Sprintf(
+			`%s: from must be one of "body", "form", "query", "header", got %q (from "path" requires resolve)`, prefix, d.From))
+	}
+
+	if problem := resolveProblem(prefix, d.Resolve); problem != "" {
+		violations = append(violations, problem)
+	}
+
+	switch problem := requestKeyProblem(d.From, d.Field); {
+	case strings.TrimSpace(d.Field) == "":
+		violations = append(violations, prefix+": field must not be empty")
+	case problem != "":
+		violations = append(violations, fmt.Sprintf("%s: field %q %s", prefix, d.Field, problem))
 	}
 
 	return violations

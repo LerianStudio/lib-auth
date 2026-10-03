@@ -48,6 +48,10 @@ type AuthClient struct {
 	// manifestGen counts manifest scope changes; routes compare it to what they
 	// derived from. Guarded by manifestScopeMu.
 	manifestGen uint64
+	// resolvers holds the scope resolvers registered by name (see
+	// RegisterScopeResolver). Guarded by resolversMu.
+	resolvers   map[string]ScopeResolver
+	resolversMu sync.RWMutex
 
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
@@ -748,9 +752,9 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 	// distinct set of identifiers the body names, and every one must be
 	// allowed. A body that cannot be read for them is the caller's to fix:
 	// refused before any call, naming the field, and never let through.
-	questions, badBody := scope.questions(c, readings, caller.partner != "")
+	questions, badBody := scope.questions(c, readings, caller.partner != "", scopeResolution{ctx: ctx, auth: auth, product: params.product})
 	if badBody != nil {
-		return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, http.StatusBadRequest, badBody.Error())
+		return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, badBody.statusCode(), badBody.Error())
 	}
 
 	asked := questions

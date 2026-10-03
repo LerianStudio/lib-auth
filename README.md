@@ -804,6 +804,74 @@ fields with `from: form`, the field name as `field`:
 * A route reads its body either as JSON (`from: body`) or as a form
   (`from: form`), never both. The catalog reads no body.
 
+### Resolving a request value into a dimension (`resolve`)
+
+Some requests do not carry the dimension's value, but a key the product can
+translate into it: an account alias where the scope names account ids, a
+transaction id whose legs name the accounts. Name a resolver on the dimension,
+and register it at boot:
+
+```yaml
+scope:
+  dimensions:
+    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations }
+    - { name: ledgerId,       from: path, param: ledger_id,       collection: ledgers }
+    - { name: accountId,      from: path, param: account_id,      collection: accounts }
+  routes:
+    - method: GET
+      path: /v1/organizations/:organization_id/ledgers/:ledger_id/transactions/:transaction_id
+      dimensions:
+        - { name: accountId, from: path, field: transaction_id, resolve: transactionAccounts }
+    - method: POST
+      path: /v1/organizations/:organization_id/ledgers/:ledger_id/transactions
+      dimensions:
+        - { name: accountId, from: body, field: "debits[].alias", resolve: accountByAlias }
+```
+
+```go
+auth.RegisterScopeResolver("transactionAccounts", func(ctx context.Context, in authMiddleware.ResolveInput) (map[string][]string, error) {
+    // in.Values: the transaction ids the request names, distinct.
+    // in.Known:  {"organizationId": [...], "ledgerId": [...]} read from the path.
+    return repo.AccountsOfTransactions(ctx, in.Known["organizationId"], in.Known["ledgerId"], in.Values)
+})
+
+if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after registering
+    return err
+}
+```
+
+* A resolver receives every distinct value one request names for the
+  dimension in **one call** (at most 100), together with `Known`: the
+  dimensions the request names directly — path, query, headers, form — so the
+  lookup can be confined to them. It returns, per input value, the dimension
+  values it stands for.
+* **One value may resolve to several.** Each resolved value is its own question
+  and every one must be allowed, combined with the request's other dimensions
+  exactly as several values from one carrier are. A body value stays with the
+  other fields of its array element.
+* **Failures never let the request through:**
+  * a value the resolver leaves out of its result, or maps to no value, is
+    answered **422** naming where it was read (`body field "debits[2].alias"`,
+    `path parameter "transaction_id"`), with no authorization call;
+  * a resolver error, or an empty string among its values, is answered **503**
+    naming the resolver; the error is logged, not returned to the caller;
+  * more than 100 distinct values to resolve is answered **400**.
+* A resolved value and the same dimension named directly elsewhere (the path's
+  `:account_id` and a resolved alias, say) must agree, as any two carriers must.
+* `resolve` may be declared on any dimension: a catalog dimension, or a
+  `scope.routes` dimension from any carrier. A route may declare `from: path`
+  **only** with `resolve`, `field` naming a parameter of its path; a path
+  dimension without it is derived from the catalog.
+* Resolution runs **only for a partner-bound credential**, like the body's
+  dimensions. Any other caller is asked without the resolved dimension, and no
+  resolver is called.
+* A manifest naming a resolver that is not registered fails `WireScope`; an
+  explicit `Dim(...).Resolve(name)` naming one is a misdeclared route, refused
+  on every request and logged at ERROR when registered. Register resolvers
+  first.
+* `resolve` is read by this library only: it is never published and is not
+  part of `CanonicalHash`.
+
 **Publication.** The scope section is published to the access manager whenever
 the product's auth is on, independently of the permission declaration switch.
 With the permission declaration on, the full manifest (scope included) is

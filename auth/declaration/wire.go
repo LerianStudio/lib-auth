@@ -367,7 +367,12 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 	if m.Scope != nil {
 		dims = make([]middleware.Dimension, 0, len(m.Scope.Dimensions))
 		for _, d := range m.Scope.Dimensions {
-			dims = append(dims, middleware.Dim(d.Name, catalogDimensionSources[d.From]).At(d.Param))
+			dim := middleware.Dim(d.Name, catalogDimensionSources[d.From]).At(d.Param)
+			if d.Resolve != "" {
+				dim = dim.Resolve(d.Resolve)
+			}
+
+			dims = append(dims, dim)
 		}
 	}
 
@@ -382,9 +387,19 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 	for _, r := range m.Scope.Routes {
 		routeDims := make([]middleware.Dimension, 0, len(r.Dimensions))
 		for _, d := range r.Dimensions {
-			dim := middleware.Dim(d.Name, routeDimensionSources[d.From]).At(d.Field)
+			source, ok := routeDimensionSources[d.From]
+			if !ok {
+				// Validate admits no other: a path parameter whose value is resolved.
+				source = middleware.FromPath
+			}
+
+			dim := middleware.Dim(d.Name, source).At(d.Field)
 			if d.Optional {
 				dim = dim.Optional()
+			}
+
+			if d.Resolve != "" {
+				dim = dim.Resolve(d.Resolve)
 			}
 
 			routeDims = append(routeDims, dim)
