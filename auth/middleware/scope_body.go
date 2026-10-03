@@ -107,6 +107,10 @@ type bodyField struct {
 	// strings is set when the path ends in an array of strings: the element
 	// itself is the value, so prefixLen spans the whole path.
 	strings bool
+	// element is the prefix of the element the value is read from: the
+	// enclosing array element, or, for a string of an array of strings, the
+	// element holding the array. A resolved value's siblings share it.
+	element []bodySegment
 }
 
 // bodyGroup is one innermost array (or the body itself when no field crosses an
@@ -221,6 +225,11 @@ func compileBodyPlan(dims []Dimension) (*bodyPlan, string) {
 
 		field.strings = segments[len(segments)-1].array
 
+		field.element = segments[:field.prefixLen]
+		if field.strings {
+			field.element = segments[:enclosingArrayEnd(segments[:len(segments)-1])]
+		}
+
 		fields = append(fields, field)
 		names[dim.name] = struct{}{}
 	}
@@ -254,6 +263,18 @@ func compileBodyPlan(dims []Dimension) (*bodyPlan, string) {
 	}
 
 	return plan, ""
+}
+
+// enclosingArrayEnd is the number of segments up to and including the last
+// array among segments, or 0 when there is none.
+func enclosingArrayEnd(segments []bodySegment) int {
+	for i := len(segments) - 1; i >= 0; i-- {
+		if segments[i].array {
+			return i + 1
+		}
+	}
+
+	return 0
 }
 
 // readInsideStrings describes the first field that reads inside the elements of
@@ -723,12 +744,48 @@ func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 	}
 
 	if w.raw != nil {
-		*w.raw = append(*w.raw, rawQuestion{values: values, at: at, resolvers: resolvers})
+		*w.raw = append(*w.raw, rawQuestion{values: values, at: at, resolvers: resolvers, siblings: w.siblings(values)})
 
 		return nil
 	}
 
 	return w.set.add(values, at)
+}
+
+// siblings returns, per resolved field the question names, the values of the
+// plain fields read from the same element: what the resolver is given to
+// confine its lookup to. A field with none has no entry.
+func (w groupWalk) siblings(values map[string]string) map[string]map[string]string {
+	var out map[string]map[string]string
+
+	for _, f := range w.group.fields {
+		if _, named := values[f.dim.name]; !named || f.dim.resolver == "" {
+			continue
+		}
+
+		for _, g := range w.group.fields {
+			value, named := values[g.dim.name]
+			if !named || g.dim.resolver != "" || g.strings || !sameSegments(g.element, f.element) {
+				continue
+			}
+
+			if out == nil {
+				out = make(map[string]map[string]string)
+			}
+
+			if out[f.dim.name] == nil {
+				out[f.dim.name] = make(map[string]string)
+			}
+
+			out[f.dim.name][g.dim.name] = value
+		}
+	}
+
+	return out
+}
+
+func sameSegments(a, b []bodySegment) bool {
+	return len(a) == len(b) && isSegmentPrefix(a, b)
 }
 
 // readBodyField reads one field relative to its element, and returns where it

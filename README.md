@@ -840,14 +840,30 @@ scope:
     - method: POST
       path: /v1/organizations/:organization_id/ledgers/:ledger_id/transactions
       dimensions:
-        - { name: accountId, from: body, field: "debits[].alias", resolve: accountByAlias }
+    - method: POST
+      path: /v1/transfers
+      dimensions:
+        - { name: organizationId, from: body, field: "debits[].organizationId" }
+        - { name: ledgerId,       from: body, field: "debits[].ledgerId" }
+        - { name: accountId,      from: body, field: "debits[].alias", resolve: accountByAlias }
 ```
 
 ```go
-auth.RegisterScopeResolver("transactionAccounts", func(ctx context.Context, in authMiddleware.ResolveInput) (map[string][]string, error) {
-    // in.Values: the transaction ids the request names, distinct.
-    // in.Known:  {"organizationId": [...], "ledgerId": [...]} read from the path.
-    return repo.AccountsOfTransactions(ctx, in.Known["organizationId"], in.Known["ledgerId"], in.Values)
+auth.RegisterScopeResolver("transactionAccounts", func(ctx context.Context, in authMiddleware.ResolveInput) ([][]string, error) {
+    // in.Items: the transaction ids the request names, distinct ({Value: "tx-1"}).
+    // in.Known: {"organizationId": [...], "ledgerId": [...]} read from the path.
+    // The answer has one entry per item, in the same order.
+    return repo.AccountsOfTransactions(ctx, in.Known["organizationId"], in.Known["ledgerId"], in.Items)
+})
+
+auth.RegisterScopeResolver("accountByAlias", func(ctx context.Context, in authMiddleware.ResolveInput) ([][]string, error) {
+    out := make([][]string, len(in.Items))
+    for i, item := range in.Items {
+        // item.Siblings: the fields read from the same element as the alias,
+        // {"organizationId": "...", "ledgerId": "..."}.
+        out[i] = repo.AccountIDsByAlias(ctx, item.Siblings["organizationId"], item.Siblings["ledgerId"], item.Value)
+    }
+    return out, nil
 })
 
 if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after registering
@@ -856,21 +872,32 @@ if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after r
 ```
 
 * A resolver receives every distinct value one request names for the
-  dimension in **one call** (at most 100), together with `Known`: the
+  dimension in **one call** (at most 100 items), together with `Known`: the
   dimensions the request names directly — path, query, headers, form — so the
-  lookup can be confined to them. It returns, per input value, the dimension
-  values it stands for.
+  lookup can be confined to them. It returns one entry per item, in the order
+  of `Items`: the dimension values the item stands for.
+* **A body value comes with its siblings.** `Item.Siblings` holds the values of
+  the route's other body dimensions read from the same element — those declared
+  under the same element prefix (`debits[].organizationId` and
+  `debits[].ledgerId` for `debits[].alias`) that the element names and that are
+  not resolved themselves. For a string of an array of strings
+  (`targets[].aliases[]`), the element is the one holding the array
+  (`targets[].ledgerId`). The same value read with different siblings is one
+  item per context, so an alias unique only within its ledger is looked up in
+  each. `Siblings` is `nil` when the element names none, and always for a value
+  read outside the body.
 * **One value may resolve to several.** Each resolved value is its own question
   and every one must be allowed, combined with the request's other dimensions
   exactly as several values from one carrier are. A body value stays with the
-  other fields of its array element.
+  other fields of its array element — the siblings it was resolved with.
 * **Failures never let the request through:**
-  * a value the resolver leaves out of its result, or maps to no value, is
-    answered **422** naming where it was read (`body field "debits[2].alias"`,
-    `path parameter "transaction_id"`), with no authorization call;
-  * a resolver error, or an empty string among its values, is answered **503**
-    naming the resolver; the error is logged, not returned to the caller;
-  * more than 100 distinct values to resolve is answered **400**.
+  * an item the resolver maps to no value is answered **422** naming where it
+    was read (`body field "debits[2].alias"`, `path parameter
+    "transaction_id"`), with no authorization call;
+  * a resolver error, an answer whose length differs from `Items`, or an empty
+    string among its values is answered **503** naming the resolver; the error
+    is logged, not returned to the caller;
+  * more than 100 distinct items to resolve is answered **400**.
 * A resolved value and the same dimension named directly elsewhere (the path's
   `:account_id` and a resolved alias, say) must agree, as any two carriers must.
 * `resolve` may be declared on any dimension: a catalog dimension, or a

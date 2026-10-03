@@ -33,15 +33,19 @@ func resolveCatalog() []Dimension {
 }
 
 // fakeResolver answers from a fixed table and records every input it was given.
+// With bySibling set, an item is looked up as "<sibling value>/<value>".
 type fakeResolver struct {
-	table map[string][]string
-	err   error
+	table     map[string][]string
+	err       error
+	bySibling string
+	// short drops the last answer, to answer fewer items than asked.
+	short bool
 
 	mu    sync.Mutex
 	calls []ResolveInput
 }
 
-func (r *fakeResolver) resolve(_ context.Context, in ResolveInput) (map[string][]string, error) {
+func (r *fakeResolver) resolve(_ context.Context, in ResolveInput) ([][]string, error) {
 	r.mu.Lock()
 	r.calls = append(r.calls, in)
 	r.mu.Unlock()
@@ -50,12 +54,19 @@ func (r *fakeResolver) resolve(_ context.Context, in ResolveInput) (map[string][
 		return nil, r.err
 	}
 
-	out := make(map[string][]string)
+	out := make([][]string, 0, len(in.Items))
 
-	for _, v := range in.Values {
-		if mapped, ok := r.table[v]; ok {
-			out[v] = mapped
+	for _, item := range in.Items {
+		key := item.Value
+		if r.bySibling != "" {
+			key = item.Siblings[r.bySibling] + "/" + item.Value
 		}
+
+		out = append(out, r.table[key])
+	}
+
+	if r.short {
+		out = out[:len(out)-1]
 	}
 
 	return out, nil
@@ -149,7 +160,7 @@ func TestAuthorize_Resolve_PathValueToSeveral(t *testing.T) {
 		Product:   "midaz",
 		Resolver:  "legs",
 		Dimension: "accountId",
-		Values:    []string{"tx-1"},
+		Items:     []ResolveItem{{Value: "tx-1"}},
 		Known:     map[string][]string{"organizationId": {"org-1"}, "ledgerId": {"led-1"}},
 	}}, resolver.inputs())
 }
@@ -282,7 +293,7 @@ func TestAuthorize_Resolve_BodyIsBatched(t *testing.T) {
 
 	inputs := resolver.inputs()
 	require.Len(t, inputs, 1, "one call for the whole body")
-	assert.Equal(t, []string{"@a", "@b"}, inputs[0].Values)
+	assert.Equal(t, []ResolveItem{{Value: "@a"}, {Value: "@b"}}, inputs[0].Items, "an element with no other field has no siblings")
 	assert.Equal(t, map[string][]string{"organizationId": {"org-1"}, "ledgerId": {"led-1"}}, inputs[0].Known)
 }
 

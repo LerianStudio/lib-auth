@@ -192,7 +192,7 @@ func TestWireScope_UnregisteredResolverFailsTheBoot(t *testing.T) {
 	require.NoError(t, WireScope(auth, []byte(resolvedYAML)), "positive control")
 }
 
-func noResolve(context.Context, middleware.ResolveInput) (map[string][]string, error) {
+func noResolve(context.Context, middleware.ResolveInput) ([][]string, error) {
 	return nil, nil
 }
 
@@ -205,12 +205,12 @@ func TestWireScope_RouteResolvesThePath(t *testing.T) {
 	auth := middleware.NewAuthClient(rec.URL, true, obs.Nop())
 
 	require.NoError(t, auth.RegisterScopeResolver("alias", noResolve))
-	require.NoError(t, auth.RegisterScopeResolver("legs", func(_ context.Context, in middleware.ResolveInput) (map[string][]string, error) {
-		if in.Known["organizationId"][0] != "org-1" {
-			return nil, nil
+	require.NoError(t, auth.RegisterScopeResolver("legs", func(_ context.Context, in middleware.ResolveInput) ([][]string, error) {
+		if in.Known["organizationId"][0] != "org-1" || in.Items[0].Value != "tx-1" {
+			return make([][]string, len(in.Items)), nil
 		}
 
-		return map[string][]string{"tx-1": {"acc-1"}}, nil
+		return [][]string{{"acc-1"}}, nil
 	}))
 	require.NoError(t, WireScope(auth, []byte(resolvedYAML)))
 
@@ -247,4 +247,109 @@ func TestWireScope_RouteResolvesThePath(t *testing.T) {
 	last := rec.last
 	rec.mu.Unlock()
 	assert.False(t, strings.Contains(last, "org-2"), "an unresolved request is never asked")
+}
+
+// siblingsYAML is unresolvedYAML plus a route whose body resolves aliases with
+// the fields of their element, and an array of aliases.
+const siblingsYAML = unresolvedYAML + `
+  routes:
+    - method: POST
+      path: /v1/organizations/:organization_id/transfers
+      dimensions:
+        - { name: ledgerId,  from: body, field: "debits[].ledgerId" }
+        - { name: accountId, from: body, field: "debits[].alias", resolve: alias }
+    - method: POST
+      path: /v1/organizations/:organization_id/ledgers/:ledger_id/rules
+      dimensions:
+        - { name: accountId, from: body, field: "accountTarget.aliases[]", optional: true, resolve: alias }
+`
+
+// scope.routes — string arrays and resolved body fields included — are read
+// by this library only: the wire body, the scope-only body and the hash are
+// those of the manifest without them.
+func TestScopeRoutes_StringArraysAndSiblingsStayOutOfTheWireAndTheHash(t *testing.T) {
+	t.Parallel()
+
+	routed, err := parseManifest([]byte(siblingsYAML))
+	require.NoError(t, err)
+	require.NoError(t, routed.Validate())
+	require.Len(t, routed.Scope.Routes, 2, "the routes are parsed")
+
+	plain, err := parseManifest([]byte(unresolvedYAML))
+	require.NoError(t, err)
+
+	routedHash, err := routed.CanonicalHash()
+	require.NoError(t, err)
+
+	plainHash, err := plain.CanonicalHash()
+	require.NoError(t, err)
+	assert.Equal(t, plainHash, routedHash)
+
+	routedWire, err := routed.wireJSON()
+	require.NoError(t, err)
+
+	plainWire, err := plain.wireJSON()
+	require.NoError(t, err)
+	assert.Equal(t, string(plainWire), string(routedWire))
+
+	routedScope, err := routed.scopeOnly().wireJSON()
+	require.NoError(t, err)
+
+	plainScope, err := plain.scopeOnly().wireJSON()
+	require.NoError(t, err)
+	assert.Equal(t, string(plainScope), string(routedScope))
+
+	for _, leaked := range []string{"routes", "aliases[]", "debits[]", "resolve"} {
+		assert.NotContains(t, string(routedWire), leaked)
+		assert.NotContains(t, string(routedScope), leaked)
+	}
+}
+
+// WireScope wires the siblings: the resolver confines each alias to the ledger
+// its own element names.
+func TestWireScope_ResolverReceivesTheElementsSiblings(t *testing.T) {
+	t.Setenv("AUTH_M2M_INVERSION_ENABLED", "true")
+
+	rec := newAuthorizeRecorder(t)
+	auth := middleware.NewAuthClient(rec.URL, true, obs.Nop())
+
+	var got []middleware.ResolveItem
+
+	require.NoError(t, auth.RegisterScopeResolver("alias", func(_ context.Context, in middleware.ResolveInput) ([][]string, error) {
+		got = in.Items
+
+		out := make([][]string, len(in.Items))
+		for i, item := range in.Items {
+			out[i] = []string{item.Siblings["ledgerId"] + ":" + item.Value}
+		}
+
+		return out, nil
+	}))
+	require.NoError(t, WireScope(auth, []byte(siblingsYAML)))
+
+	app := fiber.New()
+	app.Post("/v1/organizations/:organization_id/transfers",
+		auth.Authorize("plugin-fees", "transfers", "post"),
+		func(c fiber.Ctx) error { return c.SendString("ok") })
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/organizations/org-1/transfers",
+		strings.NewReader(`{"debits":[{"ledgerId":"led-2","alias":"@a"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", partnerBearer(t))
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	assert.Equal(t, []middleware.ResolveItem{{Value: "@a", Siblings: map[string]string{"ledgerId": "led-2"}}}, got)
+
+	rec.mu.Lock()
+	body := rec.last
+	rec.mu.Unlock()
+
+	var sent struct {
+		Attributes map[string]string `json:"attributes"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &sent))
+	assert.Equal(t, map[string]string{"organizationId": "org-1", "ledgerId": "led-2", "accountId": "led-2:@a"}, sent.Attributes)
 }

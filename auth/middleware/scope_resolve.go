@@ -20,11 +20,13 @@ type ResolveInput struct {
 	Resolver string
 	// Dimension is the dimension the values translate into (e.g. "accountId").
 	Dimension string
-	// Values are the distinct values the request carries, in the order first
-	// named: every element of a body array, every value of a query parameter.
-	// They are batched — one call per dimension and resolver per request — and
-	// never more than the per-request cap of distinct sets (100).
-	Values []string
+	// Items are the distinct values the request carries, each with the context
+	// it was read in, in the order first named: every element of a body array,
+	// every value of a query parameter. The same value read with different
+	// siblings is one item per context. They are batched — one call per
+	// dimension and resolver per request — and never more than the per-request
+	// cap of distinct sets (100).
+	Items []ResolveItem
 	// Known are the dimensions the request names directly, by name — those read
 	// from the path, the query, headers or a form that are not themselves
 	// resolved (e.g. organizationId and ledgerId from the path) — so the lookup
@@ -32,18 +34,33 @@ type ResolveInput struct {
 	Known map[string][]string
 }
 
+// ResolveItem is one value to translate and the context it was read in.
+type ResolveItem struct {
+	// Value is the request value to translate.
+	Value string
+	// Siblings are, by dimension name, the values read from the same body
+	// element as Value: the route's other body dimensions declared under the
+	// same element (debits[].organizationId and debits[].ledgerId for
+	// debits[].alias) — for a string of an array of strings, under the element
+	// holding the array — that the element names and that are not themselves
+	// resolved. Nil when there is none, and always for a value read outside the
+	// body.
+	Siblings map[string]string
+}
+
 // ScopeResolver translates request values into dimension values: a transaction
 // id into the account ids of its legs, an account alias into the account id.
 //
-// It returns, for each input value it knows, the dimension values it stands
-// for — one or several. A value left out of the result, or mapped to no value,
-// is unknown: the request is refused with 422 naming where it was read. A
+// It returns one entry per item of in.Items, in the same order: the dimension
+// values the item stands for — one or several. An item mapped to no value is
+// unknown: the request is refused with 422 naming where it was read. A
 // returned error means the lookup itself failed: the request is refused with
 // 503 naming the resolver, and the error is logged, never sent to the caller.
-// An empty string among the returned values is treated as such a failure.
+// An answer with a different number of entries than items, or an empty string
+// among the returned values, is treated as such a failure.
 //
 // ctx carries the request's authorization deadline.
-type ScopeResolver func(ctx context.Context, in ResolveInput) (map[string][]string, error)
+type ScopeResolver func(ctx context.Context, in ResolveInput) ([][]string, error)
 
 // RegisterScopeResolver registers a resolver under name, for the dimensions
 // that declare Resolve(name) — or resolve: name in the manifest. Register every
@@ -135,11 +152,11 @@ type scopeResolution struct {
 	product string
 }
 
-// call asks the named resolver to translate values, validating its answer. The
-// result maps each input value to its dimension values; an input it left out
-// is the caller's to report as unknown.
-func (r scopeResolution) call(resolverName, dimension string, values []string, known map[string][]string) (map[string][]string, *errBodyScope) {
-	if len(values) > maxBodyScopeQuestions {
+// call asks the named resolver to translate items, validating its answer. The
+// result holds, per item and in its order, its dimension values; an item mapped
+// to none is the caller's to report as unknown.
+func (r scopeResolution) call(resolverName, dimension string, items []ResolveItem, known map[string][]string) ([][]string, *errBodyScope) {
+	if len(items) > maxBodyScopeQuestions {
 		return nil, &errBodyScope{message: fmt.Sprintf(
 			"the request names more than %d distinct values of scope dimension %q to resolve", maxBodyScopeQuestions, dimension)}
 	}
@@ -161,7 +178,7 @@ func (r scopeResolution) call(resolverName, dimension string, values []string, k
 		Product:   r.product,
 		Resolver:  resolverName,
 		Dimension: dimension,
-		Values:    values,
+		Items:     items,
 		Known:     known,
 	})
 	if err != nil {
@@ -170,8 +187,15 @@ func (r scopeResolution) call(resolverName, dimension string, values []string, k
 		return nil, unavailable
 	}
 
-	for _, value := range values {
-		for _, resolved := range out[value] {
+	if len(out) != len(items) {
+		logErrorf(r.ctx, r.auth.Logger, "Scope resolver %q answered %d entries for %d items of dimension %q; denying (fail closed)",
+			resolverName, len(out), len(items), dimension)
+
+		return nil, unavailable
+	}
+
+	for _, values := range out {
+		for _, resolved := range values {
 			if resolved == "" {
 				logErrorf(r.ctx, r.auth.Logger, "Scope resolver %q returned an empty value for dimension %q; denying (fail closed)", resolverName, dimension)
 
@@ -215,7 +239,12 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 	readings.pending = nil
 
 	for _, p := range pending {
-		out, err := r.call(p.dim.resolver, p.dim.name, p.values, known)
+		items := make([]ResolveItem, 0, len(p.values))
+		for _, value := range p.values {
+			items = append(items, ResolveItem{Value: value})
+		}
+
+		out, err := r.call(p.dim.resolver, p.dim.name, items, known)
 		if err != nil {
 			return requestValues{}, err
 		}
@@ -224,8 +253,7 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 
 		seen := make(map[string]struct{})
 
-		for _, value := range p.values {
-			resolved := out[value]
+		for _, resolved := range out {
 			if len(resolved) == 0 {
 				return requestValues{}, unresolved(p.dim.location(), p.dim.name)
 			}
@@ -250,22 +278,38 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 
 // rawQuestion is one question of a body whose keys are still to be resolved:
 // the values read for it, where each was read, and, per resolved dimension, the
-// resolver that translates its value.
+// resolver that translates its value and the siblings it was read with.
 type rawQuestion struct {
 	values    map[string]string
 	at        map[string]string
 	resolvers map[string]string
+	siblings  map[string]map[string]string
 }
 
-// resolveBatch is one resolver call of a body: the distinct keys of one
-// dimension that one resolver translates.
+// item is the resolver item a resolved dimension of the question makes.
+func (q rawQuestion) item(name string) ResolveItem {
+	return ResolveItem{Value: q.values[name], Siblings: q.siblings[name]}
+}
+
+// resolveBatch is one resolver call of a body: the distinct items of one
+// dimension that one resolver translates, and the index of each by itemKey.
 type resolveBatch struct {
 	resolver, dimension string
-	values              []string
-	seen                map[string]struct{}
+	items               []ResolveItem
+	index               map[string]int
 }
 
 func batchKey(resolver, dimension string) string { return resolver + "\x00" + dimension }
+
+// itemKey identifies an item by its value and its siblings, injectively.
+func itemKey(item ResolveItem) string {
+	var b strings.Builder
+
+	writeLengthPrefixed(&b, item.Value)
+	b.WriteString(attributesCacheKey(item.Siblings))
+
+	return b.String()
+}
 
 // resolveBody translates the resolved keys of every collected body question —
 // one call per resolver and dimension, with every distinct key — and asks, for
@@ -279,12 +323,17 @@ func (r scopeResolution) resolveBody(raw []rawQuestion, set *questionSet, readin
 	for _, key := range order {
 		b := batches[key]
 
-		out, err := r.call(b.resolver, b.dimension, b.values, known)
+		out, err := r.call(b.resolver, b.dimension, b.items, known)
 		if err != nil {
 			return err
 		}
 
-		results[key] = out
+		byItem := make(map[string][]string, len(b.items))
+		for i, item := range b.items {
+			byItem[itemKey(item)] = out[i]
+		}
+
+		results[key] = byItem
 	}
 
 	for _, q := range raw {
@@ -303,8 +352,8 @@ func (r scopeResolution) resolveBody(raw []rawQuestion, set *questionSet, readin
 	return nil
 }
 
-// collectBatches groups the resolved keys of the questions by resolver and
-// dimension, each key once, in the order first named.
+// collectBatches groups the resolved items of the questions by resolver and
+// dimension, each item once, in the order first named.
 func collectBatches(raw []rawQuestion) ([]string, map[string]*resolveBatch) {
 	var order []string
 
@@ -316,14 +365,15 @@ func collectBatches(raw []rawQuestion) ([]string, map[string]*resolveBatch) {
 
 			b, ok := batches[key]
 			if !ok {
-				b = &resolveBatch{resolver: q.resolvers[name], dimension: name, seen: make(map[string]struct{})}
+				b = &resolveBatch{resolver: q.resolvers[name], dimension: name, index: make(map[string]int)}
 				batches[key] = b
 				order = append(order, key)
 			}
 
-			if _, dup := b.seen[q.values[name]]; !dup {
-				b.seen[q.values[name]] = struct{}{}
-				b.values = append(b.values, q.values[name])
+			item := q.item(name)
+			if _, dup := b.index[itemKey(item)]; !dup {
+				b.index[itemKey(item)] = len(b.items)
+				b.items = append(b.items, item)
 			}
 		}
 	}
@@ -337,7 +387,7 @@ func expandResolved(q rawQuestion, results map[string]map[string][]string, set *
 	combinations := []map[string]string{q.values}
 
 	for _, name := range sortedKeys(q.resolvers) {
-		resolved := results[batchKey(q.resolvers[name], name)][q.values[name]]
+		resolved := results[batchKey(q.resolvers[name], name)][itemKey(q.item(name))]
 		if len(resolved) == 0 {
 			return nil, unresolved(q.at[name], name)
 		}
