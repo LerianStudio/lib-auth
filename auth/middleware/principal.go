@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/LerianStudio/lib-auth/v5/auth/internal/principalctx"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
@@ -37,10 +38,11 @@ type Principal struct {
 	TenantID string
 }
 
-// principalContextKey is the unexported, typed key under which Authorize stores
-// the Principal on the request context. A dedicated type (rather than a string)
-// keeps the entry unreachable and uncollidable from outside this package.
-type principalContextKey struct{}
+// principalContextKey is the typed key under which Authorize stores the
+// Principal on the request context. It aliases an internal type, so the entry
+// stays unreachable and uncollidable from outside lib-auth; within the module,
+// auth/authtest writes the same key to stand in for Authorize in tests.
+type principalContextKey = principalctx.Key
 
 // PrincipalFromContext returns the Principal Authorize or AuthorizeHTTP stored on the request Go
 // context, or (zero, false) when absent or when the stored value does not describe

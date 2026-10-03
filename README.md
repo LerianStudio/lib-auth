@@ -464,6 +464,82 @@ it against.
 outage (see the refusal paragraph under **How It Works** above), so a rail's alarms
 can key on 503 across both surfaces.
 
+### 🧪 Testing with an authenticated principal
+
+Package `auth/authtest` lets a service write an end-to-end test of a route that
+requires a principal without contacting the authorization service. **It is
+test-only: never import it from production wiring.** Every entry point takes a
+`testing.TB`, there is no global switch, and lib-auth's own guard test fails if
+any non-test file in the module imports it.
+
+Pick the helper by what the test exercises:
+
+* **The handler, not the middleware.** `authtest.Fiber(t, p)` and
+  `authtest.HTTP(t, p)` publish `p` exactly as `Authorize` and `AuthorizeHTTP` do;
+  mount them where those would be. `authtest.WithPrincipal(t, ctx, p)` does the
+  same on a bare context. `RequireHuman`, `RequireApplication` and
+  `PrincipalFromContext` behind them see an identified caller.
+* **The real `Authorize` chain.** `authtest.NewIssuer(t, iss)` generates an RSA
+  key inside the test process and signs RS256 tokens with it. Wire its key with
+  `client.WithKeySource(issuer.KeySource())`, or set
+  `t.Setenv("AUTH_JWT_VERIFY_CERT", issuer.PublicKeyPEM())` before
+  `NewAuthClient`, and its tokens pass `Authorize` with signature verification
+  on. A token from any other key is refused with 401. This is the required path
+  when the service pins `PrincipalRequiredWhenDisabled`.
+
+`Authorize` never reads a principal already on the request context. Whenever it
+can identify a caller (an enabled client, or `PrincipalRequiredWhenDisabled`), it
+refuses a request without a valid bearer token before the handler runs, and
+publishes the principal it derived from that token over anything the context
+held. A context-only helper therefore cannot reach a handler mounted behind the
+real `Authorize`; use `Issuer` there. This library has no switch that makes
+`Authorize` accept an injected principal, by design.
+
+```go
+p := authtest.User("acme-org", "user-1") // or authtest.App("acme-org/settlement-bot")
+p.TenantID = "tenant-a"
+
+// Handler test.
+app.Post("/v1/emissions/:id/approve",
+    authtest.Fiber(t, p),
+    authMiddleware.RequireHuman(),
+    emissionHandler.Approve)
+
+// Real Authorize, auth off, bearer still required (nothing is dialled).
+issuer := authtest.NewIssuer(t, "") // set iss to the client's AUTH_JWT_ISSUER, if any
+client := authMiddleware.NewAuthClient("", false, nil)
+client.PrincipalRequiredWhenDisabled = true
+client.M2MInversionEnabled = true // needed for application principals on this path
+client.WithKeySource(issuer.KeySource())
+
+req.Header.Set("Authorization", "Bearer "+issuer.Token(t, p))
+```
+
+A principal that `PrincipalFromContext` would report as absent (a blank `Sub`, a
+`normal-user` without `Owner`, a `Subject` inconsistent with `Owner` and `Sub`, an
+unknown `Type`) fails the test when the helper is called, on the test goroutine.
+The handlers built by `Fiber` and `HTTP` never touch `t` while serving and are
+safe for concurrent requests. Tokens expire five minutes after they are issued.
+
+`authtest` does not fake the authorization service: testing a denial (403) or an
+outage (503) still needs a local stand-in for it.
+
+To keep `authtest` out of a service's production code, add a depguard rule that
+applies to non-test files only:
+
+```yaml
+linters:
+  settings:
+    depguard:
+      rules:
+        no-authtest-in-production:
+          files:
+            - "!$test"
+          deny:
+            - pkg: github.com/LerianStudio/lib-auth/v5/auth/authtest
+              desc: test-only; it publishes a principal without authorization
+```
+
 ## 📥 Example Request to Auth
 
 ```http
