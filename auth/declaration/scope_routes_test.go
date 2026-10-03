@@ -146,8 +146,8 @@ func TestValidate_ScopeRoutes(t *testing.T) {
 		mutate  func(m *DeclarationManifest)
 		wantErr string
 	}{
-		{name: "from_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "" }, wantErr: `scope.routes[0].dimensions[0]: from must be "body"`},
-		{name: "from_unknown", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "query" }, wantErr: `got "query"`},
+		{name: "from_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "" }, wantErr: `scope.routes[0].dimensions[0]: from must be one of "body", "query", "header", got ""`},
+		{name: "from_unknown", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "cookie" }, wantErr: `got "cookie"`},
 		{name: "from_path", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "path" }, wantErr: `got "path"`},
 		{name: "field_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[1].Dimensions[1].Field = " " }, wantErr: "scope.routes[1].dimensions[1]: field must not be empty"},
 		{name: "name_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].Name = "" }, wantErr: "scope.routes[0].dimensions[0]: name must not be empty"},
@@ -222,9 +222,9 @@ func TestWireScope_RouteErrorsFailTheBoot(t *testing.T) {
 
 	auth := &middleware.AuthClient{Logger: obs.Nop()}
 
-	unknownFrom := strings.Replace(routedYAML, "from: body\n          field: ledgerId", "from: header\n          field: ledgerId", 1)
+	unknownFrom := strings.Replace(routedYAML, "from: body\n          field: ledgerId", "from: path\n          field: ledgerId", 1)
 	require.NotEqual(t, routedYAML, unknownFrom)
-	require.ErrorContains(t, WireScope(auth, []byte(unknownFrom)), `got "header"`)
+	require.ErrorContains(t, WireScope(auth, []byte(unknownFrom)), `got "path"`)
 
 	badField := strings.Replace(routedYAML, `"items[].ledgerId"`, `"items[]"`, 1)
 	require.NotEqual(t, routedYAML, badField)

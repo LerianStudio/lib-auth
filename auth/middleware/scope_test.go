@@ -724,17 +724,19 @@ func TestDecisionCache_SeparatorBytesInAValueDoNotForgeAnotherScopesKey(t *testi
 // Duplicate dimension names
 // ---------------------------------------------------------------------------
 
-// A repeated dimension name is a misdeclaration: resolveAttributes writes into a
-// map, so the second value overwrites the first and the request asks about ONE
-// dimension while the route declared two. It is refused at declaration time, and
-// the refusal names the repeated dimension so whoever wrote the route knows which.
+// A dimension read twice from the same carrier is a misdeclaration: it asks
+// nothing a single read does not, and hides a typo in the route. It is refused
+// at declaration time, and the refusal names the repeated dimension so whoever
+// wrote the route knows which. Header names are one carrier in any letter case.
+// The same name from DIFFERENT carriers is a declaration (see
+// TestResolveDeclaration_SameNameSeveralCarriers).
 func TestResolveDeclaration_RejectsDuplicateDimensionName(t *testing.T) {
 	t.Parallel()
 
 	_, declErr := resolveDeclaration("midaz", []ScopeDeclaration{
 		RequireScope("midaz",
-			Dim("organizationId", FromPath).At("organization_id"),
 			Dim("organizationId", FromHeader).At("X-Organization-Id"),
+			Dim("organizationId", FromHeader).At("x-organization-id"),
 		),
 	})
 
@@ -767,7 +769,7 @@ func TestAuthorize_MisdeclaredRouteIsRefusedWhileAuthIsDisabled(t *testing.T) {
 			app.Get("/dup/:organization_id",
 				tc.auth.Authorize("midaz", "accounts", "get",
 					RequireScope("midaz",
-						Dim("organizationId", FromPath).At("organization_id"),
+						Dim("organizationId", FromQuery).At("organizationId"),
 						Dim("organizationId", FromQuery).At("organizationId"),
 					),
 				),
@@ -812,7 +814,7 @@ func TestAuthorize_GuardDeniesDuplicateDimensionName(t *testing.T) {
 	app.Get("/dup/:organization_id",
 		auth.Authorize("midaz", "accounts", "get",
 			RequireScope("midaz",
-				Dim("organizationId", FromPath).At("organization_id"),
+				Dim("organizationId", FromQuery).At("organizationId"),
 				Dim("organizationId", FromQuery).At("organizationId"),
 			),
 		),

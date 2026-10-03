@@ -117,7 +117,7 @@ func TestSetManifestScope_Validation(t *testing.T) {
 		{name: "empty_is_valid", product: "midaz"},
 		{name: "empty_product", product: " ", dims: manifestDims(), wantErr: "product"},
 		{name: "empty_name", product: "midaz", dims: []Dimension{Dim("", FromPath).At("x")}, wantErr: "no name"},
-		{name: "not_from_path", product: "midaz", dims: []Dimension{Dim("organizationId", FromHeader)}, wantErr: "path"},
+		{name: "from_body", product: "midaz", dims: []Dimension{Dim("organizationId", FromBody)}, wantErr: "path, the query or a header"},
 		{name: "empty_key", product: "midaz", dims: []Dimension{Dim("organizationId", FromPath).At("")}, wantErr: "empty"},
 		{
 			name: "duplicate_name", product: "midaz",

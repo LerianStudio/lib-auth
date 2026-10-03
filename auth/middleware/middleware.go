@@ -670,7 +670,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			scope = derived.forRoute(c.Route().Method, c.Route().Path)
 		}
 
-		attributes, missing := resolveAttributes(c, scope.dims)
+		readings, missing := resolveAttributes(c, scope.dims)
 		if missing != "" {
 			logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
 
@@ -685,7 +685,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			action:      action,
 			accessToken: accessToken,
 			clientIP:    clientIP,
-		}, scope, attributes)
+		}, scope, readings)
 		if refusal != nil {
 			span.End()
 
@@ -727,7 +727,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 // The questions are asked one after another, not concurrently: they are few
 // (distinct sets, capped), the decision cache answers repeats without a call,
 // the first denial ends the request, and the single deadline bounds the total.
-func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, params authzParams, scope ScopeDeclaration, attributes map[string]string) (authzResolution, Principal, []map[string]string, error) {
+func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, params authzParams, scope ScopeDeclaration, readings requestValues) (authzResolution, Principal, []map[string]string, error) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -748,7 +748,7 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 	// distinct set of identifiers the body names, and every one must be
 	// allowed. A body that cannot be read for them is the caller's to fix:
 	// refused before any call, naming the field, and never let through.
-	questions, badBody := scope.questions(c, attributes, caller.partner != "")
+	questions, badBody := scope.questions(c, readings, caller.partner != "")
 	if badBody != nil {
 		return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, http.StatusBadRequest, badBody.Error())
 	}

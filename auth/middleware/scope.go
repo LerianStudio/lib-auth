@@ -31,9 +31,13 @@ const (
 	SourceUnset Source = iota
 	// FromPath reads a path parameter (fiber.Ctx.Params).
 	FromPath
-	// FromHeader reads a request header (fiber.Ctx.Get).
+	// FromHeader reads a request header, its name compared without regard to
+	// letter case. A header repeated, or a value listing several separated by
+	// ',', names every one of them, each its own question.
 	FromHeader
-	// FromQuery reads a query-string parameter (fiber.Ctx.Query).
+	// FromQuery reads a query-string parameter. A parameter repeated, or a value
+	// listing several separated by ',', names every one of them, each its own
+	// question.
 	FromQuery
 )
 
@@ -88,21 +92,99 @@ func (d Dimension) Key() string { return d.key }
 // Source is where in the request the value is read from.
 func (d Dimension) Source() Source { return d.source }
 
-// resolve reads the dimension's value out of the request, or "" when the source
-// carries nothing.
-func (d Dimension) resolve(c fiber.Ctx) string {
+// read reads the dimension's values out of the request. present is false when
+// the request does not carry the dimension at all; problem is non-empty when it
+// carries it malformed. A path parameter is one value. A query parameter or a
+// header may name several: every occurrence of it, each split on ',' with the
+// spaces around an element trimmed, so "?id=a&id=b", "?id=a,b" and two header
+// lines "a" and "b" all name a and b. An element that is empty after trimming
+// names nothing and is malformed. Body dimensions are read by the body plan.
+func (d Dimension) read(c fiber.Ctx) (values []string, present bool, problem string) {
 	switch d.source {
 	case FromPath:
-		return c.Params(d.key)
+		value := c.Params(d.key)
+
+		return []string{value}, value != "", ""
 	case FromHeader:
-		return c.Get(d.key)
+		var raw [][]byte
+
+		// Compared without regard to letter case, whatever the app's header
+		// normalization: the header the handler reads is the header checked.
+		for k, v := range c.Request().Header.All() {
+			if strings.EqualFold(string(k), d.key) {
+				raw = append(raw, v)
+			}
+		}
+
+		return splitValues(raw)
 	case FromQuery:
-		return fiber.Query[string](c, d.key)
+		return splitValues(c.Request().URI().QueryArgs().PeekMulti(d.key))
 	case SourceUnset, FromBody:
-		return ""
+		return nil, false, ""
 	default:
-		return ""
+		return nil, false, ""
 	}
+}
+
+// splitValues splits every occurrence of a query parameter or header into its
+// comma-separated elements, trimmed, keeping each distinct value once in the
+// order first named.
+func splitValues(raw [][]byte) ([]string, bool, string) {
+	if len(raw) == 0 {
+		return nil, false, ""
+	}
+
+	var values []string
+
+	seen := make(map[string]struct{})
+
+	for _, occurrence := range raw {
+		for _, element := range strings.Split(string(occurrence), ",") {
+			value := strings.TrimSpace(element)
+			if value == "" {
+				return nil, true, "must not name an empty value"
+			}
+
+			if _, dup := seen[value]; dup {
+				continue
+			}
+
+			seen[value] = struct{}{}
+			values = append(values, value)
+		}
+	}
+
+	return values, true, ""
+}
+
+// location names where in the request the dimension is read, for the refusals
+// that point the caller at it.
+func (d Dimension) location() string {
+	switch d.source {
+	case FromPath:
+		return "path parameter " + strconv.Quote(d.key)
+	case FromHeader:
+		return "header " + strconv.Quote(d.key)
+	case FromQuery:
+		return "query parameter " + strconv.Quote(d.key)
+	case FromBody:
+		return "body field " + strconv.Quote(d.key)
+	case SourceUnset:
+		return "nowhere"
+	default:
+		return "nowhere"
+	}
+}
+
+// carrier identifies the place in the request a dimension is read from. Header
+// names are case-insensitive, so two spellings of one header are one carrier.
+func (d Dimension) carrier() string {
+	key := d.key
+	if d.source == FromHeader {
+		key = strings.ToLower(key)
+	}
+
+	return strconv.Itoa(int(d.source)) + ":" + key
 }
 
 // ScopeDeclaration is a route's statement of which product it belongs to and
@@ -162,17 +244,72 @@ func ScopeFromContext(ctx context.Context) (RequestScope, bool) {
 	return scope, ok
 }
 
-// resolveAttributes reads every declared dimension out of the request. The second
-// return names the first dimension whose source carried nothing, which the caller
-// denies: a declared identifier with no value cannot be matched against anything,
-// and sending it absent would silently ask a narrower question than the route
-// promised.
-func resolveAttributes(c fiber.Ctx, dims []Dimension) (map[string]string, string) {
-	if len(dims) == 0 {
-		return nil, ""
+// requestValues is what the request carries for the dimensions read outside
+// its body: the distinct values of each dimension, in the order the dimensions
+// are declared, and where each was first read.
+type requestValues struct {
+	names  []string
+	values map[string][]string
+	where  map[string]string
+	// problem is the first carrier found malformed, or the first dimension two
+	// carriers disagree on. It is reported once the caller is authenticated.
+	problem *errBodyScope
+}
+
+// add records the values one carrier names for a dimension. A dimension already
+// read from another carrier must name the same set of values there: when the two
+// disagree the handler may act on either, and no single question checks both.
+func (rv *requestValues) add(dim Dimension, values []string) {
+	if previous, ok := rv.values[dim.name]; ok {
+		if !sameValues(previous, values) && rv.problem == nil {
+			rv.problem = divergence(dim.name, rv.where[dim.name], dim.location())
+		}
+
+		return
 	}
 
-	attributes := make(map[string]string, len(dims))
+	if rv.values == nil {
+		rv.values = make(map[string][]string)
+		rv.where = make(map[string]string)
+	}
+
+	rv.names = append(rv.names, dim.name)
+	rv.values[dim.name] = values
+	rv.where[dim.name] = dim.location()
+}
+
+// sameValues reports whether two lists of distinct values name the same set.
+func sameValues(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	set := make(map[string]struct{}, len(a))
+	for _, v := range a {
+		set[v] = struct{}{}
+	}
+
+	for _, v := range b {
+		if _, ok := set[v]; !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func divergence(name, first, second string) *errBodyScope {
+	return &errBodyScope{message: "scope dimension " + strconv.Quote(name) + " is given different values in " + first + " and " + second}
+}
+
+// resolveAttributes reads every declared dimension outside the body out of the
+// request. The second return names the first required dimension the request
+// does not carry, which the caller denies: a declared identifier with no value
+// cannot be matched against anything, and sending it absent would silently ask
+// a narrower question than the route promised. An optional dimension the request
+// does not carry is left out.
+func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
+	var rv requestValues
 
 	for _, dim := range dims {
 		// A body dimension is not one value of the request but one per question
@@ -181,19 +318,22 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (map[string]string, string
 			continue
 		}
 
-		value := dim.resolve(c)
-		if value == "" {
-			if dim.optional {
-				continue
+		values, present, problem := dim.read(c)
+
+		switch {
+		case problem != "":
+			if rv.problem == nil {
+				rv.problem = &errBodyScope{message: "scope " + dim.location() + " " + problem}
 			}
-
-			return nil, dim.name
+		case !present && dim.optional:
+		case !present:
+			return requestValues{}, dim.name
+		default:
+			rv.add(dim, values)
 		}
-
-		attributes[dim.name] = value
 	}
 
-	return attributes, ""
+	return rv, ""
 }
 
 // attributesCacheKey folds the attributes into a single deterministic string so
@@ -272,6 +412,10 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 // compileDims validates a route's dimensions, whatever their source, and
 // compiles the ones read from the body. It is the one check every declaration
 // passes — an explicit RequireScope and a manifest route alike.
+//
+// A dimension may be read from several carriers — the path and a header, the
+// query and the body — and the request must then name the same values in each.
+// Reading it twice from the SAME carrier is a mistake, not a wider question.
 func compileDims(dims []Dimension) (*bodyPlan, string) {
 	seen := make(map[string]struct{}, len(dims))
 
@@ -294,18 +438,15 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 			continue
 		}
 
-		// A repeated name is not a wider question, it is a narrower one: the
-		// resolved attributes live in a map, so the last occurrence silently
-		// overwrites every earlier one and the request asks about ONE dimension
-		// while the route declared several.
-		if _, duplicate := seen[dim.name]; duplicate {
-			return nil, "scope dimension " + dim.name + " is declared more than once"
+		key := dim.name + "\x00" + dim.carrier()
+		if _, duplicate := seen[key]; duplicate {
+			return nil, "scope dimension " + dim.name + " is declared more than once from " + dim.location()
 		}
 
-		seen[dim.name] = struct{}{}
+		seen[key] = struct{}{}
 	}
 
-	return compileBodyPlan(dims, seen)
+	return compileBodyPlan(dims)
 }
 
 // SetManifestScope wires the product's scope catalog — the scope section of its
@@ -313,7 +454,8 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 // dimensions from the route path instead of every route declaring them.
 //
 // dims are the catalog in tree order, each read from a path parameter
-// (Dim(name, FromPath).At(param)). The declaration package builds them from the
+// (Dim(name, FromPath).At(param)), a query parameter (FromQuery) or a header
+// (FromHeader); no two read the same place. The declaration package builds them from the
 // embedded manifest: call declaration.WireScope(auth, manifest) rather than this
 // directly. Call it at boot, BEFORE registering routes: a route registered
 // while its product has no catalog never derives one. A later call reaches the
@@ -322,8 +464,9 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 // Once a product has a catalog, every route of that product that passes no
 // RequireScope sends, as attributes, the catalog dimensions whose parameter is a
 // WHOLE segment of the route path (":organization_id"), in catalog order — the
-// same attributes an explicit declaration sends. A route whose path carries none
-// of them behaves as a route that declares nothing. A route that passes
+// same attributes an explicit declaration sends — plus every catalog dimension
+// read from the query or a header that the request carries. A request that
+// carries none of them behaves as on a route that declares nothing. A route that passes
 // RequireScope keeps its declaration, which must then name only catalog
 // dimensions.
 //
@@ -345,22 +488,22 @@ func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) erro
 		switch {
 		case dim.name == "":
 			return errors.New("manifest scope: a dimension has no name")
-		case dim.source != FromPath:
-			return errors.New("manifest scope: dimension " + dim.name + " must be read from the path")
+		case dim.source != FromPath && dim.source != FromQuery && dim.source != FromHeader:
+			return errors.New("manifest scope: dimension " + dim.name + " must be read from the path, the query or a header")
 		case dim.key == "":
-			return errors.New("manifest scope: dimension " + dim.name + " declares an empty path parameter")
+			return errors.New("manifest scope: dimension " + dim.name + " declares an empty request key")
 		}
 
 		if _, dup := names[dim.name]; dup {
 			return errors.New("manifest scope: dimension " + dim.name + " is declared more than once")
 		}
 
-		if _, dup := keys[dim.key]; dup {
-			return errors.New("manifest scope: path parameter " + dim.key + " is declared more than once")
+		if _, dup := keys[dim.carrier()]; dup {
+			return errors.New("manifest scope: " + dim.location() + " is declared more than once")
 		}
 
 		names[dim.name] = struct{}{}
-		keys[dim.key] = struct{}{}
+		keys[dim.carrier()] = struct{}{}
 	}
 
 	auth.manifestScopeMu.Lock()
@@ -422,12 +565,15 @@ func checkAgainstCatalog(scope ScopeDeclaration, catalog []Dimension) string {
 	return ""
 }
 
-// deriveRouteDimensions returns the catalog dimensions a route path addresses: a
-// dimension applies when one WHOLE segment of the path is its parameter with the
-// ':' marker. A literal segment spelling the parameter is text, and a segment
-// that merely contains it (":organization_id.json", ":organization_id?") is a
-// different parameter. The result keeps catalog order, whatever the order of the
-// segments, and is empty when the path carries none.
+// deriveRouteDimensions returns the catalog dimensions a route addresses. A
+// path dimension applies when one WHOLE segment of the path is its parameter
+// with the ':' marker. A literal segment spelling the parameter is text, and a
+// segment that merely contains it (":organization_id.json", ":organization_id?")
+// is a different parameter. A dimension read from the query or a header applies
+// to every route — the path cannot say whether a request carries it — and is
+// derived optional: read when the request carries it, left out when it does not.
+// The result keeps catalog order, whatever the order of the segments, and is
+// empty when the route addresses none.
 func deriveRouteDimensions(catalog []Dimension, path string) []Dimension {
 	segments := make(map[string]struct{})
 
@@ -440,6 +586,12 @@ func deriveRouteDimensions(catalog []Dimension, path string) []Dimension {
 	dims := make([]Dimension, 0, len(catalog))
 
 	for _, dim := range catalog {
+		if dim.source != FromPath {
+			dims = append(dims, dim.Optional())
+
+			continue
+		}
+
 		if _, ok := segments[dim.key]; ok {
 			dims = append(dims, dim)
 		}

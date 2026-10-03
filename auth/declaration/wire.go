@@ -307,16 +307,26 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 	return stop, nil
 }
 
-// routeDimensionSources maps a scope.routes dimension's `from` to the source the
-// middleware reads it from. Validate accepts exactly these keys; a new source is
-// one entry here and one in the middleware.
-var routeDimensionSources = map[string]middleware.Source{
-	scopeFromBody: middleware.FromBody,
-}
+// catalogDimensionSources and routeDimensionSources map a scope dimension's
+// `from` to the source the middleware reads it from, for the catalog and for
+// scope.routes. Validate accepts exactly these keys; a new source is one entry
+// here and one in the middleware.
+var (
+	catalogDimensionSources = map[string]middleware.Source{
+		scopeFromPath:   middleware.FromPath,
+		scopeFromQuery:  middleware.FromQuery,
+		scopeFromHeader: middleware.FromHeader,
+	}
+	routeDimensionSources = map[string]middleware.Source{
+		scopeFromBody:   middleware.FromBody,
+		scopeFromQuery:  middleware.FromQuery,
+		scopeFromHeader: middleware.FromHeader,
+	}
+)
 
 // WireScope wires the manifest's scope section into the authorization client, so
-// auth.Authorize derives each route's scope dimensions from the route path (see
-// middleware.AuthClient.SetManifestScope). It parses and validates the manifest
+// auth.Authorize derives each route's scope dimensions from the route path, the
+// query and headers (see middleware.AuthClient.SetManifestScope). It parses and validates the manifest
 // — the same embedded bytes the product publishes — and registers its scope
 // under manifest.service, which must be the product name the routes pass to
 // Authorize.
@@ -331,8 +341,9 @@ var routeDimensionSources = map[string]middleware.Source{
 //		auth.Authorize("midaz", "ledgers", "get"), handler)
 //
 // The routes of scope.routes read the dimensions they declare from their JSON
-// request body (see middleware.AuthClient.SetManifestRouteScope); a route that
-// cannot be honoured fails here, at boot.
+// request body, the query or headers (see
+// middleware.AuthClient.SetManifestRouteScope); a route that cannot be honoured
+// fails here, at boot.
 //
 // A manifest without a scope section leaves the client exactly as it was.
 func WireScope(auth *middleware.AuthClient, manifest []byte) error {
@@ -354,7 +365,7 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 	if m.Scope != nil {
 		dims = make([]middleware.Dimension, 0, len(m.Scope.Dimensions))
 		for _, d := range m.Scope.Dimensions {
-			dims = append(dims, middleware.Dim(d.Name, middleware.FromPath).At(d.Param))
+			dims = append(dims, middleware.Dim(d.Name, catalogDimensionSources[d.From]).At(d.Param))
 		}
 	}
 

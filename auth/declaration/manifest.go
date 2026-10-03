@@ -59,9 +59,15 @@ type DeclarationManifest struct {
 	Scope *DeclarationScope `json:"scope,omitempty" yaml:"scope,omitempty"`
 }
 
-// scopeFromPath is the only accepted dimension source for now: the value is read
-// from a route path parameter.
-const scopeFromPath = "path"
+// The places a request carries a dimension's value. A catalog dimension is read
+// from the path, the query or a header; a scope.routes dimension from the body,
+// the query or a header.
+const (
+	scopeFromPath   = "path"
+	scopeFromQuery  = "query"
+	scopeFromHeader = "header"
+	scopeFromBody   = "body"
+)
 
 // DeclarationScope is the product's catalog of scope dimensions.
 type DeclarationScope struct {
@@ -78,10 +84,6 @@ type DeclarationScope struct {
 	Routes []DeclarationScopeRoute `json:"routes,omitempty" yaml:"routes,omitempty"`
 }
 
-// scopeFromBody is the only accepted source of a route dimension: the value is
-// read from the JSON request body.
-const scopeFromBody = "body"
-
 // DeclarationScopeRoute names one route and the dimensions it reads from its
 // request body.
 type DeclarationScopeRoute struct {
@@ -90,21 +92,25 @@ type DeclarationScopeRoute struct {
 	// Path is the route's full path exactly as it is registered, group prefixes
 	// included, with its ':' parameters (e.g. "/v2/transactions/direct").
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
-	// Dimensions are the catalog dimensions the route reads from its body. The
-	// dimensions its path carries are still derived from the path.
+	// Dimensions are the catalog dimensions the route reads from somewhere other
+	// than its path. The dimensions its path carries are still derived from the
+	// path; one read from both must name the same values in each.
 	Dimensions []DeclarationRouteDimension `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
 }
 
-// DeclarationRouteDimension declares where in a route's body ONE catalog
+// DeclarationRouteDimension declares where in a route's request ONE catalog
 // dimension is read.
 type DeclarationRouteDimension struct {
 	// Name is a dimension of the catalog (scope.dimensions[].name).
 	Name string `json:"name,omitempty" yaml:"name,omitempty"`
-	// From is where the request carries the value. Only "body" is accepted.
+	// From is where the request carries the value: "body", "query" or "header".
 	From string `json:"from,omitempty" yaml:"from,omitempty"`
-	// Field is the value's path in the JSON body: object keys separated by '.',
-	// a key followed by "[]" being an array whose every element is read
-	// ("id", "items[].id"). See middleware.FromBody.
+	// Field is where under From the value is. For "body", its path in the JSON
+	// body: object keys separated by '.', a key followed by "[]" being an array
+	// whose every element is read ("id", "items[].id"); see middleware.FromBody.
+	// For "query", the parameter name; for "header", the header name, in any
+	// letter case. A query parameter or header may list several values; see
+	// middleware.FromQuery.
 	Field string `json:"field,omitempty" yaml:"field,omitempty"`
 	// Optional means a request may leave the value out: when the body does not
 	// name it (a key on its path is absent or null) the question is asked
@@ -118,11 +124,16 @@ type DeclarationDimension struct {
 	// Name is the attribute key the authorization service knows the dimension
 	// by (e.g. "organizationId"). Unique within the scope.
 	Name string `json:"name,omitempty" yaml:"name,omitempty"`
-	// From is where a request carries the value. Only "path" is accepted.
+	// From is where a request carries the value: "path", "query" or "header".
+	// A path dimension applies to the routes whose path carries its parameter;
+	// a query or header dimension to every route of the product, on the
+	// requests that carry it.
 	From string `json:"from,omitempty" yaml:"from,omitempty"`
-	// Param is the route path parameter carrying the value, without the ':'
-	// marker (e.g. "organization_id" for a route segment ":organization_id").
-	// Unique within the scope.
+	// Param names the value under From: the route path parameter without the
+	// ':' marker (e.g. "organization_id" for a route segment
+	// ":organization_id"), the query parameter, or the header name. Unique
+	// within the scope for its From, header names compared without regard to
+	// letter case.
 	Param string `json:"param,omitempty" yaml:"param,omitempty"`
 	// Required means every partner scope line for this product must name a
 	// value for the dimension.
@@ -441,11 +452,12 @@ func (m *DeclarationManifest) validatePermissions(declaredRoles map[string]struc
 }
 
 // validateScope validates the scope catalog: every dimension names itself, reads
-// from a path parameter, names the parameter and the collection, and no two
-// dimensions share a name or a parameter; a dimension's covers are checked by
-// validateCovers. A shared name would make two
-// dimensions one attribute; a shared parameter would make one path segment answer
-// for two dimensions. An absent scope, or one with no dimensions, is valid.
+// from the path, the query or a header, names a valid parameter there and the
+// collection, and no two dimensions share a name or the same parameter of the
+// same carrier; a dimension's covers are checked by validateCovers. A shared
+// name would make two dimensions one attribute; a shared parameter would make
+// one value answer for two dimensions. An absent scope, or one with no
+// dimensions, is valid.
 func (m *DeclarationManifest) validateScope() []string {
 	if m.Scope == nil {
 		return nil
@@ -467,21 +479,21 @@ func (m *DeclarationManifest) validateScope() []string {
 			seenNames[d.Name] = struct{}{}
 		}
 
-		if d.From != scopeFromPath {
-			violations = append(violations, fmt.Sprintf("%s: from must be %q, got %q", prefix, scopeFromPath, d.From))
+		if _, ok := catalogDimensionSources[d.From]; !ok {
+			violations = append(violations, fmt.Sprintf(`%s: from must be one of "path", "query", "header", got %q`, prefix, d.From))
 		}
 
-		switch {
+		switch problem := requestKeyProblem(d.From, d.Param); {
 		case strings.TrimSpace(d.Param) == "":
 			violations = append(violations, prefix+": param must not be empty")
-		case !isPathParamName(d.Param):
-			violations = append(violations, fmt.Sprintf(
-				"%s: param %q must be a bare path parameter name (no ':' marker, '/', or whitespace)", prefix, d.Param))
+		case problem != "":
+			violations = append(violations, fmt.Sprintf("%s: param %q %s", prefix, d.Param, problem))
 		default:
-			if _, dup := seenParams[d.Param]; dup {
+			key := carrierKey(d.From, d.Param)
+			if _, dup := seenParams[key]; dup {
 				violations = append(violations, fmt.Sprintf("%s: duplicate param %q", prefix, d.Param))
 			} else {
-				seenParams[d.Param] = struct{}{}
+				seenParams[key] = struct{}{}
 			}
 		}
 
@@ -530,8 +542,8 @@ func validateCovers(prefix string, d DeclarationDimension) []string {
 
 // validateScopeRoutes validates scope.routes against the catalog: every route
 // names its method and an absolute path, appears once, and declares at least one
-// dimension; every dimension names a catalog dimension, reads from the body and
-// names its field. Whether the fields fit together on the route — a well-formed
+// dimension; every dimension names a catalog dimension, reads from the body, the
+// query or a header, and names its field there. Whether the fields fit together on the route — a well-formed
 // path, every dimension read once for each array element — is checked by the
 // middleware when WireScope registers the route.
 func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) []string {
@@ -572,16 +584,70 @@ func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) [
 			}
 
 			if _, ok := routeDimensionSources[d.From]; !ok {
-				violations = append(violations, fmt.Sprintf("%s: from must be %q, got %q", dimPrefix, scopeFromBody, d.From))
+				violations = append(violations, fmt.Sprintf(`%s: from must be one of "body", "query", "header", got %q`, dimPrefix, d.From))
 			}
 
-			if strings.TrimSpace(d.Field) == "" {
+			switch problem := requestKeyProblem(d.From, d.Field); {
+			case strings.TrimSpace(d.Field) == "":
 				violations = append(violations, dimPrefix+": field must not be empty")
+			case problem != "":
+				violations = append(violations, fmt.Sprintf("%s: field %q %s", dimPrefix, d.Field, problem))
 			}
 		}
 	}
 
 	return violations
+}
+
+// requestKeyProblem describes what is wrong with key as the name of a value
+// carried in from, or returns "" when it is a valid name there — or when from is
+// not a carrier this check knows, which the caller reports on its own. A body
+// field's path is checked by the middleware when the route is wired.
+func requestKeyProblem(from, key string) string {
+	switch from {
+	case scopeFromPath:
+		if !isPathParamName(key) {
+			return "must be a bare path parameter name (no ':' marker, '/', or whitespace)"
+		}
+	case scopeFromQuery:
+		if strings.ContainsAny(key, "&=#?+%") || strings.IndexFunc(key, unicode.IsSpace) >= 0 {
+			return "must be a query parameter name (no whitespace, '&', '=', '#', '?', '+' or '%')"
+		}
+	case scopeFromHeader:
+		if !isHeaderName(key) {
+			return "must be a header name (letters, digits and !#$%&'*+-.^_`|~ only)"
+		}
+	}
+
+	return ""
+}
+
+// carrierKey identifies the place a value is carried: header names are one
+// place in any letter case.
+func carrierKey(from, key string) string {
+	if from == scopeFromHeader {
+		key = strings.ToLower(key)
+	}
+
+	return from + ":" + key
+}
+
+// isHeaderName reports whether h is an HTTP field name: a non-empty token.
+func isHeaderName(h string) bool {
+	if h == "" {
+		return false
+	}
+
+	for _, r := range h {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", r):
+		default:
+			return false
+		}
+	}
+
+	return true
 }
 
 // isPathParamName reports whether p can be a route parameter name as written

@@ -594,9 +594,9 @@ func TestSetManifestRouteScope_Validation(t *testing.T) {
 			Dim("organizationId", FromBody).At("debits[].organizationId"), Dim("ledgerId", FromBody).At("debits[].ledgerId"),
 			Dim("organizationId", FromBody).At("credits[].organizationId"),
 		}, wantErr: "ledgerId"},
-		{name: "also_on_the_path", method: "POST", path: "/v1/organizations/:organization_id/x", dims: []Dimension{
-			Dim("organizationId", FromBody).At("organizationId"),
-		}, wantErr: "path"},
+		{name: "same_header_twice", method: "POST", path: directPath, dims: []Dimension{
+			Dim("organizationId", FromHeader).At("X-Org"), Dim("organizationId", FromHeader).At("x-org"),
+		}, wantErr: "more than once"},
 	}
 
 	for _, tt := range tests {

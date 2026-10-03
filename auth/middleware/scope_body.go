@@ -29,7 +29,10 @@ import (
 // refused when any one of them is denied. Fields under the same array element
 // travel together in one question, and a field of an enclosing element — and
 // every dimension read from another source (path, header, query) — joins every
-// question of the elements nested in it. A dimension can be declared more than
+// question of the elements nested in it. A dimension read from the body AND
+// from another source must name the same values in both: each body value must
+// be one the other source names, and each value it names must appear in the
+// body; otherwise the request is refused with 400 naming both places. A dimension can be declared more than
 // once on a route, from different arrays, but each question must carry every
 // dimension the route reads from the body.
 //
@@ -87,6 +90,9 @@ type bodyPlan struct {
 	// allOptional is set when every body dimension is optional, so a request
 	// with no body at all names none of them instead of being malformed.
 	allOptional bool
+	// firstField locates, per dimension name, the first body field it is read
+	// from, for the refusal of a body that disagrees with another carrier.
+	firstField map[string]string
 }
 
 // parseBodyField parses a field path, or describes what is wrong with it.
@@ -152,21 +158,16 @@ func renderPrefix(prefix []bodySegment) string {
 }
 
 // compileBodyPlan validates a route's body dimensions and compiles them, or
-// describes what is wrong. constants are the names the route reads from
-// elsewhere (the path, a header): a name read from both would have two values
-// for one question. It returns a nil plan when no dimension is read from the
-// body.
-func compileBodyPlan(dims []Dimension, constants map[string]struct{}) (*bodyPlan, string) {
+// describes what is wrong. A name the route also reads elsewhere (the path, a
+// header) is held, per request, to naming the same values in both. It returns a
+// nil plan when no dimension is read from the body.
+func compileBodyPlan(dims []Dimension) (*bodyPlan, string) {
 	fields := make([]bodyField, 0, len(dims))
 	names := make(map[string]struct{})
 
 	for _, dim := range dims {
 		if dim.source != FromBody {
 			continue
-		}
-
-		if _, clash := constants[dim.name]; clash {
-			return nil, "scope dimension " + dim.name + " is read from the body and also from the path, a header or the query"
 		}
 
 		segments, problem := parseBodyField(dim.key)
@@ -191,10 +192,14 @@ func compileBodyPlan(dims []Dimension, constants map[string]struct{}) (*bodyPlan
 		return nil, ""
 	}
 
-	plan := &bodyPlan{fields: make([]string, 0, len(fields)), allOptional: true}
+	plan := &bodyPlan{fields: make([]string, 0, len(fields)), firstField: make(map[string]string), allOptional: true}
 	for _, f := range fields {
 		plan.fields = append(plan.fields, f.dim.key)
 		plan.allOptional = plan.allOptional && f.dim.optional
+
+		if _, ok := plan.firstField[f.dim.name]; !ok {
+			plan.firstField[f.dim.name] = f.dim.location()
+		}
 	}
 
 	for _, leaf := range leafPrefixes(fields) {
@@ -332,53 +337,160 @@ func notNamed(obj map[string]any, key, location string) *errBodyScope {
 	return bodyFieldError(location, "is missing from the request body")
 }
 
-// questionSet accumulates the distinct questions of a request in order.
+// questionSet accumulates the distinct questions of a request in order. Each
+// question carries the dimensions the body names for it and the values the
+// other carriers name: a dimension those carriers name several values of asks
+// one question per value.
 type questionSet struct {
 	plan      *bodyPlan
-	constants map[string]string
+	readings  requestValues
 	seen      map[string]struct{}
 	questions []map[string]string
+	// carried records, per dimension the other carriers name, the values the
+	// questions carry, so a value they name and the body never does is caught.
+	carried map[string]map[string]struct{}
 }
 
-func (q *questionSet) add(values map[string]string) *errBodyScope {
-	question := make(map[string]string, len(q.constants)+len(values))
-	for name, v := range q.constants {
-		question[name] = v
+func newQuestionSet(plan *bodyPlan, readings requestValues) *questionSet {
+	return &questionSet{plan: plan, readings: readings, seen: make(map[string]struct{}), carried: make(map[string]map[string]struct{})}
+}
+
+// add adds the questions one set of body values makes. locations name where in
+// the body each of those values was read.
+func (q *questionSet) add(values, locations map[string]string) *errBodyScope {
+	for name, value := range values {
+		if named, ok := q.readings.values[name]; ok && !containsValue(named, value) {
+			return divergence(name, q.readings.where[name], locations[name])
+		}
 	}
 
-	for name, v := range values {
-		question[name] = v
+	combinations := []map[string]string{values}
+
+	for _, name := range q.readings.names {
+		if _, inBody := values[name]; inBody {
+			continue
+		}
+
+		named := q.readings.values[name]
+
+		// The values of one carrier are distinct, so every combination is: the
+		// count is exact, and refusing past the cap here never builds them.
+		if len(combinations)*len(named) > maxBodyScopeQuestions {
+			return q.tooMany()
+		}
+
+		next := make([]map[string]string, 0, len(combinations)*len(named))
+
+		for _, combination := range combinations {
+			for _, value := range named {
+				question := make(map[string]string, len(combination)+1)
+				for k, v := range combination {
+					question[k] = v
+				}
+
+				question[name] = value
+				next = append(next, question)
+			}
+		}
+
+		combinations = next
 	}
 
+	for _, question := range combinations {
+		if err := q.addOne(question); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (q *questionSet) addOne(question map[string]string) *errBodyScope {
 	key := attributesCacheKey(question)
 	if _, dup := q.seen[key]; dup {
 		return nil
 	}
 
 	if len(q.questions) == maxBodyScopeQuestions {
-		quoted := make([]string, 0, len(q.plan.fields))
-		for _, f := range q.plan.fields {
-			quoted = append(quoted, strconv.Quote(f))
-		}
-
-		return &errBodyScope{message: fmt.Sprintf(
-			"the request body names more than %d distinct sets of scope values in fields %s",
-			maxBodyScopeQuestions, strings.Join(quoted, ", "))}
+		return q.tooMany()
 	}
 
 	q.seen[key] = struct{}{}
 	q.questions = append(q.questions, question)
 
+	for name, value := range question {
+		if _, ok := q.readings.values[name]; !ok {
+			continue
+		}
+
+		if q.carried[name] == nil {
+			q.carried[name] = make(map[string]struct{})
+		}
+
+		q.carried[name][value] = struct{}{}
+	}
+
 	return nil
 }
 
+// complete checks that every value another carrier names for a dimension the
+// body also names is carried by some question: one the body never names is a
+// disagreement between the two.
+func (q *questionSet) complete() *errBodyScope {
+	if q.plan == nil {
+		return nil
+	}
+
+	for _, name := range q.readings.names {
+		field, inBody := q.plan.firstField[name]
+		if !inBody {
+			continue
+		}
+
+		for _, value := range q.readings.values[name] {
+			if _, ok := q.carried[name][value]; !ok {
+				return divergence(name, q.readings.where[name], field)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (q *questionSet) tooMany() *errBodyScope {
+	locations := make([]string, 0, len(q.readings.names)+1)
+	for _, name := range q.readings.names {
+		locations = append(locations, q.readings.where[name])
+	}
+
+	if q.plan != nil {
+		for _, f := range q.plan.fields {
+			locations = append(locations, "body field "+strconv.Quote(f))
+		}
+	}
+
+	return &errBodyScope{message: fmt.Sprintf(
+		"the request names more than %d distinct sets of scope values in %s",
+		maxBodyScopeQuestions, strings.Join(locations, ", "))}
+}
+
+func containsValue(values []string, value string) bool {
+	for _, v := range values {
+		if v == value {
+			return true
+		}
+	}
+
+	return false
+}
+
 // questions reads the body dimensions of the request and returns every distinct
-// set of identifiers to ask about, each carrying the constants (the dimensions
-// read from the path or headers) too.
+// set of identifiers to ask about, each carrying the values the other carriers
+// (the path, the query, headers) name too.
 //
 // A request with no body names nothing; when every body dimension is optional
 // that is a body without them, not a malformed one.
-func (p *bodyPlan) questions(body []byte, constants map[string]string) ([]map[string]string, *errBodyScope) {
+func (p *bodyPlan) questions(body []byte, readings requestValues) ([]map[string]string, *errBodyScope) {
 	var root any
 
 	switch {
@@ -390,13 +502,17 @@ func (p *bodyPlan) questions(body []byte, constants map[string]string) ([]map[st
 		}
 	}
 
-	set := &questionSet{plan: p, constants: constants, seen: make(map[string]struct{})}
+	set := newQuestionSet(p, readings)
 
 	for _, group := range p.groups {
 		w := groupWalk{group: group, set: set}
 		if err := w.walk(root, 0, "", []any{root}, []string{""}); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := set.complete(); err != nil {
+		return nil, err
 	}
 
 	return set.questions, nil
@@ -478,48 +594,51 @@ func (w groupWalk) optionalFrom(depth int) bool {
 // absent; the fields inside the missing elements are then left out.
 func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 	values := make(map[string]string, len(w.group.fields))
+	at := make(map[string]string, len(w.group.fields))
 
 	for _, f := range w.group.fields {
 		if f.depth >= len(chain) {
 			continue
 		}
 
-		value, named, err := readBodyField(f, chain[f.depth], locations[f.depth])
+		value, location, err := readBodyField(f, chain[f.depth], locations[f.depth])
 		if err != nil {
 			return err
 		}
 
-		if named {
+		if location != "" {
 			values[f.dim.name] = value
+			at[f.dim.name] = "body field " + strconv.Quote(location)
 		}
 	}
 
-	return w.set.add(values)
+	return w.set.add(values, at)
 }
 
-// readBodyField reads one field relative to its element. The second return is
-// false when the body does not name an optional field: a key on its path is
-// absent or null. Anything else that is not a non-empty string is refused.
-func readBodyField(f bodyField, node any, location string) (string, bool, *errBodyScope) {
+// readBodyField reads one field relative to its element, and returns where it
+// was read. The location is empty when the body does not name an optional
+// field: a key on its path is absent or null. Anything else that is not a
+// non-empty string is refused.
+func readBodyField(f bodyField, node any, location string) (string, string, *errBodyScope) {
 	for _, seg := range f.segments[f.prefixLen:] {
 		location = joinLocation(location, seg.key)
 
 		obj, ok := node.(map[string]any)
 		if !ok {
-			return "", false, bodyFieldError(location, "cannot be read: its parent is not a JSON object")
+			return "", "", bodyFieldError(location, "cannot be read: its parent is not a JSON object")
 		}
 
 		child, named, err := lookupKey(obj, seg.key, location)
 		if err != nil {
-			return "", false, err
+			return "", "", err
 		}
 
 		if !named {
 			if f.dim.optional {
-				return "", false, nil
+				return "", "", nil
 			}
 
-			return "", false, notNamed(obj, seg.key, location)
+			return "", "", notNamed(obj, seg.key, location)
 		}
 
 		node = child
@@ -527,14 +646,14 @@ func readBodyField(f bodyField, node any, location string) (string, bool, *errBo
 
 	value, ok := node.(string)
 	if !ok {
-		return "", false, bodyFieldError(location, "must be a JSON string")
+		return "", "", bodyFieldError(location, "must be a JSON string")
 	}
 
 	if value == "" {
-		return "", false, bodyFieldError(location, "must not be empty")
+		return "", "", bodyFieldError(location, "must not be empty")
 	}
 
-	return value, true, nil
+	return value, location, nil
 }
 
 // routeBodyScope is one route's dimensions — those its path carries and those
@@ -549,7 +668,8 @@ func routeScopeKey(method, path string) string {
 }
 
 // SetManifestRouteScope declares the dimensions ONE route of the product reads
-// from somewhere other than its path — its JSON body (FromBody) — for a product
+// from somewhere other than its path — its JSON body (FromBody), the query
+// (FromQuery) or a header (FromHeader) — for a product
 // whose catalog SetManifestScope already wired: some routes carry the instance
 // they address in the body, and only the route knows where.
 //
@@ -557,7 +677,8 @@ func routeScopeKey(method, path string) string {
 // group prefixes included, with its ':' parameters). dims are catalog
 // dimensions declared with Dim(name, source).At(key), validated exactly as a
 // RequireScope declaration is. The route still derives the dimensions its path
-// carries; a dimension cannot be read from both. The declaration package
+// carries; a dimension it also reads elsewhere must name the same values in
+// both, or the request is refused with 400 naming the two. The declaration package
 // builds these from the manifest's scope.routes: call declaration.WireScope
 // rather than this directly, at boot, BEFORE registering routes.
 //
@@ -653,20 +774,30 @@ func (auth *AuthClient) manifestRouteScope(product, key string) (uint64, []Dimen
 }
 
 // questions returns each set of identifiers the request must be authorized
-// for: none when the route declares nothing; the dimensions read from the path,
+// for: none when the request names no dimension; the values read from the path,
 // headers or query alone when the route reads nothing from the body or the
-// caller is not partner-bound (the body is then never read); and otherwise one
-// set per question the body makes, each carrying those other dimensions.
-func (s ScopeDeclaration) questions(c fiber.Ctx, attributes map[string]string, readBody bool) ([]map[string]string, *errBodyScope) {
+// caller is not partner-bound (the body is then never read) — one question per
+// combination of values when a carrier names several; and otherwise one set per
+// question the body makes, each carrying those other values.
+func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBody bool) ([]map[string]string, *errBodyScope) {
+	if readings.problem != nil {
+		return nil, readings.problem
+	}
+
 	if s.body == nil || !readBody {
-		if attributes == nil {
+		if len(readings.names) == 0 {
 			return nil, nil
 		}
 
-		return []map[string]string{attributes}, nil
+		set := newQuestionSet(nil, readings)
+		if err := set.add(map[string]string{}, nil); err != nil {
+			return nil, err
+		}
+
+		return set.questions, nil
 	}
 
-	return s.body.questions(c.Body(), attributes)
+	return s.body.questions(c.Body(), readings)
 }
 
 // sharedAttributes returns the identifiers every question carries with the same

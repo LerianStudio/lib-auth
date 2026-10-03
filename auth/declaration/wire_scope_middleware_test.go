@@ -115,6 +115,6 @@ func TestWireScope_Errors(t *testing.T) {
 
 	require.Error(t, WireScope(nil, []byte(scopedYAML)), "nil client")
 	require.Error(t, WireScope(auth, nil), "empty manifest")
-	require.Error(t, WireScope(auth, []byte("service: x\nversion: 1\nscope:\n  dimensions:\n    - name: a\n      from: query\n      param: a\n      collection: c\n")),
+	require.Error(t, WireScope(auth, []byte("service: x\nversion: 1\nscope:\n  dimensions:\n    - name: a\n      from: body\n      param: a\n      collection: c\n")),
 		"invalid scope")
 }
