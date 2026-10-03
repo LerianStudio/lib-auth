@@ -4,10 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
-
-	"github.com/gofiber/fiber/v3"
 )
 
 // FromBody reads a field of the JSON request body. Declare it like any other
@@ -572,8 +571,11 @@ func (auth *AuthClient) manifestRouteScope(product, key string) (uint64, []Dimen
 // for: none when the route declares nothing; the dimensions read from the path,
 // headers or query alone when the route reads nothing from the body or the
 // caller is not partner-bound (the body is then never read); and otherwise one
-// set per question the body makes, each carrying those other dimensions.
-func (s ScopeDeclaration) questions(c fiber.Ctx, attributes map[string]string, readBody bool) ([]map[string]string, *errBodyScope) {
+// set per question the body makes, each carrying those other dimensions. A body
+// that cannot be read, or cannot be read for the declared dimensions, is the
+// refusal: 400 naming the field, or the status the adapter could not read the
+// body with.
+func (s ScopeDeclaration) questions(req requestView, attributes map[string]string, readBody bool) ([]map[string]string, *RefusalError) {
 	if s.body == nil || !readBody {
 		if attributes == nil {
 			return nil, nil
@@ -582,7 +584,17 @@ func (s ScopeDeclaration) questions(c fiber.Ctx, attributes map[string]string, r
 		return []map[string]string{attributes}, nil
 	}
 
-	return s.body.questions(c.Body(), attributes)
+	body, refusal := req.body()
+	if refusal != nil {
+		return nil, refusal
+	}
+
+	questions, badBody := s.body.questions(body, attributes)
+	if badBody != nil {
+		return nil, newRefusal(http.StatusBadRequest, badBody.Error())
+	}
+
+	return questions, nil
 }
 
 // sharedAttributes returns the identifiers every question carries with the same

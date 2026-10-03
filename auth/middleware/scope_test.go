@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,11 +24,14 @@ import (
 // recordingAuthServer answers POST /v1/authorize with the supplied decision and
 // records every raw request body it received, in order. The RAW bytes are what
 // the payload-compatibility assertions compare, so an added member, a reordered
-// key or a changed encoding all show up.
+// key or a changed encoding all show up. The handler runs on one goroutine per
+// request, so the body list is guarded by a mutex: concurrent tests must not
+// race on it or lose a recorded body.
 type recordingAuthServer struct {
 	*httptest.Server
 
-	bodies atomic.Value // []string
+	mu     sync.Mutex
+	bodies []string
 	hits   atomic.Int64
 }
 
@@ -35,7 +39,6 @@ func newRecordingAuthServer(t *testing.T, resp AuthResponse) *recordingAuthServe
 	t.Helper()
 
 	rec := &recordingAuthServer{}
-	rec.bodies.Store([]string{})
 
 	rec.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, err := io.ReadAll(r.Body)
@@ -43,7 +46,10 @@ func newRecordingAuthServer(t *testing.T, resp AuthResponse) *recordingAuthServe
 			t.Errorf("mock authz server: failed to read body: %v", err)
 		}
 
-		rec.bodies.Store(append(rec.bodies.Load().([]string), string(raw)))
+		rec.mu.Lock()
+		rec.bodies = append(rec.bodies, string(raw))
+		rec.mu.Unlock()
+
 		rec.hits.Add(1)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -62,10 +68,20 @@ func newRecordingAuthServer(t *testing.T, resp AuthResponse) *recordingAuthServe
 func (rec *recordingAuthServer) lastBody(t *testing.T) string {
 	t.Helper()
 
-	bodies := rec.bodies.Load().([]string)
-	require.NotEmpty(t, bodies, "authz server was never called")
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
 
-	return bodies[len(bodies)-1]
+	require.NotEmpty(t, rec.bodies, "authz server was never called")
+
+	return rec.bodies[len(rec.bodies)-1]
+}
+
+// recordedBodies returns a copy of every body recorded so far, in arrival order.
+func (rec *recordingAuthServer) recordedBodies() []string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+
+	return append([]string(nil), rec.bodies...)
 }
 
 // partnerToken is an application token carrying the "partner" claim the access

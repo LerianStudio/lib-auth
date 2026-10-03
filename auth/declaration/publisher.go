@@ -25,6 +25,16 @@
 // here, before the PUT; the transport is untrusted by design (authority is the M2M
 // token + server-side BOLA), so signing is a BYOC/sovereign hardening, not a
 // correctness requirement.
+//
+// Redirects are never followed. The PUT carries the M2M bearer and the manifest,
+// and following a 3xx would hand both to whatever host the Location names: 307
+// and 308 replay the method and the body, and Go keeps the Authorization header
+// on a same-host, subdomain or https-to-http hop. 301/302/303 are worse in a
+// quieter way: the PUT becomes a GET, and the target's 200 would be logged as
+// "declaration published" when nothing was stored. A 3xx from the identity is
+// therefore a deterministic misconfiguration of IDP_HOST, surfaced as a
+// *PublishError carrying the 3xx status. This is the same policy the auth
+// client's own HTTP client applies to the token path.
 package declaration
 
 import (
@@ -39,6 +49,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LerianStudio/lib-auth/v5/auth/endpoint"
 	"github.com/LerianStudio/lib-auth/v5/auth/obs"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/LerianStudio/lib-observability/v4/runtime"
@@ -63,9 +74,17 @@ const (
 	// generous — it only trims redundant re-PUTs on the periodic path.
 	defaultCacheTTL = 24 * time.Hour
 
+	// defaultHTTPTimeout bounds each PUT when the caller injects no client, or
+	// injects one without a timeout, so a FailFast boot cannot hang on an identity
+	// that accepts the connection and never answers.
+	defaultHTTPTimeout = 30 * time.Second
+
 	// spanName / componentName label observability signals.
 	spanName      = "declaration.publisher.publish"
 	componentName = "declaration"
+
+	// componentPublisher names the publisher in an *endpoint.InsecureError.
+	componentPublisher = "declaration publisher"
 )
 
 // TokenMinter mints an M2M access token via client_credentials. Both lib-auth v2
@@ -119,6 +138,25 @@ type Config struct {
 	FailFast bool
 	// Logger receives structured logs. Defaults to a no-op logger when nil.
 	Logger obs.Logger
+	// HTTPClient sends the PUT to IdentityAddr, for a caller that needs its own
+	// transport (a proxy, a custom CA, mTLS). Optional; nil means a client with a
+	// 30s timeout. New never uses it as-is: it takes a shallow copy, so the
+	// caller's client is never mutated, and forces that copy to refuse redirects
+	// (see the package doc), so injection can never bring back redirect-following.
+	// A zero Timeout on the copy becomes 30s. Minting the M2M token does not go
+	// through this client; it goes through Auth.
+	HTTPClient *http.Client
+	// RequireHTTPS makes New refuse an IdentityAddr that is not an absolute https
+	// URL with a host (http in any letter case, loopback included), with an
+	// *endpoint.InsecureError matching endpoint.ErrInsecure. It also refuses an
+	// Auth that declares, through a RequiresHTTPS() bool method, that it allows a
+	// plaintext Access Manager: *middleware.AuthClient built without
+	// middleware.WithRequireHTTPS(true) would otherwise mint the M2M token by
+	// sending ClientSecret over http. A TokenMinter with no such method declares no
+	// posture and is accepted; its transport is then the consumer's responsibility.
+	// Off by default: the consumer decides the posture (typically every posture but
+	// development) and the library reads no environment variable for it.
+	RequireHTTPS bool
 	// ScopeOnly publishes ONLY the manifest's scope section (with its service and
 	// version), leaving the permissions, roles and m2m sections out of the body
 	// so the access manager keeps what it already holds for them.
@@ -168,7 +206,7 @@ type Publisher struct {
 }
 
 // PublishError is a typed publish failure. Deterministic errors (401/403/422/501,
-// or a misconfiguration) are NOT retried and NOT cached — they need human action,
+// a 3xx redirect, or a misconfiguration) are NOT retried and NOT cached — they need human action,
 // but which action depends on the shape. 401/403/422 are a REJECTION of what was
 // sent: look at the M2M credential or the manifest. 501 means this deployment does
 // not serve declaration upserts at all (multi-tenant, where the tenant-manager
@@ -219,7 +257,8 @@ func (e *PublishError) Unwrap() error { return e.Err }
 
 // New builds a Publisher. It validates the config and parses+validates the embedded
 // manifest eagerly, so a missing field or a broken manifest fails fast at boot
-// instead of at the first PUT. The hash and wire JSON are precomputed.
+// instead of at the first PUT. The hash and wire JSON are precomputed. The HTTP
+// client is a copy of cfg.HTTPClient (or a default) that never follows a redirect.
 func New(cfg Config) (*Publisher, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
@@ -277,8 +316,29 @@ func New(cfg Config) (*Publisher, error) {
 		retryInitialInterval: defaultRetryInitialInterval,
 		retryMaxInterval:     defaultRetryMaxInterval,
 		cacheTTL:             defaultCacheTTL,
-		httpClient:           &http.Client{Timeout: 30 * time.Second},
+		httpClient:           newHTTPClient(cfg.HTTPClient),
 	}, nil
+}
+
+// newHTTPClient returns the client the publisher PUTs through: a shallow copy of
+// the injected one (or a fresh default), with a bounded timeout and a redirect
+// policy that hands every 3xx back to doPut instead of following it. The copy is
+// what makes both guarantees hold without touching the caller's client.
+func newHTTPClient(injected *http.Client) *http.Client {
+	client := http.Client{}
+	if injected != nil {
+		client = *injected
+	}
+
+	if client.Timeout <= 0 {
+		client.Timeout = defaultHTTPTimeout
+	}
+
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	return &client
 }
 
 func validateConfig(cfg Config) error {
@@ -297,10 +357,14 @@ func validateConfig(cfg Config) error {
 		return errors.New("config: ClientSecret is required")
 	}
 
-	// IdentityAddr must be an absolute http(s) URL: parse cleanly, carry an http or
-	// https scheme, and a non-empty host. A hostless or wrong-scheme value would
-	// otherwise pass here and only fail later inside doPut as a *retryable* PUT
-	// error, masking a boot-time misconfiguration.
+	if cfg.RequireHTTPS {
+		return validateHTTPSPosture(cfg)
+	}
+
+	// Without RequireHTTPS, IdentityAddr must be an absolute http or https URL:
+	// parse cleanly, carry an http or https scheme, and a non-empty host. A hostless
+	// or wrong-scheme value would otherwise pass here and only fail later inside
+	// doPut as a *retryable* PUT error, masking a boot-time misconfiguration.
 	u, err := url.Parse(cfg.IdentityAddr)
 	if err != nil {
 		return fmt.Errorf("config: IdentityAddr is not a valid URL: %w", err)
@@ -308,6 +372,28 @@ func validateConfig(cfg Config) error {
 
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("config: IdentityAddr must be an absolute http(s) URL, got %q", cfg.IdentityAddr)
+	}
+
+	return nil
+}
+
+// httpsPosture is what a TokenMinter implements to declare whether it refuses a
+// plaintext Access Manager; *middleware.AuthClient does.
+type httpsPosture interface {
+	RequiresHTTPS() bool
+}
+
+// validateHTTPSPosture is validateConfig's IdentityAddr rule under RequireHTTPS:
+// the PUT target must be https, and a minter that declares a posture must
+// require https too, or the token mint would carry ClientSecret over http.
+func validateHTTPSPosture(cfg Config) error {
+	if err := endpoint.RequireHTTPS(componentPublisher, cfg.IdentityAddr); err != nil {
+		return fmt.Errorf("config: IdentityAddr: %w", err)
+	}
+
+	if posture, ok := cfg.Auth.(httpsPosture); ok && !posture.RequiresHTTPS() {
+		return errors.New("config: RequireHTTPS is set but Auth allows a plaintext Access Manager; " +
+			"build it with middleware.NewAuthClientWithOptions(..., middleware.WithRequireHTTPS(true)) so the M2M token is never minted over http")
 	}
 
 	return nil
@@ -413,11 +499,12 @@ func (p *Publisher) mintAndPutWithRetry(ctx context.Context) error {
 // either wrapped in backoff.Permanent (deterministic → stop) or plain (transient →
 // retry). nil means the declaration was accepted (200).
 //
-// Deterministic covers two distinct shapes, logged differently: a REJECTION of what
-// was sent (401/403/422 — look at the credential or the manifest) and a deployment
-// that does NOT SERVE the operation (501 — multi-tenant; nothing to correct in the
-// credential or the manifest, but the operator should stop declaring on that
-// deployment).
+// Deterministic covers three distinct shapes, logged differently: a REJECTION of
+// what was sent (401/403/422 — look at the credential or the manifest), a
+// deployment that does NOT SERVE the operation (501 — multi-tenant; nothing to
+// correct in the credential or the manifest, but the operator should stop
+// declaring on that deployment), and a REDIRECT (3xx — IDP_HOST does not name the
+// identity service itself; the redirect is never followed, see the package doc).
 func (p *Publisher) doPut(ctx context.Context, token string) error {
 	// Build the URL from a parsed base so a trailing slash on IdentityAddr does not
 	// yield a "//v1" path. JoinPath is used only for the STATIC prefix; the slug is
@@ -459,6 +546,10 @@ func (p *Publisher) doPut(ctx context.Context, token string) error {
 
 	defer func() { _ = resp.Body.Close() }()
 
+	if isRedirect(resp.StatusCode) {
+		return p.redirectRefused(ctx, resp.StatusCode)
+	}
+
 	body, _ := io.ReadAll(resp.Body)
 	detail := serverMessage(body)
 
@@ -494,6 +585,25 @@ func (p *Publisher) doPut(ctx context.Context, token string) error {
 
 		return pubErr
 	}
+}
+
+func isRedirect(status int) bool {
+	return status >= http.StatusMultipleChoices && status < http.StatusBadRequest
+}
+
+// redirectRefused classifies a 3xx from the identity. It is deterministic: the
+// redirect is a property of IDP_HOST, so retrying would only ask the same hop
+// again. Neither the Location nor the body is logged or kept, since either may
+// name the host the redirect tried to send the credential to.
+func (p *Publisher) redirectRefused(ctx context.Context, status int) error {
+	p.logErrorf(ctx, "declaration PUT for slug=%s answered with a redirect: status=%d (deterministic, not retrying); redirects are never followed because they would carry the M2M credential and the manifest to another target, and a PUT turned into a GET would read as published; point IDP_HOST at the identity service directly", p.slug, status)
+
+	return backoff.Permanent(&PublishError{
+		Deterministic: true,
+		StatusCode:    status,
+		Op:            "put declaration",
+		Detail:        "redirect refused: IDP_HOST must address the identity service directly",
+	})
 }
 
 // Start runs Publish in the background so it never blocks serving, and — when

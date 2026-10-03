@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,11 +30,13 @@ const (
 	// SourceUnset is the zero value and reads nothing. A dimension left at this
 	// source resolves empty, which the fail-closed guard denies.
 	SourceUnset Source = iota
-	// FromPath reads a path parameter (fiber.Ctx.Params).
+	// FromPath reads a path parameter (fiber.Ctx.Params under Authorize,
+	// http.Request.PathValue under AuthorizeHTTP).
 	FromPath
-	// FromHeader reads a request header (fiber.Ctx.Get).
+	// FromHeader reads a request header (fiber.Ctx.Get / http.Header.Get).
 	FromHeader
-	// FromQuery reads a query-string parameter (fiber.Ctx.Query).
+	// FromQuery reads a query-string parameter (fiber.Ctx.Query /
+	// url.Values.Get).
 	FromQuery
 )
 
@@ -91,6 +94,28 @@ func (d Dimension) resolve(c fiber.Ctx) string {
 	}
 }
 
+// resolveHTTP is resolve for a net/http request. FromPath reads r.PathValue,
+// which only the Go 1.22+ ServeMux populates: under any other router a path
+// dimension resolves empty and the request is refused, never sent unscoped.
+func (d Dimension) resolveHTTP(r *http.Request) string {
+	switch d.source {
+	case FromPath:
+		return r.PathValue(d.key)
+	case FromHeader:
+		return r.Header.Get(d.key)
+	case FromQuery:
+		if r.URL == nil {
+			return ""
+		}
+
+		return r.URL.Query().Get(d.key)
+	case SourceUnset, FromBody:
+		return ""
+	default:
+		return ""
+	}
+}
+
 // ScopeDeclaration is a route's statement of which product it belongs to and
 // which instance identifiers its requests carry. Build it with RequireScope and
 // pass it to Authorize.
@@ -117,7 +142,7 @@ func (s ScopeDeclaration) declared() bool {
 	return len(s.dims) > 0
 }
 
-// RequestScope is what Authorize resolved for the request in flight: the partner
+// RequestScope is what Authorize (or AuthorizeHTTP) resolved for the request in flight: the partner
 // the credential is bound to, and the instance identifiers that were sent as
 // attributes. Read it with ScopeFromContext to apply the same scope inside the
 // request body, where the route's declaration cannot reach.
@@ -144,7 +169,7 @@ type RequestScope struct {
 // context value.
 type requestScopeContextKey struct{}
 
-// ScopeFromContext returns the scope Authorize resolved for the request, and
+// ScopeFromContext returns the scope Authorize or AuthorizeHTTP resolved for the request, and
 // whether there was one. The second return is false for every credential that is
 // not partner-bound, and for a context that never passed through Authorize.
 func ScopeFromContext(ctx context.Context) (RequestScope, bool) {
@@ -158,7 +183,7 @@ func ScopeFromContext(ctx context.Context) (RequestScope, bool) {
 // denies: a declared identifier with no value cannot be matched against anything,
 // and sending it absent would silently ask a narrower question than the route
 // promised.
-func resolveAttributes(c fiber.Ctx, dims []Dimension) (map[string]string, string) {
+func resolveAttributes(req requestView, dims []Dimension) (map[string]string, string) {
 	if len(dims) == 0 {
 		return nil, ""
 	}
@@ -172,7 +197,7 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (map[string]string, string
 			continue
 		}
 
-		value := dim.resolve(c)
+		value := req.dimension(dim)
 		if value == "" {
 			return nil, dim.name
 		}
@@ -296,8 +321,10 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 }
 
 // SetManifestScope wires the product's scope catalog — the scope section of its
-// declaration manifest — into the client, so Authorize can derive each route's
-// dimensions from the route path instead of every route declaring them.
+// declaration manifest — into the client, so Authorize and AuthorizeHTTP can
+// derive each route's dimensions from the route path instead of every route
+// declaring them. Under AuthorizeHTTP the route path is the ServeMux pattern's,
+// its "{name}" segments read as ":name".
 //
 // dims are the catalog in tree order, each read from a path parameter
 // (Dim(name, FromPath).At(param)). The declaration package builds them from the
