@@ -652,3 +652,30 @@ func TestResolveDeclaration_SameNameSeveralCarriers(t *testing.T) {
 		assert.Contains(t, declErr, "more than once", name)
 	}
 }
+
+// The cap is enforced before the combinations are built: two lists of a few
+// hundred values each would otherwise build tens of thousands of questions
+// only to refuse them. The refusal must cost about what a small request does.
+// Not parallel: testing.AllocsPerRun refuses to run in a parallel test.
+func TestQuestionSet_CombinationsAreRefusedBeforeTheyAreBuilt(t *testing.T) {
+	values := func(prefix string) []string {
+		out := make([]string, 0, 300)
+		for i := range 300 {
+			out = append(out, prefix+strconv.Itoa(i))
+		}
+
+		return out
+	}
+
+	var readings requestValues
+	readings.add(Dim("organizationId", FromQuery), values("org-"))
+	readings.add(Dim("ledgerId", FromHeader).At("X-Ledger-Id"), values("led-"))
+
+	allocs := testing.AllocsPerRun(5, func() {
+		err := newQuestionSet(nil, readings).add(map[string]string{}, nil)
+		require.NotNil(t, err)
+		assert.Contains(t, err.Error(), "more than 100 distinct sets")
+	})
+
+	assert.Less(t, allocs, float64(maxBodyScopeQuestions), "the refusal allocates no question")
+}
