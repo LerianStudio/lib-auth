@@ -745,8 +745,8 @@ func validateCovers(prefix string, d DeclarationDimension) []string {
 // dimension, reading its body at most one way; every dimension names a catalog
 // dimension, reads from the body, a form, the query or a header, and names its
 // field there. Whether the fields fit together on the route — a well-formed
-// path, every dimension read once for each array element — is checked by the
-// middleware when WireScope registers the route.
+// path, every dimension read for each array element, no field read twice — is
+// checked by the middleware when WireScope registers the route.
 func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) []string {
 	var violations []string
 

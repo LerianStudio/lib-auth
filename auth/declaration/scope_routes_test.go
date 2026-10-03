@@ -237,3 +237,42 @@ func TestWireScope_RouteErrorsFailTheBoot(t *testing.T) {
 
 	require.NoError(t, WireScope(auth, []byte(routedYAML)), "positive control")
 }
+
+// A route may read one dimension from two distinct body fields — two
+// references, each asked. It wires, stays out of the wire and the hash, and
+// reading the SAME field twice still fails the boot.
+func TestWireScope_OneDimensionFromTwoBodyFields(t *testing.T) {
+	t.Parallel()
+
+	const twoFields = `
+        - name: ledgerId
+          from: body
+          field: "items[].ledgerId"
+        - name: ledgerId
+          from: body
+          field: "settlementLedger"
+`
+
+	union := strings.Replace(routedYAML, `
+        - name: ledgerId
+          from: body
+          field: "items[].ledgerId"
+`, twoFields, 1)
+	require.NotEqual(t, routedYAML, union)
+	require.NoError(t, WireScope(&middleware.AuthClient{Logger: obs.Nop()}, []byte(union)))
+
+	m, err := parseManifest([]byte(union))
+	require.NoError(t, err)
+
+	hash, err := m.CanonicalHash()
+	require.NoError(t, err)
+	assert.Equal(t, scopedYAMLHash, hash)
+
+	wire, err := m.wireJSON()
+	require.NoError(t, err)
+	assert.Equal(t, scopedYAMLWire, string(wire))
+
+	sameField := strings.Replace(union, `field: "settlementLedger"`, `field: "items[].LedgerId"`, 1)
+	require.NotEqual(t, union, sameField)
+	require.ErrorContains(t, WireScope(&middleware.AuthClient{Logger: obs.Nop()}, []byte(sameField)), "more than once")
+}

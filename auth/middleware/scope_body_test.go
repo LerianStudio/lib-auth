@@ -587,8 +587,8 @@ func TestSetManifestRouteScope_Validation(t *testing.T) {
 		{name: "empty_segment", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("a..b")}, wantErr: "a..b"},
 		{name: "empty_key_after_array", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("ids[].")}, wantErr: `"ids[]."`},
 		{name: "bad_brackets", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("a[0].b")}, wantErr: "a[0].b"},
-		{name: "same_name_same_element", method: "POST", path: directPath, dims: []Dimension{
-			Dim("organizationId", FromBody).At("items[].organizationId"), Dim("organizationId", FromBody).At("items[].orgId"),
+		{name: "same_name_same_field", method: "POST", path: directPath, dims: []Dimension{
+			Dim("organizationId", FromBody).At("items[].organizationId"), Dim("organizationId", FromBody).At("items[].organizationId"),
 		}, wantErr: "more than once"},
 		{name: "element_misses_a_dimension", method: "POST", path: directPath, dims: []Dimension{
 			Dim("organizationId", FromBody).At("debits[].organizationId"), Dim("ledgerId", FromBody).At("debits[].ledgerId"),

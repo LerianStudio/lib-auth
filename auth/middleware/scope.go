@@ -517,8 +517,8 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 			return nil, "scope dimension " + dim.name + " declares an empty request key"
 		}
 
-		// A body dimension may repeat, read from different arrays; the body plan
-		// checks each question still reads it once.
+		// A body dimension may repeat, read from distinct fields, each asked; the
+		// body plan refuses one field read twice.
 		if dim.source == FromBody {
 			continue
 		}

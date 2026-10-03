@@ -715,8 +715,10 @@ no single question checks both. A place that does not carry the value is not a
 disagreement. For the body, every body value must be one the other place names,
 and every value the other place names must appear in the body; a body element
 that leaves an optional field out is asked with the other place's value. Reading
-one dimension twice from the same place (the same header in two spellings, say)
-is a misdeclaration and refuses every request on the route.
+one dimension twice from the same place (the same header in two spellings, the
+same body field twice) is a misdeclaration and refuses every request on the
+route. Two **distinct** body fields are not the same place: see
+[several fields of one body](#one-dimension-from-several-body-fields).
 
 ### Reading dimensions from the request body
 
@@ -746,9 +748,9 @@ scope:
   refused when any one is denied. Fields under the same element travel together;
   a field of an enclosing element (or of the top level) joins every question of
   the elements nested in it. A dimension may be read from more than one array
-  (`debits[].ledgerId` and `credits[].ledgerId`), but each question must carry
-  every dimension the route reads from the body. At most 100 distinct sets per
-  request.
+  (`debits[].ledgerId` and `credits[].ledgerId`), or from several fields of one
+  body (see below), but each question must carry every dimension the route
+  reads from the body. At most 100 distinct sets per request.
 * The route still derives the dimensions its path carries. A dimension it also
   reads from the body must name the same values in both (see above).
 * An optional body field may be absent or `null`; when the array an optional
@@ -785,6 +787,53 @@ scope:
 * `scope.routes` is read by this library only: it is never published and is not
   part of `CanonicalHash`, so adding it — `optional` and every `from` included —
   changes neither.
+
+#### One dimension from several body fields
+
+One body may name two **different** instances of the same dimension — an
+account to credit and the accounts of a target, say. Declare each field; they
+are independent references, and every value of every field is asked:
+
+```yaml
+  routes:
+    - method: POST
+      path: /v1/organizations/:organization_id/maintenance
+      dimensions:
+        - { name: accountId, from: body, field: maintenanceCreditAccount }
+        - { name: accountId, from: body, field: "accountTarget.aliases[]", optional: true }
+```
+
+`{"maintenanceCreditAccount": "acc-m", "accountTarget": {"aliases": ["acc-1", "acc-2"]}}`
+asks three questions — `acc-m`, `acc-1` and `acc-2`, each with the
+organization from the path — and is refused when any one is denied.
+
+* **Union.** Each value of each field is its own question and every one must
+  be allowed. A value named by two fields is asked once.
+* **Each value keeps its own element.** A question about one field's value
+  carries, for every other body dimension, the value read in that field's own
+  element, else in the nearest element enclosing it — a field of the value's
+  own element wins over one of the top level — and, when no field of the
+  dimension encloses it, the value read in the element closest to it. Two fields of one element naming
+  the same dimension (`legs[].accountId` and `legs[].counterpartyAccountId`)
+  make two questions, each with the element's other fields. When two
+  dimensions are each read by several fields of the same element, every
+  combination of their values is asked.
+* **Per field.** `optional` applies to each field on its own: an optional field
+  left out adds no value and the other fields are still asked; a required one
+  left out is refused with 400 naming it. When every field of the dimension is
+  left out, the questions are asked without it. `resolve` applies per field
+  too: each field is translated by its own resolver, its value given the
+  siblings of its own element, in one call per resolver for the whole body.
+* **Same rules as any body.** The questions of every field count together
+  toward the cap of 100 distinct sets per request; over it, the request is
+  refused with 400 before any call.
+* **Another carrier still has to agree.** This is not the
+  [several-places rule](#where-a-dimension-is-read): when the path, query, a
+  header or a form also names the dimension, every body value of every field
+  must be one that carrier names, and every value it names must appear in the
+  body, or the request is refused with 400 naming both places.
+* Reading the **same** field twice — the same path, in any letter case — is
+  refused at `WireScope`.
 * Without a manifest, `RequireScope(product, authMiddleware.Dim("ledgerId", authMiddleware.FromBody).At("items[].ledgerId"))`
   declares the same on one route — a body field is one more source of the same
   `Dim`, next to `FromPath`, `FromHeader` and `FromQuery`. `ScopeFromContext(...).Sets` lists every set

@@ -37,9 +37,15 @@ import (
 // question of the elements nested in it. A dimension read from the body AND
 // from another source must name the same values in both: each body value must
 // be one the other source names, and each value it names must appear in the
-// body; otherwise the request is refused with 400 naming both places. A dimension can be declared more than
-// once on a route, from different arrays, but each question must carry every
-// dimension the route reads from the body.
+// body; otherwise the request is refused with 400 naming both places. Each
+// question must carry every dimension the route reads from the body.
+//
+// A dimension may be read from several distinct body fields — from different
+// arrays, or two fields naming two different references (a top-level account
+// and the aliases of a nested target). Each field is its own reference: every
+// value of every field is asked and must be allowed, each with the fields of
+// its own element, and Optional and Resolve apply per field. Reading the same
+// field twice is a misdeclaration.
 //
 // The body is read only for a partner-bound credential; any other caller is
 // decided on the dimensions from the other sources alone, as before. For a
@@ -238,6 +244,10 @@ func compileBodyPlan(dims []Dimension) (*bodyPlan, string) {
 		return nil, ""
 	}
 
+	if problem := sameFieldTwice(fields); problem != "" {
+		return nil, problem
+	}
+
 	if problem := readInsideStrings(fields); problem != "" {
 		return nil, problem
 	}
@@ -275,6 +285,22 @@ func enclosingArrayEnd(segments []bodySegment) int {
 	}
 
 	return 0
+}
+
+// sameFieldTwice describes the first dimension read twice from one body field —
+// the same path, compared the way lookupKey matches keys, without regard to
+// letter case — or returns "". Two distinct fields naming one dimension are two
+// references, each asked; one field declared twice is a misdeclaration.
+func sameFieldTwice(fields []bodyField) string {
+	for i, f := range fields {
+		for _, g := range fields[:i] {
+			if g.dim.name == f.dim.name && strings.EqualFold(g.dim.key, f.dim.key) {
+				return "scope dimension " + f.dim.name + " reads body field " + strconv.Quote(f.dim.key) + " more than once"
+			}
+		}
+	}
+
+	return ""
 }
 
 // readInsideStrings describes the first field that reads inside the elements of
@@ -335,7 +361,7 @@ func leafPrefixes(fields []bodyField) [][]bodySegment {
 
 // buildBodyGroup collects the fields one element of leaf carries — its own and
 // those of the elements enclosing it — and checks each body dimension is read
-// exactly once for it.
+// for it. A dimension several of them read is asked once per value (see emit).
 func buildBodyGroup(leaf []bodySegment, fields []bodyField, names map[string]struct{}) (bodyGroup, string) {
 	group := bodyGroup{prefix: leaf}
 	seen := make(map[string]struct{}, len(names))
@@ -343,10 +369,6 @@ func buildBodyGroup(leaf []bodySegment, fields []bodyField, names map[string]str
 	for _, f := range fields {
 		if !isSegmentPrefix(f.segments[:f.prefixLen], leaf) {
 			continue
-		}
-
-		if _, dup := seen[f.dim.name]; dup {
-			return bodyGroup{}, "scope dimension " + f.dim.name + " is read more than once for " + renderPrefix(leaf)
 		}
 
 		seen[f.dim.name] = struct{}{}
@@ -724,13 +746,26 @@ func (w groupWalk) optionalFrom(depth int) bool {
 	return true
 }
 
-// emit reads every field of one element and adds the question they make. chain
-// stops short of the group's innermost element when an optional array was
-// absent; the fields inside the missing elements are then left out.
+// bodyReading is the value one field of the group names for one element, and
+// where it was read.
+type bodyReading struct {
+	field bodyField
+	value string
+	at    string
+}
+
+// emit reads every field of one element and adds the questions they make.
+// chain stops short of the group's innermost element when an optional array
+// was absent; the fields inside the missing elements are then left out.
+//
+// A dimension read by one field makes one question with the other fields. A
+// dimension read by several fields — two distinct references, a top-level
+// account and the aliases of a nested target, say — is asked once per value:
+// each reading anchors a question, and every other dimension takes the value
+// read nearest to it (see nearest), so each value travels with the fields of
+// its own element.
 func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
-	values := make(map[string]string, len(w.group.fields))
-	at := make(map[string]string, len(w.group.fields))
-	resolvers := make(map[string]string)
+	readings := make([]bodyReading, 0, len(w.group.fields))
 
 	for _, f := range w.group.fields {
 		if f.depth >= len(chain) {
@@ -743,38 +778,183 @@ func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 		}
 
 		if location != "" {
-			values[f.dim.name] = value
-			at[f.dim.name] = "body field " + strconv.Quote(location)
-
-			if f.dim.resolver != "" {
-				resolvers[f.dim.name] = f.dim.resolver
-			}
+			readings = append(readings, bodyReading{field: f, value: value, at: "body field " + strconv.Quote(location)})
 		}
 	}
 
-	if w.raw != nil {
-		*w.raw = append(*w.raw, rawQuestion{values: values, at: at, resolvers: resolvers, siblings: w.siblings(values)})
-
-		return nil
+	combinations, err := w.combine(readings)
+	if err != nil {
+		return err
 	}
 
-	return w.set.add(values, at)
-}
+	for _, chosen := range combinations {
+		values := make(map[string]string, len(chosen))
+		at := make(map[string]string, len(chosen))
+		resolvers := make(map[string]string)
 
-// siblings returns, per resolved field the question names, the values of the
-// plain fields read from the same element: what the resolver is given to
-// confine its lookup to. A field with none has no entry.
-func (w groupWalk) siblings(values map[string]string) map[string]map[string]string {
-	var out map[string]map[string]string
+		for _, r := range chosen {
+			values[r.field.dim.name] = r.value
+			at[r.field.dim.name] = r.at
 
-	for _, f := range w.group.fields {
-		if _, named := values[f.dim.name]; !named || f.dim.resolver == "" {
+			if r.field.dim.resolver != "" {
+				resolvers[r.field.dim.name] = r.field.dim.resolver
+			}
+		}
+
+		if w.raw != nil {
+			*w.raw = append(*w.raw, rawQuestion{values: values, at: at, resolvers: resolvers, siblings: siblings(chosen)})
+
 			continue
 		}
 
-		for _, g := range w.group.fields {
-			value, named := values[g.dim.name]
-			if !named || g.dim.resolver != "" || g.strings || !sameSegments(g.element, f.element) {
+		if err := w.set.add(values, at); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// combine returns the distinct sets of readings one element asks about, in the
+// order first made: one per reading it anchors, carrying for every other
+// dimension the readings nearest to the anchor. When the element names nothing
+// it is one empty set, the question without the body's dimensions.
+func (w groupWalk) combine(readings []bodyReading) ([][]bodyReading, *errBodyScope) {
+	if len(readings) == 0 {
+		return [][]bodyReading{nil}, nil
+	}
+
+	var (
+		out  [][]bodyReading
+		seen = make(map[string]struct{})
+	)
+
+	for _, anchor := range readings {
+		combinations := [][]bodyReading{{anchor}}
+
+		for _, name := range readingNames(readings) {
+			if name == anchor.field.dim.name {
+				continue
+			}
+
+			candidates := nearest(anchor, readings, name)
+
+			if len(combinations)*len(candidates) > maxBodyScopeQuestions {
+				return nil, w.set.tooMany()
+			}
+
+			next := make([][]bodyReading, 0, len(combinations)*len(candidates))
+
+			for _, combination := range combinations {
+				for _, c := range candidates {
+					next = append(next, append(append([]bodyReading(nil), combination...), c))
+				}
+			}
+
+			combinations = next
+		}
+
+		for _, combination := range combinations {
+			key := readingsKey(combination)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+
+			seen[key] = struct{}{}
+
+			out = append(out, combination)
+		}
+	}
+
+	return out, nil
+}
+
+// readingNames lists the dimensions the readings name, each once, in order.
+func readingNames(readings []bodyReading) []string {
+	var names []string
+
+	seen := make(map[string]struct{}, len(readings))
+
+	for _, r := range readings {
+		if _, dup := seen[r.field.dim.name]; !dup {
+			seen[r.field.dim.name] = struct{}{}
+			names = append(names, r.field.dim.name)
+		}
+	}
+
+	return names
+}
+
+// nearest returns the readings of name that join a question anchored on
+// anchor: those of the deepest element enclosing the anchor's own (its own
+// element included), so a field of the anchor's element wins over one of an
+// enclosing element; when no reading of name encloses it, those sharing the
+// longest leading part of its element. Readings tied on that are each one
+// question.
+func nearest(anchor bodyReading, readings []bodyReading, name string) []bodyReading {
+	var (
+		best      []bodyReading
+		bestScore = -1
+	)
+
+	for _, r := range readings {
+		if r.field.dim.name != name {
+			continue
+		}
+
+		// Enclosing readings rank above every other, deepest first.
+		score := commonPrefixLen(r.field.element, anchor.field.element)
+		if score == len(r.field.element) {
+			score += len(anchor.field.element) + 1
+		}
+
+		switch {
+		case score > bestScore:
+			best, bestScore = append(best[:0], r), score
+		case score == bestScore:
+			best = append(best, r)
+		}
+	}
+
+	return best
+}
+
+func commonPrefixLen(a, b []bodySegment) int {
+	n := 0
+	for n < len(a) && n < len(b) && a[n] == b[n] {
+		n++
+	}
+
+	return n
+}
+
+// readingsKey identifies a set of readings by each field and value, so the same
+// values read through a resolved and a plain field stay apart.
+func readingsKey(readings []bodyReading) string {
+	var b strings.Builder
+
+	for _, r := range readings {
+		writeLengthPrefixed(&b, r.field.dim.name)
+		writeLengthPrefixed(&b, r.field.dim.key)
+		writeLengthPrefixed(&b, r.value)
+	}
+
+	return b.String()
+}
+
+// siblings returns, per resolved reading of a question, the values of the
+// question's plain readings of the same element: what the resolver is given to
+// confine its lookup to. A reading with none has no entry.
+func siblings(chosen []bodyReading) map[string]map[string]string {
+	var out map[string]map[string]string
+
+	for _, f := range chosen {
+		if f.field.dim.resolver == "" {
+			continue
+		}
+
+		for _, g := range chosen {
+			if g.field.dim.resolver != "" || g.field.strings || !sameSegments(g.field.element, f.field.element) {
 				continue
 			}
 
@@ -782,11 +962,11 @@ func (w groupWalk) siblings(values map[string]string) map[string]map[string]stri
 				out = make(map[string]map[string]string)
 			}
 
-			if out[f.dim.name] == nil {
-				out[f.dim.name] = make(map[string]string)
+			if out[f.field.dim.name] == nil {
+				out[f.field.dim.name] = make(map[string]string)
 			}
 
-			out[f.dim.name][g.dim.name] = value
+			out[f.field.dim.name][g.field.dim.name] = g.value
 		}
 	}
 
