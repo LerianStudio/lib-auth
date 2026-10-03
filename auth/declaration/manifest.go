@@ -57,6 +57,12 @@ type DeclarationManifest struct {
 	// from (see WireScope). Optional: a manifest without it behaves exactly as
 	// before the section existed, on the wire and in the hash.
 	Scope *DeclarationScope `json:"scope,omitempty" yaml:"scope,omitempty"`
+	// Partners opts the product in to partner credentials: the access manager
+	// grants a partner access only to products that declare it. It is published
+	// with the full manifest and with the scope alone (see Config.ScopeOnly), and
+	// hashed as the LAST member; false is omitted, so a manifest that does not
+	// opt in publishes the same bytes and hash as before the field existed.
+	Partners bool `json:"partners,omitempty" yaml:"partners,omitempty"`
 }
 
 // The places a request carries a dimension's value. A catalog dimension is read
@@ -220,6 +226,9 @@ type canonicalManifest struct {
 	// scope serializes — and hashes — byte-for-byte as it did before the section
 	// existed.
 	Scope *DeclarationScope `json:"scope,omitempty"`
+	// Partners is appended after Scope and omitted when false, for the same
+	// reason.
+	Partners bool `json:"partners,omitempty"`
 }
 
 // ManifestError reports an invalid or unparseable manifest. It is the client-side
@@ -273,10 +282,16 @@ func (m *DeclarationManifest) wireJSON() ([]byte, error) {
 }
 
 // scopeOnly is the projection a scope-only publication sends: the service and
-// version that identify it, and the scope. Every other section is left out, so
-// the receiver replaces nothing but the scope.
+// version that identify it, the scope, and the partner opt-in. Every other
+// section is left out, so the receiver replaces nothing but those.
 func (m *DeclarationManifest) scopeOnly() *DeclarationManifest {
-	return &DeclarationManifest{Service: m.Service, Version: m.Version, Scope: m.Scope}
+	return &DeclarationManifest{Service: m.Service, Version: m.Version, Scope: m.Scope, Partners: m.Partners}
+}
+
+// hasScopeCatalog reports whether a scope-only publication has anything to
+// send: a scope section, or the partner opt-in.
+func (m *DeclarationManifest) hasScopeCatalog() bool {
+	return m.Scope != nil || m.Partners
 }
 
 // serverProjection is the manifest the identity service knows: everything but
@@ -319,6 +334,7 @@ func (m *DeclarationManifest) CanonicalHash() (string, error) {
 		Roles:       published.Roles,
 		M2M:         published.M2M,
 		Scope:       published.Scope,
+		Partners:    published.Partners,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal canonical manifest: %w", err)

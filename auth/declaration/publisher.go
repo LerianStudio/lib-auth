@@ -130,8 +130,8 @@ type Config struct {
 	//
 	//	ScopeOnly: !declarationEnabled
 	//
-	// A manifest without a scope section makes a ScopeOnly publisher a no-op: it
-	// never calls the identity service.
+	// A manifest without a scope section and without the partner opt-in makes a
+	// ScopeOnly publisher a no-op: it never calls the identity service.
 	ScopeOnly bool
 }
 
@@ -272,7 +272,7 @@ func New(cfg Config) (*Publisher, error) {
 		wire:                 wire,
 		hash:                 hash,
 		scopeOnly:            cfg.ScopeOnly,
-		nothing:              cfg.ScopeOnly && manifest.Scope == nil,
+		nothing:              cfg.ScopeOnly && !manifest.hasScopeCatalog(),
 		maxTries:             defaultMaxTries,
 		retryInitialInterval: defaultRetryInitialInterval,
 		retryMaxInterval:     defaultRetryMaxInterval,
@@ -330,7 +330,7 @@ func (p *Publisher) cacheKey() string {
 // returns a typed *PublishError; the caller decides whether that is fatal.
 func (p *Publisher) Publish(ctx context.Context) error {
 	if p.nothing {
-		p.logInfof(ctx, "declaration manifest for slug=%s declares no scope; nothing to publish", p.slug)
+		p.logInfof(ctx, "declaration manifest for slug=%s declares no scope and does not opt in to partners; nothing to publish", p.slug)
 
 		return nil
 	}

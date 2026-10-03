@@ -808,7 +808,7 @@ fields with `from: form`, the field name as `field`:
 the product's auth is on, independently of the permission declaration switch.
 With the permission declaration on, the full manifest (scope included) is
 published as before. With it off, build the publisher anyway when auth is on and
-set `ScopeOnly`, which sends only `service`, `version` and `scope`:
+set `ScopeOnly`, which sends only `service`, `version`, `scope` and `partners`:
 
 ```go
 pub, err := declaration.New(declaration.Config{
@@ -818,9 +818,30 @@ pub, err := declaration.New(declaration.Config{
 ```
 
 `WireFromEnv` does this by itself: with `IDP_DECLARATION_ENABLED` off and
-`PLUGIN_AUTH_ENABLED=true` it publishes the scope alone. A manifest without a
-`scope` section publishes nothing in that mode. A scope that cannot be published
+`PLUGIN_AUTH_ENABLED=true` it publishes the scope alone. A manifest with neither
+a `scope` section nor `partners: true` publishes nothing in that mode. A scope that cannot be published
 (missing configuration, access manager down) is logged and never fails the boot.
+
+### Opting in to partners (`partners`)
+
+A product accepts partner-bound credentials only when its manifest says so:
+
+```yaml
+service: midaz
+version: 4
+partners: true
+```
+
+* `partners` is optional and defaults to `false`. The access manager grants a
+  partner access only to products that opted in.
+* It is published with the full manifest and with the scope alone
+  (`ScopeOnly`), and is part of `CanonicalHash`, after the scope. `false` is
+  omitted, so a manifest that does not opt in publishes the same bytes and
+  hash as before.
+* A manifest may opt in with no `scope` section, or with no organization or
+  ledger dimension: its partners are then granted the product tenant-wide.
+  Such a manifest still has something to publish in scope-only mode — the
+  opt-in itself.
 
 ### Declaring the level of a resource (`level`)
 

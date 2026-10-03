@@ -121,11 +121,11 @@ type WireInput struct {
 	Logger obs.Logger
 }
 
-// wireScopeOnly publishes the manifest's scope section alone, for a deployment
-// whose permission declaration is off. It runs only when PLUGIN_AUTH_ENABLED is
-// true and the manifest declares a scope; otherwise it reads and validates
-// nothing else, which keeps the declaration-off boot exactly as it was for every
-// manifest without a scope.
+// wireScopeOnly publishes the manifest's scope section and partner opt-in alone,
+// for a deployment whose permission declaration is off. It runs only when
+// PLUGIN_AUTH_ENABLED is true and the manifest declares a scope or opts in to
+// partners; otherwise it reads and validates nothing else, which keeps the
+// declaration-off boot exactly as it was for every manifest with neither.
 //
 // It never fails the boot. The scope is a catalog the identity provider uses to
 // validate partner writes; a deployment that cannot publish it keeps serving,
@@ -152,7 +152,7 @@ func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 		return noop, nil
 	}
 
-	if manifest.Scope == nil {
+	if !manifest.hasScopeCatalog() {
 		return noop, nil
 	}
 
@@ -216,11 +216,12 @@ func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 // each also accepts its legacy (pre-#4232) name as a DEPRECATED alias for one
 // release, and canonical always wins. New deployments must set the IDP_* names):
 //   - IDP_DECLARATION_ENABLED != "true"  => the permission sections are not
-//     published. When PLUGIN_AUTH_ENABLED=true AND the manifest declares a scope,
-//     the scope section alone is published (see wireScopeOnly; it never fails the
-//     boot). Otherwise it is a no-op: returns a non-nil func(){} and a nil error
-//     WITHOUT reading or validating any other env, so a manifest without a scope
-//     keeps the plugin boot unchanged when the flag is off.
+//     published. When PLUGIN_AUTH_ENABLED=true AND the manifest declares a scope
+//     or partners: true, the scope section and the opt-in alone are published
+//     (see wireScopeOnly; it never fails the boot). Otherwise it is a no-op:
+//     returns a non-nil func(){} and a nil error WITHOUT reading or validating
+//     any other env, so a manifest with neither keeps the plugin boot unchanged
+//     when the flag is off.
 //   - enabled => IDP_HOST, IDP_M2M_CLIENT_ID, IDP_M2M_CLIENT_SECRET, the auth
 //     host (PLUGIN_AUTH_HOST, or its alias PLUGIN_AUTH_ADDRESS) and
 //     PLUGIN_AUTH_ENABLED=true are required; each yields a clear, named error
