@@ -1,8 +1,11 @@
 package middleware
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/LerianStudio/lib-auth/v5/auth/bearer"
 )
@@ -52,6 +55,15 @@ func (auth *AuthClient) WithHTTPErrorHandler(h HTTPErrorHandler) *AuthClient {
 //   - A FromPath dimension reads r.PathValue, which only the Go 1.22+ ServeMux
 //     populates. Under another router it resolves empty and the request is
 //     refused with 403.
+//   - A route that relies on its product's manifest scope (no RequireScope, see
+//     SetManifestScope and SetManifestRouteScope) is the request method and the
+//     path of r.Pattern, its "{name}" and "{name...}" segments read as ":name".
+//     Under another router there is no pattern and the route derives no
+//     dimension, so a partner-bound credential is refused with 403.
+//   - A body-scoped route (FromBody) reads at most maxAuthorizeHTTPBodyBytes
+//     (4 MiB, Fiber's default BodyLimit) for a partner-bound credential; a
+//     larger body is refused with 413. The bytes read are put back on the
+//     request for next.
 //
 // The caller IP is derived from TRUSTED_PROXIES exactly as on the Fiber path,
 // anchored on r.RemoteAddr.
@@ -134,16 +146,73 @@ func (v netHTTPRequest) dimension(d Dimension) string {
 	return d.resolveHTTP(v.r)
 }
 
-// route is unknown to this adapter yet: a route relying on the manifest scope
-// derives no dimension, so a partner-bound credential is refused (fail closed).
+// route is the request method and the path of the ServeMux pattern that matched
+// it, rewritten to the ':name' form the manifest scope is declared in. Only the
+// Go 1.22+ ServeMux sets r.Pattern: under another router the path is "" and a
+// route relying on the manifest scope derives no dimension.
 func (v netHTTPRequest) route() (string, string) {
-	return "", ""
+	return v.r.Method, serveMuxRoutePath(v.r.Pattern)
 }
 
-// body is not read by this adapter yet: a body-scoped route refuses a
-// partner-bound credential (fail closed).
+// maxAuthorizeHTTPBodyBytes caps the body AuthorizeHTTP reads for a body-scoped
+// route: Fiber's default BodyLimit, so the two adapters accept the same bodies
+// by default. net/http sets no limit of its own, and an unbounded read would
+// let one request hold any amount of memory before it is authorized.
+const maxAuthorizeHTTPBodyBytes = 4 << 20
+
+// body reads the request body, at most maxAuthorizeHTTPBodyBytes, and puts the
+// bytes back on the request so the handler reads exactly what the caller sent.
+// A larger body is refused with 413, one that fails to read with 400.
 func (v netHTTPRequest) body() ([]byte, *RefusalError) {
-	return nil, statusRefusal(http.StatusForbidden)
+	if v.r.Body == nil {
+		return nil, nil
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(v.r.Body, maxAuthorizeHTTPBodyBytes+1))
+	if err != nil {
+		return nil, statusRefusal(http.StatusBadRequest)
+	}
+
+	if len(raw) > maxAuthorizeHTTPBodyBytes {
+		return nil, statusRefusal(http.StatusRequestEntityTooLarge)
+	}
+
+	v.r.Body = io.NopCloser(bytes.NewReader(raw))
+
+	return raw, nil
+}
+
+// serveMuxRoutePath returns the path of a ServeMux pattern ("[METHOD ][HOST]/PATH")
+// with every wildcard segment written as a ':name' parameter: "{id}" and
+// "{rest...}" become ":id" and ":rest", and the end anchor "{$}" is dropped. An
+// empty pattern is "".
+func serveMuxRoutePath(pattern string) string {
+	if sep := strings.IndexAny(pattern, " \t"); sep >= 0 {
+		pattern = strings.TrimLeft(pattern[sep:], " \t")
+	}
+
+	slash := strings.Index(pattern, "/")
+	if slash < 0 {
+		return ""
+	}
+
+	segments := strings.Split(pattern[slash:], "/")
+
+	for i, segment := range segments {
+		if segment == "{$}" {
+			segments[i] = ""
+
+			continue
+		}
+
+		if name, ok := strings.CutPrefix(segment, "{"); ok {
+			if name, ok = strings.CutSuffix(name, "}"); ok {
+				segments[i] = ":" + strings.TrimSuffix(name, "...")
+			}
+		}
+	}
+
+	return strings.Join(segments, "/")
 }
 
 // Both adapters satisfy the shared flow's view of a request.

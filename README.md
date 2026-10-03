@@ -884,6 +884,8 @@ An empty signature segment is refused too, so an unsigned (`alg=none`) token nev
 ### What differs from `Authorize`
 
 - **`FromPath` reads `r.PathValue`,** which only the Go 1.22+ `http.ServeMux` fills in from a `{name}` pattern. Under another router a path dimension resolves empty, and the request is refused with 403. It is never sent without the dimension. `FromHeader` and `FromQuery` work under any router.
+- **A route that relies on the manifest scope** (no `RequireScope`, after `declaration.WireScope`) derives its dimensions from the `http.ServeMux` pattern that matched the request (`r.Pattern`): every `{name}` or `{name...}` segment is the `:name` parameter the catalog is declared in, and a `scope.routes` entry is looked up by the request method and that path (`GET /v1/organizations/{organization_id}/accounts` is `GET /v1/organizations/:organization_id/accounts`). Under another router there is no pattern, so the route derives no dimension: a partner-bound credential is refused with 403 before any call, and every other caller is decided as on any undeclared route.
+- **A body-scoped route reads at most 4 MiB** of the body, Fiber's default `BodyLimit`, and only for a partner-bound credential. A larger body answers `413 Request Entity Too Large`, with no authorization call and no handler call. A body that is read is put back on the request, so the handler reads exactly the bytes the caller sent.
 - **Refusals go to an `HTTPErrorHandler`,** not to a returned error. `err` is always a `*middleware.RefusalError`, which carries `Status`, `Message`, and `Response`. `Response` is the Access Manager's decoded refusal body, when it sent one. `errors.As(err, &commons.Response{})` also recovers that body, as on the Fiber path. The handler must write the response. The default writes `Message` as plain text with `Status`, the same way Fiber's default handler renders the `*fiber.Error` from `Authorize`.
 - **The client IP** comes from `r.RemoteAddr` and every `X-Forwarded-For` line, read in order and walked against `TRUSTED_PROXIES` exactly as on the Fiber path. If `RemoteAddr` is not an address and port, as behind a unix socket, or its address is unspecified (`0.0.0.0`, `::`), no IP is forwarded; the Fiber path forwards none either for a connection with no IP peer, which fasthttp reports as `0.0.0.0`.
 - **A nil `*AuthClient`** passes every request through, as `Authorize` does. A nil `next` handler answers 500 instead of panicking.
@@ -896,6 +898,7 @@ Everything else is shared:
 - the decision cache, retry, and breaker
 - local JWT verification
 - the 401/403/503 mapping
+- the manifest scope and the body scope: the same questions, the same single timeout, the same 400 naming the field
 
 The Fiber `Authorize` and the gRPC interceptors keep their existing, more lenient token extraction. `Authorize`, for example, still accepts a bare token without the `Bearer` prefix. Moving them onto `auth/bearer` would refuse requests existing consumers send today, so that change would be a separate, opt-in step.
 
