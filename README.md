@@ -935,6 +935,12 @@ if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after r
   `authMiddleware.PrincipalFromContext(ctx)` returns the subject, type, client
   id and `TenantID` of the credential that first question accepted — pick the
   tenant's database from it. The context also carries the request's deadline.
+  This holds under either M2M derivation model: an application token's
+  `Subject` is its own `sub` claim, even when `AUTH_M2M_INVERSION_ENABLED` is
+  off and the authorization service is asked under the product role. A
+  credential whose claims name no principal (an application token without a
+  `sub`, or a type other than `normal-user` or `application`) is refused with
+  401 before any resolver runs.
 * A resolver receives every distinct value one request names for the
   dimension in **one call** (at most 100 items), together with `Known`: the
   dimensions the request names directly — path, query, headers, form — so the

@@ -768,14 +768,12 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 	// the request makes without its resolved values, and only once every one is
 	// allowed, the resolvers, then the questions about what they resolved to.
 	if caller.partner != "" && scope.resolves() {
-		validated, refusal := auth.validateBeforeResolving(ctx, c, span, params, scope, readings, caller)
+		resolverCtx, refusal := auth.resolverContext(ctx, c, span, params, scope, readings, caller)
 		if refusal != nil {
 			return authzResolution{}, Principal{}, nil, refusal
 		}
 
-		if validated {
-			resolution.ctx = context.WithValue(ctx, principalContextKey{}, caller.principal)
-		}
+		resolution.ctx = resolverCtx
 	}
 
 	// A route that reads dimensions from its body asks one question per
@@ -842,6 +840,31 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 	decision.allowed = allowed.values
 
 	return decision, principal, questions, nil
+}
+
+// resolverContext validates a partner-bound caller before any resolver runs
+// (validateBeforeResolving) and returns the context the resolvers are called
+// with: ctx carrying the principal that acceptance validated. A resolver
+// confines its lookup to that identity, so a credential naming none is refused
+// 401 before any runs. With nothing to resolve, ctx is returned as is.
+func (auth *AuthClient) resolverContext(ctx context.Context, c fiber.Ctx, span trace.Span, params authzParams, scope ScopeDeclaration, readings requestValues, caller authzCaller) (context.Context, error) {
+	validated, refusal := auth.validateBeforeResolving(ctx, c, span, params, scope, readings, caller)
+	if refusal != nil {
+		return nil, refusal
+	}
+
+	if !validated {
+		return ctx, nil
+	}
+
+	identified, ok := resolverPrincipal(caller.principal)
+	if !ok {
+		logErrorf(ctx, auth.Logger, "Partner-bound credential names no principal for a scope resolver; denying (fail closed)")
+
+		return nil, auth.authorizeRefusal(c, http.StatusUnauthorized, http.StatusText(http.StatusUnauthorized))
+	}
+
+	return context.WithValue(ctx, principalContextKey{}, identified), nil
 }
 
 // validateBeforeResolving asks, for a partner-bound caller on a route that

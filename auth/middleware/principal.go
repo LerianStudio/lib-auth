@@ -51,20 +51,43 @@ type principalContextKey struct{}
 // must not be exposed as one.
 func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(principalContextKey{}).(Principal)
-	if !ok || strings.TrimSpace(p.Sub) == "" {
+	if !ok || !identifies(p) {
 		return Principal{}, false
+	}
+
+	return p, true
+}
+
+// identifies reports whether p describes one of the real identities
+// PrincipalFromContext promises.
+func identifies(p Principal) bool {
+	if strings.TrimSpace(p.Sub) == "" {
+		return false
 	}
 
 	switch p.Type {
 	case normalUser:
-		if strings.TrimSpace(p.Owner) == "" || p.Subject != p.Owner+"/"+p.Sub {
-			return Principal{}, false
-		}
+		return strings.TrimSpace(p.Owner) != "" && p.Subject == p.Owner+"/"+p.Sub
 	case application:
-		if p.Owner != "" || p.Subject != p.Sub {
-			return Principal{}, false
-		}
+		return p.Owner == "" && p.Subject == p.Sub
 	default:
+		return false
+	}
+}
+
+// resolverPrincipal is the identity a scope resolver is handed for a caller the
+// authorization service has just accepted. It is the principal derived from the
+// accepted token's claims, with an application's subject always its own sub
+// claim — what the inversion derivation authorizes under — so the identity a
+// resolver sees does not depend on the derivation model: the legacy model's
+// fabricated role is what the authorization service is asked under, never who
+// the caller is. It reports false when the claims name no identity at all.
+func resolverPrincipal(p Principal) (Principal, bool) {
+	if p.Type == application {
+		p.Subject = p.Sub
+	}
+
+	if !identifies(p) {
 		return Principal{}, false
 	}
 
