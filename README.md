@@ -974,15 +974,25 @@ func (h *Handler) ListAccounts(c fiber.Ctx) error {
   [the response](#-expected-authorization-service-response)). The service may
   then allow the request and answer with `allowed` values for it.
 * `RequestScope.Allowed(dimension)` returns those values and `true`. **An empty
-  list means the partner may see none** — list nothing; it never means "no
-  restriction". `false` means the service confined nothing on that dimension.
-  Values the service returns for a dimension the request did not ask to filter
-  are ignored. When the request asked several questions, `Allowed` returns the
-  values any of them returned.
+  list (or `null`) means the partner may see none** — list nothing; it never
+  means "no restriction". `false` — the dimension absent from the answer — means
+  the service confined nothing on that dimension: it is **unrestricted**, and
+  the handler does not confine the list on it. Values the service returns for a
+  dimension the request did not ask to filter are ignored. When the request
+  asked several questions, `Allowed` returns the values any of them returned.
 * A filter route whose request names **no dimension at all** (`GET
   /v1/organizations`) is asked instead of refused, and must be answered with
-  `allowed` values for every filtered dimension: a grant without them is
-  refused with 403, since nothing else confines the list.
+  `allowed` values for **at least one** filtered dimension. The service answers
+  only for the dimensions the partner is scoped on — a partner scoped on one
+  dimension of a route filtering four is answered for that one — and the
+  others are unrestricted, as above. A grant with no `allowed` values for any
+  filtered dimension is refused with 403, since nothing else confines the list.
+
+  ```go
+  // filter: [merchantId, accountId]; the partner is scoped on merchantId only.
+  ids, ok := scope.Allowed("merchantId") // ["m-1"], true -> WHERE merchant_id IN ('m-1')
+  _, ok = scope.Allowed("accountId")      // nil, false    -> no condition on accounts
+  ```
 * A dimension the request does name is asked about, as on any other route, and
   is not filtered.
 * Callers that are not partner-bound, and routes that do not filter, send no

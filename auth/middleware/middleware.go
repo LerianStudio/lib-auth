@@ -200,8 +200,9 @@ type AuthResponse struct {
 	// dimensions it left out): per dimension, the values the partner may see.
 	// It is read only on a grant and only for the dimensions the request named
 	// in its filter; an empty list or null means the partner may see none. A
-	// grant without it confines nothing on the dimension, except on a request
-	// that names no dimension at all, which is then refused.
+	// grant without it confines nothing on the dimension. A request that names
+	// no dimension at all is refused unless the grant carries it for at least
+	// one filtered dimension.
 	Allowed map[string][]string `json:"allowed,omitempty"`
 }
 
@@ -826,9 +827,10 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 		}
 
 		// With no dimension named, the allowed values are the only thing that
-		// confines the request: a grant without them for every filtered
-		// dimension is refused, never served unconfined.
-		if len(question) == 0 && !coversAll(params.filter, decision.allowed) {
+		// confines the request: a grant without them for any filtered
+		// dimension is refused, never served unconfined. A filtered dimension
+		// the answer leaves out is one the partner is not scoped on.
+		if len(question) == 0 && len(params.filter) > 0 && !confinesAny(params.filter, decision.allowed) {
 			logErrorf(ctx, auth.Logger, "Partner-bound credential granted a filtered request naming no dimension without allowed values; denying (fail closed)")
 
 			return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, http.StatusForbidden, http.StatusText(http.StatusForbidden))

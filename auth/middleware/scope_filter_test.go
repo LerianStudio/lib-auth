@@ -355,8 +355,8 @@ func TestAuthorize_Filter_OnlyPartnersOnFilterRoutes(t *testing.T) {
 }
 
 // A filter route whose request names no dimension at all is asked instead of
-// refused, and must come back with the allowed values of every filtered
-// dimension: without them nothing confines the list.
+// refused, and must come back with allowed values for its filtered dimension:
+// without them nothing confines the list.
 func TestAuthorize_Filter_NoDimensionNeedsAllowedValues(t *testing.T) {
 	t.Parallel()
 
@@ -409,6 +409,85 @@ func TestAuthorize_Filter_WithoutFilterNoDimensionIsRefused(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, doRequest(t, app, http.MethodGet, orgsRoute, partnerToken("acme/p1"), "").status)
 	assert.Empty(t, srv.requests())
+}
+
+// A filter route over several dimensions whose request names none of them is
+// served when the answer confines AT LEAST ONE: the service answers only for
+// the dimensions the partner is scoped on, and a dimension it leaves out is not
+// restricted. An answer with no allowed values at all, or only for dimensions
+// the request did not ask to filter, still confines nothing and is refused.
+func TestAuthorize_Filter_NoDimensionNeedsAllowedValuesForOneDimension(t *testing.T) {
+	t.Parallel()
+
+	type read struct {
+		values  []string
+		present bool
+	}
+
+	for name, tc := range map[string]struct {
+		answer       string
+		status       int
+		organization read
+		account      read
+	}{
+		"one_dimension": {
+			answer: `{"authorized":true,"allowed":{"accountId":["acc-1","acc-2"]}}`, status: http.StatusOK,
+			account: read{values: []string{"acc-1", "acc-2"}, present: true},
+		},
+		"other_dimension": {
+			answer: `{"authorized":true,"allowed":{"organizationId":["org-1"]}}`, status: http.StatusOK,
+			organization: read{values: []string{"org-1"}, present: true},
+		},
+		"both_dimensions": {
+			answer: `{"authorized":true,"allowed":{"organizationId":["org-1"],"accountId":["acc-1"]}}`, status: http.StatusOK,
+			organization: read{values: []string{"org-1"}, present: true},
+			account:      read{values: []string{"acc-1"}, present: true},
+		},
+		"empty_list_sees_nothing": {
+			answer: `{"authorized":true,"allowed":{"accountId":[]}}`, status: http.StatusOK,
+			account: read{values: []string{}, present: true},
+		},
+		"null_sees_nothing": {
+			answer: `{"authorized":true,"allowed":{"accountId":null}}`, status: http.StatusOK,
+			account: read{values: []string{}, present: true},
+		},
+		"no_allowed":              {answer: `{"authorized":true}`, status: http.StatusForbidden},
+		"empty_allowed":           {answer: `{"authorized":true,"allowed":{}}`, status: http.StatusForbidden},
+		"only_unfiltered_allowed": {answer: `{"authorized":true,"allowed":{"ledgerId":["led-1"]}}`, status: http.StatusForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := newScriptedAuthServer(t, func(authorizeRequestBody) string { return tc.answer })
+			auth := filteringClient(t, srv.URL, http.MethodGet, orgsRoute, "organizationId", "accountId")
+
+			probe := &allowedProbe{}
+			app := fiber.New()
+			app.Get(orgsRoute, auth.Authorize("midaz", "organizations", "get"), probe.handle)
+
+			got := doRequest(t, app, http.MethodGet, orgsRoute, partnerToken("acme/p1"), "")
+			require.Equal(t, tc.status, got.status)
+
+			require.Len(t, srv.requests(), 1)
+			assert.JSONEq(t,
+				`{"action":"get","product":"midaz","resource":"organizations","sub":"acme/app","filter":["organizationId","accountId"]}`,
+				srv.requests()[0])
+
+			if tc.status != http.StatusOK {
+				assert.Zero(t, probe.calls, "a refused request never reaches the handler")
+
+				return
+			}
+
+			organizations, ok := probe.allowed("organizationId")
+			assert.Equal(t, tc.organization.present, ok, "organizationId presence")
+			assert.Equal(t, tc.organization.values, organizations)
+
+			accounts, ok := probe.allowed("accountId")
+			assert.Equal(t, tc.account.present, ok, "accountId presence")
+			assert.Equal(t, tc.account.values, accounts)
+		})
+	}
 }
 
 // Several questions: the handler reads every value any of them returned.

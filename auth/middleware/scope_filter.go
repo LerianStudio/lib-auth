@@ -145,9 +145,12 @@ func absentFilter(filter []string, question map[string]string) []string {
 //	}
 //
 // An empty, non-nil result means the partner may see NONE: list nothing. The
-// second return is false when the service confined nothing on the dimension.
-// When the request asked several questions, the values are those any of them
-// returned, in the order first returned.
+// second return is false when the service confined nothing on the dimension:
+// the dimension is then unrestricted, and the list is not confined on it. On a
+// route filtering several dimensions, the service answers only for those the
+// partner is scoped on, so a handler confines on each dimension Allowed
+// reports and on no other. When the request asked several questions, the
+// values are those any of them returned, in the order first returned.
 func (s RequestScope) Allowed(dimension string) ([]string, bool) {
 	values, ok := s.allowed[dimension]
 	if !ok {
@@ -191,15 +194,17 @@ func (a *allowedValues) add(asked []string, returned map[string][]string) {
 	}
 }
 
-// coversAll reports whether returned carries values for every asked dimension.
-func coversAll(asked []string, returned map[string][]string) bool {
+// confinesAny reports whether returned carries values — an empty list or null
+// included — for at least one asked dimension. The service answers only for
+// the dimensions the partner is scoped on; one it leaves out is not restricted.
+func confinesAny(asked []string, returned map[string][]string) bool {
 	for _, name := range asked {
-		if _, ok := returned[name]; !ok {
-			return false
+		if _, ok := returned[name]; ok {
+			return true
 		}
 	}
 
-	return true
+	return false
 }
 
 // foldFilter folds a filter into one string for the decision cache key,
