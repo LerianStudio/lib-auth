@@ -65,6 +65,8 @@ func TestAuthorize_Resolve_SiblingsConfineEachValue(t *testing.T) {
 	assert.Nil(t, inputs[0].Known, "the route path names no dimension")
 
 	assert.Equal(t, []map[string]string{
+		{"organizationId": "org-1", "ledgerId": "led-1"},
+		{"organizationId": "org-1", "ledgerId": "led-2"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-a1"},
 		{"organizationId": "org-1", "ledgerId": "led-2", "accountId": "acc-a2"},
 		{"organizationId": "org-1", "ledgerId": "led-2", "accountId": "acc-b2"},
@@ -72,7 +74,7 @@ func TestAuthorize_Resolve_SiblingsConfineEachValue(t *testing.T) {
 }
 
 // An alias that resolves in one ledger and not in the other is unknown where
-// it is read with the other: 422 naming that element.
+// it is read with the other: 403 naming that element.
 func TestAuthorize_Resolve_SiblingsMakeAnUnknownPair(t *testing.T) {
 	t.Parallel()
 
@@ -88,9 +90,9 @@ func TestAuthorize_Resolve_SiblingsMakeAnUnknownPair(t *testing.T) {
 		"debits":  [{"organizationId":"org-1","ledgerId":"led-1","alias":"@a"}],
 		"credits": [{"organizationId":"org-1","ledgerId":"led-2","alias":"@a"}]}`)
 
-	assert.Equal(t, http.StatusUnprocessableEntity, got.status)
-	assert.Contains(t, got.body, `"credits[0].alias"`)
-	assert.Equal(t, int64(0), srv.hits.Load())
+	assert.Equal(t, http.StatusForbidden, got.status)
+	assert.Contains(t, got.body, `body field "credits[0].alias" is outside this credential's scope or does not exist`)
+	assert.Equal(t, int64(2), srv.hits.Load(), "only the known questions")
 	assert.Equal(t, int64(0), probe.calls.Load())
 }
 
@@ -134,6 +136,8 @@ func TestAuthorize_Resolve_SiblingsAreTheSameElementsPlainFields(t *testing.T) {
 	}, byDim["portfolioId"])
 
 	assert.Equal(t, []map[string]string{
+		{"organizationId": "org-1", "ledgerId": "led-1"},
+		{"organizationId": "org-1"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-a", "portfolioId": "pf-1"},
 		{"organizationId": "org-1", "accountId": "acc-b", "portfolioId": "pf-1"},
 	}, srv.attributeCalls())
@@ -157,7 +161,7 @@ func TestAuthorize_Resolve_TopLevelSiblings(t *testing.T) {
 	require.Equal(t, http.StatusOK, got.status, got.body)
 
 	assert.Equal(t, []ResolveItem{{Value: "@a", Siblings: map[string]string{"ledgerId": "led-1"}}}, resolver.inputs()[0].Items)
-	assert.Equal(t, []map[string]string{{"ledgerId": "led-1", "accountId": "acc-a"}}, srv.attributeCalls())
+	assert.Equal(t, []map[string]string{{"ledgerId": "led-1"}, {"ledgerId": "led-1", "accountId": "acc-a"}}, srv.attributeCalls())
 }
 
 // A string of an array of strings is its own element: its siblings are the
@@ -189,6 +193,8 @@ func TestAuthorize_Resolve_StringArraySiblings(t *testing.T) {
 	}, inputs[0].Items)
 
 	assert.Equal(t, []map[string]string{
+		{"ledgerId": "led-1"},
+		{"ledgerId": "led-2"},
 		{"ledgerId": "led-1", "accountId": "acc-a1"},
 		{"ledgerId": "led-2", "accountId": "acc-a2"},
 		{"ledgerId": "led-2", "accountId": "acc-b2"},
@@ -225,6 +231,7 @@ func TestAuthorize_Resolve_CapCountsItems(t *testing.T) {
 	got := doRequest(t, app, http.MethodPost, transfersPath, partnerToken("acme/p1"), body(maxBodyScopeQuestions+1))
 	assert.Equal(t, http.StatusBadRequest, got.status)
 	assert.Empty(t, resolver.inputs())
+	assert.Equal(t, int64(0), srv.hits.Load())
 
 	// Positive control: exactly the cap is resolved and asked.
 	for i := range maxBodyScopeQuestions {
@@ -234,7 +241,8 @@ func TestAuthorize_Resolve_CapCountsItems(t *testing.T) {
 	got = doRequest(t, app, http.MethodPost, transfersPath, partnerToken("acme/p1"), body(maxBodyScopeQuestions))
 	assert.Equal(t, http.StatusOK, got.status, got.body)
 	assert.Len(t, resolver.inputs()[0].Items, maxBodyScopeQuestions)
-	assert.Equal(t, int64(maxBodyScopeQuestions), srv.hits.Load())
+	assert.Equal(t, int64(2*maxBodyScopeQuestions), srv.hits.Load(),
+		"the refused body is never asked; the accepted one asks its known sets, then its resolved ones")
 }
 
 // An answer that does not line up with the items is a failing resolver: 503,
@@ -264,7 +272,7 @@ func TestAuthorize_Resolve_AnswerOfTheWrongLengthIsUnavailable(t *testing.T) {
 
 			assert.Equal(t, http.StatusServiceUnavailable, got.status)
 			assert.Contains(t, got.body, `scope resolver "alias"`)
-			assert.Equal(t, int64(0), srv.hits.Load())
+			assert.Equal(t, int64(1), srv.hits.Load(), "only the known question")
 			assert.Equal(t, int64(0), probe.calls.Load())
 
 			// Positive control: the full answer is accepted.

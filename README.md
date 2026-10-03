@@ -838,9 +838,6 @@ scope:
       dimensions:
         - { name: accountId, from: path, field: transaction_id, resolve: transactionAccounts }
     - method: POST
-      path: /v1/organizations/:organization_id/ledgers/:ledger_id/transactions
-      dimensions:
-    - method: POST
       path: /v1/transfers
       dimensions:
         - { name: organizationId, from: body, field: "debits[].organizationId" }
@@ -857,6 +854,12 @@ auth.RegisterScopeResolver("transactionAccounts", func(ctx context.Context, in a
 })
 
 auth.RegisterScopeResolver("accountByAlias", func(ctx context.Context, in authMiddleware.ResolveInput) ([][]string, error) {
+    principal, ok := authMiddleware.PrincipalFromContext(ctx) // validated before any resolver runs
+    if !ok {
+        return nil, errors.New("no validated principal")
+    }
+    repo := reposByTenant(principal.TenantID)
+
     out := make([][]string, len(in.Items))
     for i, item := range in.Items {
         // item.Siblings: the fields read from the same element as the alias,
@@ -871,6 +874,18 @@ if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after r
 }
 ```
 
+* **A resolver runs only for a validated credential.** For a partner-bound
+  credential, the request is first asked **without** its resolved values: the
+  dimensions read from the path, query, headers, form and the body's plain
+  fields, one question per distinct set. Only once every one is allowed do the
+  resolvers run; then the resolved values are asked. A credential refused there
+  (401 or 403) never reaches a resolver. A route whose every dimension is
+  resolved is first asked a question naming no dimension, which validates the
+  credential only; the request is still decided on the resolved values.
+* **The resolver's context carries the validated identity.**
+  `authMiddleware.PrincipalFromContext(ctx)` returns the subject, type, client
+  id and `TenantID` of the credential that first question accepted — pick the
+  tenant's database from it. The context also carries the request's deadline.
 * A resolver receives every distinct value one request names for the
   dimension in **one call** (at most 100 items), together with `Known`: the
   dimensions the request names directly — path, query, headers, form — so the
@@ -890,10 +905,16 @@ if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after r
   and every one must be allowed, combined with the request's other dimensions
   exactly as several values from one carrier are. A body value stays with the
   other fields of its array element — the siblings it was resolved with.
+* **Calls are bounded.** At most 100 questions about the known dimensions, one
+  resolver call per resolved dimension, then at most 100 questions about the
+  resolved values. The decision cache answers repeats of either. A request with
+  no value to resolve (an optional one left out) is asked once, as before.
 * **Failures never let the request through:**
-  * an item the resolver maps to no value is answered **422** naming where it
-    was read (`body field "debits[2].alias"`, `path parameter
-    "transaction_id"`), with no authorization call;
+  * an item the resolver maps to no value, and a resolved value the
+    authorization service denies, both answer **403** with the same message,
+    naming where the value was read — `scope body field "debits[2].alias" is
+    outside this credential's scope or does not exist` — so a partner cannot
+    tell a value that does not exist from one it may not see;
   * a resolver error, an answer whose length differs from `Items`, or an empty
     string among its values is answered **503** naming the resolver; the error
     is logged, not returned to the caller;

@@ -448,10 +448,17 @@ type questionSet struct {
 	// carried records, per dimension the other carriers name, the values the
 	// questions carry, so a value they name and the body never does is caught.
 	carried map[string]map[string]struct{}
+	// resolvedAt locates the resolved value the questions being added carry,
+	// "" when they carry none; located holds it per question.
+	resolvedAt string
+	located    []string
 }
 
 func newQuestionSet(plan *bodyPlan, readings requestValues) *questionSet {
-	return &questionSet{plan: plan, readings: readings, seen: make(map[string]struct{}), carried: make(map[string]map[string]struct{})}
+	return &questionSet{
+		plan: plan, readings: readings, seen: make(map[string]struct{}), carried: make(map[string]map[string]struct{}),
+		resolvedAt: readings.resolvedAt,
+	}
 }
 
 // add adds the questions one set of body values makes. locations name where in
@@ -516,6 +523,7 @@ func (q *questionSet) addOne(question map[string]string) *errBodyScope {
 
 	q.seen[key] = struct{}{}
 	q.questions = append(q.questions, question)
+	q.located = append(q.located, q.resolvedAt)
 
 	for name, value := range question {
 		if _, ok := q.readings.values[name]; !ok {
@@ -585,11 +593,12 @@ func containsValue(values []string, value string) bool {
 
 // questions reads the body dimensions of the request and returns every distinct
 // set of identifiers to ask about, each carrying the values the other carriers
-// (the path, the query, headers) name too.
+// (the path, the query, headers) name too, and, per set, where the resolved
+// value it carries was read ("" for none).
 //
 // A request with no body names nothing; when every body dimension is optional
 // that is a body without them, not a malformed one.
-func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolution) ([]map[string]string, *errBodyScope) {
+func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolution) ([]map[string]string, []string, *errBodyScope) {
 	var root any
 
 	switch {
@@ -597,7 +606,7 @@ func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolut
 		root = map[string]any{}
 	default:
 		if err := json.Unmarshal(body, &root); err != nil {
-			return nil, bodyFieldError(p.fields[0], "cannot be read: the request body is not valid JSON")
+			return nil, nil, bodyFieldError(p.fields[0], "cannot be read: the request body is not valid JSON")
 		}
 	}
 
@@ -611,21 +620,21 @@ func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolut
 	for _, group := range p.groups {
 		w := groupWalk{group: group, set: set, raw: raw}
 		if err := w.walk(root, 0, "", []any{root}, []string{""}); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if raw != nil {
 		if err := r.resolveBody(*raw, set, readings); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if err := set.complete(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return set.questions, nil
+	return set.questions, set.located, nil
 }
 
 type groupWalk struct {
@@ -990,19 +999,19 @@ func (auth *AuthClient) manifestRouteScope(product, key string) (uint64, []Dimen
 // Resolved dimensions are translated only when readBody is set — for a
 // partner-bound caller. Any other caller is asked without them, exactly as a
 // caller whose body is not read is asked without the body's dimensions.
-func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBody bool, r scopeResolution) ([]map[string]string, *errBodyScope) {
+func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBody bool, r scopeResolution) ([]map[string]string, []string, *errBodyScope) {
 	if readBody {
 		readings = readForm(c, s.dims, readings)
 	}
 
 	if readings.problem != nil {
-		return nil, readings.problem
+		return nil, nil, readings.problem
 	}
 
 	if readBody && len(readings.pending) > 0 {
 		resolved, err := r.resolvePending(readings)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		readings = resolved
@@ -1010,15 +1019,15 @@ func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBod
 
 	if s.body == nil || !readBody {
 		if len(readings.names) == 0 {
-			return nil, nil
+			return nil, nil, nil
 		}
 
 		set := newQuestionSet(nil, readings)
 		if err := set.add(map[string]string{}, nil); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
-		return set.questions, nil
+		return set.questions, set.located, nil
 	}
 
 	return s.body.questions(c.Body(), readings, r)

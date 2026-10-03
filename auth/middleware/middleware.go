@@ -760,11 +760,28 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 		return authzResolution{}, Principal{}, nil, auth.refusalFor(c, *failure)
 	}
 
+	resolution := scopeResolution{ctx: ctx, auth: auth, product: params.product}
+
+	// A resolver looks up the product's own data, so it runs only for a
+	// credential the authorization service has accepted: first the questions
+	// the request makes without its resolved values, and only once every one is
+	// allowed, the resolvers, then the questions about what they resolved to.
+	if caller.partner != "" && scope.resolves() {
+		validated, refusal := auth.validateBeforeResolving(ctx, c, span, params, scope, readings, caller)
+		if refusal != nil {
+			return authzResolution{}, Principal{}, nil, refusal
+		}
+
+		if validated {
+			resolution.ctx = context.WithValue(ctx, principalContextKey{}, caller.principal)
+		}
+	}
+
 	// A route that reads dimensions from its body asks one question per
 	// distinct set of identifiers the body names, and every one must be
 	// allowed. A body that cannot be read for them is the caller's to fix:
 	// refused before any call, naming the field, and never let through.
-	questions, badBody := scope.questions(c, readings, caller.partner != "", scopeResolution{ctx: ctx, auth: auth, product: params.product})
+	questions, located, badBody := scope.questions(c, readings, caller.partner != "", resolution)
 	if badBody != nil {
 		return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, badBody.statusCode(), badBody.Error())
 	}
@@ -772,15 +789,16 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 	asked := questions
 	if len(asked) == 0 {
 		asked = []map[string]string{nil}
+		located = nil
 	}
 
 	var (
-		resolution authzResolution
-		principal  Principal
-		allowed    allowedValues
+		decision  authzResolution
+		principal Principal
+		allowed   allowedValues
 	)
 
-	for _, question := range asked {
+	for i, question := range asked {
 		params.attributes = question
 
 		// On a route that filters, a partner's question that leaves a filtered
@@ -796,27 +814,101 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 		// filter: the list is then confined by the values the answer carries.
 		params.declared = len(question) > 0 || len(params.filter) > 0
 
-		resolution, principal = auth.decide(ctx, span, params, caller)
+		decision, principal = auth.decide(ctx, span, params, caller)
 
-		if refusal := auth.refusalFor(c, resolution); refusal != nil {
+		resolvedAt := ""
+		if located != nil {
+			resolvedAt = located[i]
+		}
+
+		if refusal := auth.refusalOfResolved(c, decision, resolvedAt); refusal != nil {
 			return authzResolution{}, Principal{}, nil, refusal
 		}
 
 		// With no dimension named, the allowed values are the only thing that
 		// confines the request: a grant without them for every filtered
 		// dimension is refused, never served unconfined.
-		if len(question) == 0 && !coversAll(params.filter, resolution.allowed) {
+		if len(question) == 0 && !coversAll(params.filter, decision.allowed) {
 			logErrorf(ctx, auth.Logger, "Partner-bound credential granted a filtered request naming no dimension without allowed values; denying (fail closed)")
 
 			return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, http.StatusForbidden, http.StatusText(http.StatusForbidden))
 		}
 
-		allowed.add(params.filter, resolution.allowed)
+		allowed.add(params.filter, decision.allowed)
 	}
 
-	resolution.allowed = allowed.values
+	decision.allowed = allowed.values
 
-	return resolution, principal, questions, nil
+	return decision, principal, questions, nil
+}
+
+// validateBeforeResolving asks, for a partner-bound caller on a route that
+// resolves, the questions the request makes without its resolved values: the
+// dimensions read from the path, the query, headers, a form and the body's
+// plain fields. The authorization service accepting every one is what
+// validates the credential — and confines the dimensions already known —
+// before any resolver looks anything up. A question naming no dimension only
+// validates the credential; the request is still decided on the resolved
+// values that follow.
+//
+// It reports whether it asked: a request with no value to resolve is decided
+// in one pass, as before. A refusal ends the request, and no resolver runs.
+func (auth *AuthClient) validateBeforeResolving(ctx context.Context, c fiber.Ctx, span trace.Span, params authzParams, scope ScopeDeclaration, readings requestValues, caller authzCaller) (bool, error) {
+	var deferred bool
+
+	known, _, badBody := scope.questions(c, readings.clone(), true, scopeResolution{ctx: ctx, auth: auth, product: params.product, deferred: &deferred})
+	if badBody != nil {
+		return false, auth.authorizeRefusal(c, badBody.statusCode(), badBody.Error())
+	}
+
+	if !deferred {
+		return false, nil
+	}
+
+	if len(known) == 0 {
+		known = []map[string]string{nil}
+	}
+
+	for _, question := range known {
+		params.attributes = question
+		params.filter = nil
+		params.declared = true
+
+		decision, _ := auth.decide(ctx, span, params, caller)
+		if refusal := auth.refusalFor(c, decision); refusal != nil {
+			return false, refusal
+		}
+	}
+
+	return true, nil
+}
+
+// refusalOfResolved is refusalFor for a question carrying a value resolved at
+// resolvedAt ("" for none): a resolved value outside the scope answers exactly
+// as a value that does not resolve, naming where it was read and never telling
+// the two apart.
+func (auth *AuthClient) refusalOfResolved(c fiber.Ctx, decision authzResolution, resolvedAt string) error {
+	refusal := auth.refusalFor(c, decision)
+	if refusal != nil && resolvedAt != "" && deniedStatus(decision) == http.StatusForbidden {
+		return auth.authorizeRefusal(c, http.StatusForbidden, outsideScope(resolvedAt))
+	}
+
+	return refusal
+}
+
+// deniedStatus is the status a refused decision answers with, or 0 when the
+// authorization service could not be reached.
+func deniedStatus(decision authzResolution) int {
+	if decision.unavailableErr != nil {
+		return 0
+	}
+
+	_, status, err := decision.checkResult()
+	if err == nil {
+		return denialStatus(decision.reason)
+	}
+
+	return status
 }
 
 // refusalFor is the error a resolution refuses the request with, or nil when it

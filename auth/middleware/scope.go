@@ -211,6 +211,17 @@ type ScopeDeclaration struct {
 	filter []string
 }
 
+// resolves reports whether any dimension of the declaration is resolved.
+func (s ScopeDeclaration) resolves() bool {
+	for _, dim := range s.dims {
+		if dim.resolver != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
 // RequireScope declares the dimensions a route's requests carry, for the product
 // that owns the route. The product must be the same one passed to Authorize: a
 // declaration for another product names another product's dimensions, and an
@@ -274,6 +285,33 @@ type requestValues struct {
 	// request carries is not the dimension's value but a key to translate.
 	// They join values only once resolved, for a partner-bound caller.
 	pending []pendingValues
+	// resolvedAt locates the first value resolved outside the body, once
+	// resolved: the place a refusal of the questions carrying it names.
+	resolvedAt string
+}
+
+// clone copies the readings, so reading the request twice — before and after
+// the credential is validated — leaves the original untouched.
+func (rv requestValues) clone() requestValues {
+	out := rv
+	out.names = append([]string(nil), rv.names...)
+	out.pending = append([]pendingValues(nil), rv.pending...)
+
+	if rv.values != nil {
+		out.values = make(map[string][]string, len(rv.values))
+		for name, values := range rv.values {
+			out.values[name] = append([]string(nil), values...)
+		}
+	}
+
+	if rv.where != nil {
+		out.where = make(map[string]string, len(rv.where))
+		for name, where := range rv.where {
+			out.where[name] = where
+		}
+	}
+
+	return out
 }
 
 // pendingValues are the values one carrier names for a resolved dimension,

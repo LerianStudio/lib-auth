@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
@@ -99,7 +100,9 @@ func doRequest(t *testing.T, app *fiber.App, method, target, token, body string)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := app.Test(req)
+	// A request asking up to twice the cap of questions outlasts the default
+	// one-second test timeout under -race.
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
 	require.NoError(t, err)
 
 	defer resp.Body.Close()
@@ -153,8 +156,9 @@ func TestAuthorize_Resolve_PathValueToSeveral(t *testing.T) {
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-1"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-2"},
 	}
-	assert.Equal(t, want, srv.attributeCalls())
-	assert.Equal(t, want, scope.Sets)
+	assert.Equal(t, append([]map[string]string{{"organizationId": "org-1", "ledgerId": "led-1"}}, want...), srv.attributeCalls(),
+		"the known dimensions first, then every resolved value")
+	assert.Equal(t, want, scope.Sets, "the request is authorized as the resolved sets")
 
 	assert.Equal(t, []ResolveInput{{
 		Product:   "midaz",
@@ -181,14 +185,15 @@ func TestAuthorize_Resolve_EveryValueMustBeAllowed(t *testing.T) {
 	got := doRequest(t, app, http.MethodGet, txTarget, partnerToken("acme/p1"), "")
 
 	assert.Equal(t, http.StatusForbidden, got.status)
+	assert.Contains(t, got.body, `path parameter "transaction_id" is outside this credential's scope or does not exist`)
 	assert.Equal(t, int64(0), probe.calls.Load())
-	assert.Equal(t, int64(2), srv.hits.Load())
+	assert.Equal(t, int64(3), srv.hits.Load(), "the known question, then the resolved ones up to the denial")
 }
 
-// A value the resolver does not know is the request's to fix: 422 naming
-// where it was read, before any authorization call — never a question
-// without the dimension.
-func TestAuthorize_Resolve_UnknownPathValueIsUnprocessable(t *testing.T) {
+// A value the resolver does not know is refused with 403 naming where it was
+// read, after the known question only — never a question without the
+// dimension.
+func TestAuthorize_Resolve_UnknownPathValueIsForbidden(t *testing.T) {
 	t.Parallel()
 
 	for name, table := range map[string]map[string][]string{
@@ -209,9 +214,9 @@ func TestAuthorize_Resolve_UnknownPathValueIsUnprocessable(t *testing.T) {
 
 			got := doRequest(t, app, http.MethodGet, txTarget, partnerToken("acme/p1"), "")
 
-			assert.Equal(t, http.StatusUnprocessableEntity, got.status)
-			assert.Contains(t, got.body, `path parameter "transaction_id"`)
-			assert.Equal(t, int64(0), srv.hits.Load())
+			assert.Equal(t, http.StatusForbidden, got.status)
+			assert.Contains(t, got.body, `path parameter "transaction_id" is outside this credential's scope or does not exist`)
+			assert.Equal(t, []map[string]string{{"organizationId": "org-1", "ledgerId": "led-1"}}, srv.attributeCalls())
 			assert.Equal(t, int64(0), probe.calls.Load())
 		})
 	}
@@ -242,7 +247,7 @@ func TestAuthorize_Resolve_ResolverFailureIsUnavailable(t *testing.T) {
 			assert.Equal(t, http.StatusServiceUnavailable, got.status)
 			assert.Contains(t, got.body, `scope resolver "legs"`)
 			assert.NotContains(t, got.body, "db-internal")
-			assert.Equal(t, int64(0), srv.hits.Load())
+			assert.Equal(t, int64(1), srv.hits.Load(), "only the known question")
 			assert.Equal(t, int64(0), probe.calls.Load())
 		})
 	}
@@ -286,6 +291,7 @@ func TestAuthorize_Resolve_BodyIsBatched(t *testing.T) {
 	require.Equal(t, http.StatusOK, got.status, got.body)
 
 	assert.Equal(t, []map[string]string{
+		{"organizationId": "org-1", "ledgerId": "led-1"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-a"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-b1"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-b2"},
@@ -317,12 +323,14 @@ func TestAuthorize_Resolve_BodyValueKeepsItsElement(t *testing.T) {
 	require.Equal(t, http.StatusOK, got.status, got.body)
 
 	assert.Equal(t, []map[string]string{
+		{"organizationId": "org-1", "ledgerId": "led-1"},
+		{"organizationId": "org-1", "ledgerId": "led-2"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-a"},
 		{"organizationId": "org-1", "ledgerId": "led-2", "accountId": "acc-b"},
 	}, srv.attributeCalls())
 }
 
-// An unknown body value is named at its position.
+// An unknown body value is refused with 403 naming its position.
 func TestAuthorize_Resolve_UnknownBodyValueNamesTheElement(t *testing.T) {
 	t.Parallel()
 
@@ -338,9 +346,9 @@ func TestAuthorize_Resolve_UnknownBodyValueNamesTheElement(t *testing.T) {
 	got := doRequest(t, app, http.MethodPost, legsPath, partnerToken("acme/p1"),
 		`{"debits":[{"alias":"@a"},{"alias":"@a"},{"alias":"@zz"}]}`)
 
-	assert.Equal(t, http.StatusUnprocessableEntity, got.status)
-	assert.Contains(t, got.body, `"debits[2].alias"`)
-	assert.Equal(t, int64(0), srv.hits.Load())
+	assert.Equal(t, http.StatusForbidden, got.status)
+	assert.Contains(t, got.body, `body field "debits[2].alias" is outside this credential's scope or does not exist`)
+	assert.Equal(t, int64(1), srv.hits.Load(), "only the known question")
 	assert.Equal(t, int64(0), probe.calls.Load())
 }
 
@@ -366,7 +374,7 @@ func TestAuthorize_Resolve_TooManyValuesIsRefusedBeforeResolving(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, got.status)
 	assert.Empty(t, resolver.inputs())
-	assert.Equal(t, int64(0), srv.hits.Load())
+	assert.Equal(t, int64(1), srv.hits.Load(), "only the known question")
 
 	// Positive control: exactly the cap is resolved and asked.
 	resolver.table = make(map[string][]string, maxBodyScopeQuestions)
@@ -378,7 +386,7 @@ func TestAuthorize_Resolve_TooManyValuesIsRefusedBeforeResolving(t *testing.T) {
 		`{"debits":[`+strings.Join(elements[:maxBodyScopeQuestions], ",")+`]}`)
 
 	assert.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, int64(maxBodyScopeQuestions), srv.hits.Load())
+	assert.Equal(t, int64(1+1+maxBodyScopeQuestions), srv.hits.Load())
 }
 
 // A resolved value and the same dimension named directly elsewhere must agree.
@@ -423,6 +431,7 @@ func TestAuthorize_Resolve_Query(t *testing.T) {
 	require.Equal(t, http.StatusOK, got.status, got.body)
 
 	assert.Equal(t, []map[string]string{
+		{"organizationId": "org-1", "ledgerId": "led-1"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-a"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-b"},
 	}, srv.attributeCalls())
@@ -432,7 +441,7 @@ func TestAuthorize_Resolve_Query(t *testing.T) {
 	require.Equal(t, http.StatusOK, got.status, got.body)
 
 	assert.Len(t, resolver.inputs(), 1, "an absent optional value is not resolved")
-	assert.Equal(t, map[string]string{"organizationId": "org-1", "ledgerId": "led-1"}, srv.attributeCalls()[2])
+	assert.Equal(t, []map[string]string{{"organizationId": "org-1", "ledgerId": "led-1"}}, srv.attributeCalls()[3:], "asked once")
 }
 
 // A resolver named but not registered fails where the scope is wired.
@@ -481,7 +490,7 @@ func TestAuthorize_Resolve_ExplicitUnregisteredRefusesEveryRequest(t *testing.T)
 		RequireScope("midaz", Dim("accountId", FromPath).At("transaction_id").Resolve("legs"))), ok)
 
 	assert.Equal(t, http.StatusOK, doRequest(t, app, http.MethodGet, txTarget, partnerToken("acme/p1"), "").status)
-	assert.Equal(t, []map[string]string{{"accountId": "acc-1"}}, srv.attributeCalls())
+	assert.Equal(t, []map[string]string{nil, {"accountId": "acc-1"}}, srv.attributeCalls(), "validated, then asked")
 }
 
 // A route path dimension is declared on the route only when it is resolved,
@@ -528,5 +537,5 @@ func TestAuthorize_Resolve_QueryDivergesFromPath(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, got.status)
 	assert.Contains(t, got.body, `path parameter "account_id"`)
 	assert.Contains(t, got.body, `query parameter "alias"`)
-	assert.Equal(t, int64(1), srv.hits.Load(), "the divergent request is never asked")
+	assert.Equal(t, int64(2+1), srv.hits.Load(), "the divergent request is asked only its known question")
 }

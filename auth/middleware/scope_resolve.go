@@ -53,13 +53,20 @@ type ResolveItem struct {
 //
 // It returns one entry per item of in.Items, in the same order: the dimension
 // values the item stands for — one or several. An item mapped to no value is
-// unknown: the request is refused with 422 naming where it was read. A
-// returned error means the lookup itself failed: the request is refused with
-// 503 naming the resolver, and the error is logged, never sent to the caller.
-// An answer with a different number of entries than items, or an empty string
-// among the returned values, is treated as such a failure.
+// unknown: the request is refused with 403 naming where it was read, exactly as
+// a resolved value outside the credential's scope is, so the answer never tells
+// whether the value exists. A returned error means the lookup itself failed:
+// the request is refused with 503 naming the resolver, and the error is logged,
+// never sent to the caller. An answer with a different number of entries than
+// items, or an empty string among the returned values, is treated as such a
+// failure.
 //
-// ctx carries the request's authorization deadline.
+// A resolver runs only after the authorization service has accepted the
+// request's credential on the dimensions known without resolution. ctx carries
+// the request's authorization deadline and the identity that acceptance
+// validated: PrincipalFromContext(ctx) returns its subject, type, client id and
+// tenant (TenantID), the values a product confines its lookup to — the tenant's
+// database above all.
 type ScopeResolver func(ctx context.Context, in ResolveInput) ([][]string, error)
 
 // RegisterScopeResolver registers a resolver under name, for the dimensions
@@ -150,6 +157,10 @@ type scopeResolution struct {
 	ctx     context.Context
 	auth    *AuthClient
 	product string
+	// deferred, when non-nil, makes the pass that runs BEFORE the credential is
+	// validated: no resolver is called, the resolved dimensions are left out of
+	// the questions, and *deferred records whether any value awaits resolution.
+	deferred *bool
 }
 
 // call asks the named resolver to translate items, validating its answer. The
@@ -207,12 +218,17 @@ func (r scopeResolution) call(resolverName, dimension string, items []ResolveIte
 	return out, nil
 }
 
+// outsideScope is the message a request is refused with when a value read at
+// location does not resolve, or resolves to a value outside the credential's
+// scope. The two answer the same, so a partner cannot learn whether a value it
+// may not see exists.
+func outsideScope(location string) string {
+	return "scope " + location + " is outside this credential's scope or does not exist"
+}
+
 // unresolved is the refusal of a request value its resolver does not know.
-func unresolved(location, dimension string) *errBodyScope {
-	return &errBodyScope{
-		status:  http.StatusUnprocessableEntity,
-		message: "scope " + location + " names a value that does not resolve to any " + strconv.Quote(dimension),
-	}
+func unresolved(location string) *errBodyScope {
+	return &errBodyScope{status: http.StatusForbidden, message: outsideScope(location)}
 }
 
 // knownValues copies the dimensions the request names directly, for a
@@ -238,6 +254,11 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 	pending := readings.pending
 	readings.pending = nil
 
+	if r.deferred != nil {
+		*r.deferred = *r.deferred || len(pending) > 0
+		pending = nil
+	}
+
 	for _, p := range pending {
 		items := make([]ResolveItem, 0, len(p.values))
 		for _, value := range p.values {
@@ -255,7 +276,7 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 
 		for _, resolved := range out {
 			if len(resolved) == 0 {
-				return requestValues{}, unresolved(p.dim.location(), p.dim.name)
+				return requestValues{}, unresolved(p.dim.location())
 			}
 
 			for _, v := range resolved {
@@ -267,6 +288,10 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 		}
 
 		readings.add(p.dim, values)
+
+		if readings.resolvedAt == "" {
+			readings.resolvedAt = p.dim.location()
+		}
 	}
 
 	if readings.problem != nil {
@@ -315,6 +340,10 @@ func itemKey(item ResolveItem) string {
 // one call per resolver and dimension, with every distinct key — and asks, for
 // each question, every combination of the values its keys resolve to.
 func (r scopeResolution) resolveBody(raw []rawQuestion, set *questionSet, readings requestValues) *errBodyScope {
+	if r.deferred != nil {
+		return deferBody(raw, set, r.deferred)
+	}
+
 	order, batches := collectBatches(raw)
 
 	known := knownValues(readings)
@@ -342,10 +371,39 @@ func (r scopeResolution) resolveBody(raw []rawQuestion, set *questionSet, readin
 			return err
 		}
 
+		set.resolvedAt = readings.resolvedAt
+		if names := sortedKeys(q.resolvers); len(names) > 0 {
+			set.resolvedAt = q.at[names[0]]
+		}
+
 		for _, question := range combinations {
 			if err := set.add(question, q.at); err != nil {
 				return err
 			}
+		}
+	}
+
+	return nil
+}
+
+// deferBody adds the questions of a body without its resolved fields, and
+// records whether any field awaits resolution.
+func deferBody(raw []rawQuestion, set *questionSet, deferred *bool) *errBodyScope {
+	for _, q := range raw {
+		values := make(map[string]string, len(q.values))
+
+		for name, value := range q.values {
+			if _, resolved := q.resolvers[name]; resolved {
+				*deferred = true
+
+				continue
+			}
+
+			values[name] = value
+		}
+
+		if err := set.add(values, q.at); err != nil {
+			return err
 		}
 	}
 
@@ -389,7 +447,7 @@ func expandResolved(q rawQuestion, results map[string]map[string][]string, set *
 	for _, name := range sortedKeys(q.resolvers) {
 		resolved := results[batchKey(q.resolvers[name], name)][itemKey(q.item(name))]
 		if len(resolved) == 0 {
-			return nil, unresolved(q.at[name], name)
+			return nil, unresolved(q.at[name])
 		}
 
 		if len(combinations)*len(resolved) > maxBodyScopeQuestions {

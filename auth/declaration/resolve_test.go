@@ -236,17 +236,24 @@ func TestWireScope_RouteResolvesThePath(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(body), &got))
 	assert.Equal(t, map[string]string{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-1"}, got.Attributes)
 
-	// The same transaction under another organization does not resolve.
+	// The same transaction under another organization does not resolve: 403,
+	// after the known dimensions alone were asked.
 	req = httptest.NewRequest(http.MethodGet, "/v1/organizations/org-2/ledgers/led-1/transactions/tx-1", nil)
 	req.Header.Set("Authorization", partnerBearer(t))
 
 	resp, err = app.Test(req)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	rec.mu.Lock()
 	last := rec.last
 	rec.mu.Unlock()
-	assert.False(t, strings.Contains(last, "org-2"), "an unresolved request is never asked")
+
+	var asked struct {
+		Attributes map[string]string `json:"attributes"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(last), &asked))
+	assert.Equal(t, map[string]string{"organizationId": "org-2", "ledgerId": "led-1"}, asked.Attributes,
+		"an unresolved value is never asked about")
 }
 
 // siblingsYAML is unresolvedYAML plus a route whose body resolves aliases with

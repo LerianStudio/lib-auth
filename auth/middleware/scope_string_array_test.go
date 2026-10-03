@@ -275,6 +275,7 @@ func TestAuthorize_StringArray_Resolved(t *testing.T) {
 	require.Equal(t, http.StatusOK, got.status, got.body)
 
 	assert.Equal(t, []map[string]string{
+		{"organizationId": "org-1", "ledgerId": "led-1"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-a"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-b"},
 	}, srv.attributeCalls())
@@ -282,8 +283,8 @@ func TestAuthorize_StringArray_Resolved(t *testing.T) {
 
 	got = doRequest(t, app, http.MethodPost, legsPath, partnerToken("acme/p1"),
 		`{"accountTarget":{"aliases":["@a","@zz"]}}`)
-	assert.Equal(t, http.StatusUnprocessableEntity, got.status)
-	assert.Contains(t, got.body, `"accountTarget.aliases[1]"`)
+	assert.Equal(t, http.StatusForbidden, got.status)
+	assert.Contains(t, got.body, `body field "accountTarget.aliases[1]" is outside this credential's scope or does not exist`)
 }
 
 // The elements of an array are read either as strings or as objects, never
