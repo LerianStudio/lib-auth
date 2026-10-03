@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -266,4 +267,36 @@ func TestAuthorize_Resolve_OnlyResolvedDimensionsValidateFirst(t *testing.T) {
 	got := doRequest(t, app, http.MethodGet, txTarget, partnerToken("acme/p1"), "")
 	require.Equal(t, http.StatusOK, got.status, got.body)
 	assert.Equal(t, []map[string]string{nil, {"accountId": "acc-1"}}, srv.attributeCalls())
+}
+
+// Reading the request before and after the credential is validated reads the
+// same values: a form dimension joins both the known question and the
+// resolved ones.
+func TestAuthorize_Resolve_FormValuesJoinBothPasses(t *testing.T) {
+	t.Parallel()
+
+	const route = "/v1/organizations/:organization_id/payments"
+
+	srv := newDecidingAuthServer(t)
+	resolver := &fakeResolver{table: map[string][]string{"@a": {"acc-a"}}}
+	auth := resolvingClient(t, srv.URL, "alias", resolver, http.MethodPost, route,
+		Dim("ledgerId", FromForm).At("ledgerId"),
+		Dim("accountId", FromQuery).At("alias").Resolve("alias"))
+
+	app := fiber.New()
+	app.Post(route, auth.Authorize("midaz", "payments", "post"), ok)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/organizations/org-1/payments?alias=@a", strings.NewReader("ledgerId=led-1"))
+	req.Header.Set("Content-Type", formType)
+	req.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
+
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	assert.Equal(t, []map[string]string{
+		{"organizationId": "org-1", "ledgerId": "led-1"},
+		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-a"},
+	}, srv.attributeCalls())
 }
