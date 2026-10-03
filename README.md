@@ -553,9 +553,10 @@ f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
 ```
 
 * `Dim(name, source)` names the field the authorization service knows the
-  dimension by, and where to read it: `FromPath`, `FromHeader` or `FromQuery`.
+  dimension by, and where to read it: `FromPath`, `FromQuery`, `FromHeader`,
+  `FromBody` or `FromForm` (see [Where a dimension is read](#where-a-dimension-is-read)).
   The request key defaults to the name; use `At("...")` when the route calls it
-  something else.
+  something else, and `Optional()` when a request may leave it out.
 * The resolved values are sent as an additional `attributes` object on
   `POST /v1/authorize`. **A route that declares nothing sends exactly the bytes it
   sends today** — the member is omitted, not sent empty — so adopting this is
@@ -567,13 +568,19 @@ f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
 
 Two refusals are deliberate and both answer **403**, before any call is made:
 
-1. A credential bound to a partner reaching a route that declares no dimension.
-   Such a credential is only ever allowed to reach *some* instances, and a route
-   that cannot say which instance the request points at leaves the "where" with
-   nothing to decide on.
-2. A declared dimension the request carries no value for (header absent, empty
-   path parameter). An identifier with no value cannot be matched, and sending it
-   absent would quietly ask a question the route did not promise.
+1. A credential bound to a partner on a request that names no dimension — a route
+   that declares none, or one whose dimensions are all optional and all left out.
+   Such a credential is only ever allowed to reach *some* instances, and a request
+   that cannot say which instance it points at leaves the "where" with nothing to
+   decide on.
+2. A required dimension the request carries no value for (header or query
+   parameter absent, empty path parameter). An identifier with no value cannot be
+   matched, and sending it absent would quietly ask a question the route did not
+   promise.
+
+A request that carries a dimension malformed — an empty value, an empty element
+of a list — or names different values for one dimension in two places is
+answered **400** naming where, also before any call.
 
 Inside the handler, `ScopeFromContext` returns what was resolved, for the checks a
 route declaration cannot reach — a scope that has to be applied to the request
@@ -598,6 +605,7 @@ scope:
   dimensions:            # tree order: first = top of the funnel
     - { name: organizationId, from: path, param: organization_id, required: true,  collection: organizations, label: "Organization" }
     - { name: ledgerId,       from: path, param: ledger_id,       multi: true,     collection: ledgers,       label: "Ledger" }
+    - { name: portfolioId,    from: header, param: X-Portfolio-Id,               collection: portfolios,    label: "Portfolio" }
 ```
 
 ```go
@@ -613,17 +621,27 @@ f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
 
 * The scope is registered under the manifest's `service`, which must be the
   product the routes pass to `Authorize`. Routes of other products are untouched.
-* A dimension applies to a route when one **whole** path segment is
+* A `from: path` dimension applies to a route when one **whole** path segment is
   `:<param>` — `:organization_id`, not a literal `organization_id`, not
   `:organization_id.json`. Applied dimensions are sent in manifest order, as the
   same `attributes` an explicit declaration sends.
-* A route whose path carries none of the parameters behaves as a route that
+* A `from: query` or `from: header` dimension applies to **every** route of the
+  product, because a route path cannot say whether a request carries it: it is
+  sent when the request carries it and left out when it does not. `param` is the
+  query parameter or the header name.
+* A request that ends up naming none of the dimensions behaves as on a route that
   declares nothing (a partner-bound credential is refused with 403).
 * An explicit `RequireScope` still works and wins, but may only name dimensions
   the manifest declares; one that names another is refused on every request and
   logged at ERROR when the route is registered.
-* Validation: `from` must be `path`; `name`, `param` and `collection` are
-  required and names and params are unique; `label` is optional.
+* Validation: `from` must be `path`, `query` or `header`; `name`, `param` and
+  `collection` are required; names are unique, and so is each `param` within its
+  `from` (header names compared without regard to letter case); a `path` param is
+  a bare parameter name, a `header` param a valid header name, a `query` param
+  has no whitespace or reserved characters; `label` is optional.
+* `from` and `param` are published and hashed with the rest of the catalog:
+  moving a dimension from the path to a header is a change the access manager
+  receives.
 
 #### Confining related collections (`covers`)
 
@@ -654,6 +672,51 @@ scope:
 * The order of the entries is content, like the order of the dimensions.
 * A manifest without `covers` publishes the same body and hash as before.
 
+### Where a dimension is read
+
+Every dimension is read from one of five places, the same for an explicit
+`RequireScope` and for the manifest:
+
+| Source | `from:` | Key (`param` / `field`) | Several values | Catalog | `scope.routes` |
+|---|---|---|---|---|---|
+| `FromPath` | `path` | path parameter, without `:` | never — one segment is one value | yes | no (derived from the path) |
+| `FromQuery` | `query` | query parameter | yes | yes | yes |
+| `FromHeader` | `header` | header name, any letter case | yes | yes | yes |
+| `FromBody` | `body` | path of keys in the JSON body | one per array element | no | yes |
+| `FromForm` | `form` | urlencoded form field | yes | no | yes |
+
+**Several values.** A query parameter, header or form field repeated, or a value
+listing several separated by `,`, names every one of them: `?accountId=a&accountId=b`,
+`?accountId=a,b` and `?accountId=a, b` all name `a` and `b`; so do two
+`X-Account-Id` header lines, or one `X-Account-Id: a, b`. Spaces around an element
+are trimmed and a value named twice is asked once. **Each value is its own
+question and every one must be allowed**; when several dimensions name several
+values, every combination is asked. An empty value or empty element (`?accountId=`,
+`?accountId=a,,b`, `a,`) is refused with **400** naming the parameter. At most 100
+distinct sets per request; more is refused with 400. A path segment is never
+split: `/organizations/a,b` is the single value `a,b`.
+
+**Optional.** A route dimension declared optional (`optional: true` under
+`scope.routes`, `Dim(...).Optional()` in code) may be left out: when the request
+does not carry it — a query parameter, header or form field absent, a body key on
+its path absent or `null` — the question is asked **without that dimension**. A
+value that is there must still be a non-empty string, or the request is refused
+with 400 naming it. A dimension not declared optional keeps refusing absence:
+403 for the path, query and headers, 400 for the body and the form. A catalog
+dimension read from the query or a header is always optional, as described above.
+
+**One dimension, several places.** A dimension may be read from more than one
+place on the same request — the path and the query, a header and the body. Every
+place that carries it must name **the same set of values** (in any order). When
+they disagree the request is refused with **400 naming both places**, with no
+authorization call and no handler call: the handler may act on either value, and
+no single question checks both. A place that does not carry the value is not a
+disagreement. For the body, every body value must be one the other place names,
+and every value the other place names must appear in the body; a body element
+that leaves an optional field out is asked with the other place's value. Reading
+one dimension twice from the same place (the same header in two spellings, say)
+is a misdeclaration and refuses every request on the route.
+
 ### Reading dimensions from the request body
 
 Some routes carry the instance they address in the JSON body, not the path — for
@@ -670,6 +733,7 @@ scope:
       dimensions:
         - { name: organizationId, from: body, field: organizationId }
         - { name: ledgerId,       from: body, field: "items[].ledgerId" }
+        - { name: portfolioId,    from: query, field: portfolioId, optional: true }
 ```
 
 * `field` is a path of object keys separated by `.`; `key[]` is an array whose
@@ -683,8 +747,12 @@ scope:
   (`debits[].ledgerId` and `credits[].ledgerId`), but each question must carry
   every dimension the route reads from the body. At most 100 distinct sets per
   request.
-* The route still derives the dimensions its path carries; one dimension cannot
-  come from both.
+* The route still derives the dimensions its path carries. A dimension it also
+  reads from the body must name the same values in both (see above).
+* An optional body field may be absent or `null`; when the array an optional
+  field sits in is absent or `null` and every field below it is optional, those
+  fields are left out together. A present array must still be a non-empty array.
+  With every body field optional, an empty body names none of them.
 * The body is read **only for a partner-bound credential**. Every other caller is
   decided as before: one authorization call carrying only the dimensions read
   from the path, headers or query, and the body left to the handler.
@@ -694,15 +762,47 @@ scope:
   authorization call and no handler call. The handler reads the body untouched.
 * All the questions of one request share one timeout (`AUTH_TIMEOUT`), the
   token is verified once, and the first denial ends the request.
-* Validation at `WireScope`: `from` must be `body`, `field` is required, `name`
-  must be a catalog dimension, routes are unique by method and path, and the
-  fields must fit together; any error fails the boot.
+* Validation at `WireScope`: `from` must be `body`, `form`, `query` or `header`,
+  `field` is required and valid for its `from`, `name` must be a catalog
+  dimension, routes are unique by method and path, a route reads its body as
+  JSON or as a form but not both, and the fields must fit together; any error
+  fails the boot.
 * `scope.routes` is read by this library only: it is never published and is not
-  part of `CanonicalHash`, so adding it changes neither.
+  part of `CanonicalHash`, so adding it — `optional` and every `from` included —
+  changes neither.
 * Without a manifest, `RequireScope(product, authMiddleware.Dim("ledgerId", authMiddleware.FromBody).At("items[].ledgerId"))`
   declares the same on one route — a body field is one more source of the same
   `Dim`, next to `FromPath`, `FromHeader` and `FromQuery`. `ScopeFromContext(...).Sets` lists every set
   that was authorized; `Attributes` keeps the identifiers all sets share.
+
+### Reading dimensions from a form body
+
+A route that receives an `application/x-www-form-urlencoded` body declares its
+fields with `from: form`, the field name as `field`:
+
+```yaml
+  routes:
+    - method: POST
+      path: /v1/organizations/:organization_id/payments
+      dimensions:
+        - { name: ledgerId,  from: form, field: ledgerId }
+        - { name: accountId, from: form, field: accountId, optional: true }
+```
+
+* Only a **urlencoded** body is read, parsed by the standard library parser. For
+  a partner-bound credential, a body of any other type — `multipart/form-data`
+  above all — or one the parser refuses is answered **400 naming the field**,
+  whether or not the dimension is optional: it may carry the field where the
+  scope cannot see it. An empty body names no field.
+* The form follows the JSON body's rules: it is read only for a partner-bound
+  credential; an absent field is refused with 400 unless optional; a present but
+  empty value always is; a field may list several values; and a field naming a
+  dimension that the path, query or a header also names must agree with it.
+  Note that a handler reading a form value through a helper that also looks at
+  the query string may see the query's value: declare the dimension from both
+  places and a disagreement is refused.
+* A route reads its body either as JSON (`from: body`) or as a form
+  (`from: form`), never both. The catalog reads no body.
 
 **Publication.** The scope section is published to the access manager whenever
 the product's auth is on, independently of the permission declaration switch.
