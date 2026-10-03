@@ -46,9 +46,10 @@ const (
 // "X-Organization-Id"). Collapsing them would force every route to rename its
 // own parameters to match an external catalog.
 type Dimension struct {
-	name   string
-	source Source
-	key    string
+	name     string
+	source   Source
+	key      string
+	optional bool
 }
 
 // Dim declares a dimension read from source under the SAME key as its name. Use
@@ -64,6 +65,19 @@ func (d Dimension) At(key string) Dimension {
 
 	return d
 }
+
+// Optional returns a copy of the dimension that a request may leave out. A
+// request that does not carry it — a body field absent or null — asks its
+// question without it; a value that is there must still be a non-empty string.
+// It never mutates the receiver.
+func (d Dimension) Optional() Dimension {
+	d.optional = true
+
+	return d
+}
+
+// IsOptional reports whether a request may leave the dimension out.
+func (d Dimension) IsOptional() bool { return d.optional }
 
 // Name is the attribute key sent to the authorization service.
 func (d Dimension) Name() string { return d.name }
@@ -110,11 +124,6 @@ type ScopeDeclaration struct {
 // mismatch would WIDEN access instead of failing. Authorize denies it instead.
 func RequireScope(product string, dims ...Dimension) ScopeDeclaration {
 	return ScopeDeclaration{product: product, dims: dims}
-}
-
-// declared reports whether the declaration carries at least one dimension.
-func (s ScopeDeclaration) declared() bool {
-	return len(s.dims) > 0
 }
 
 // RequestScope is what Authorize resolved for the request in flight: the partner
@@ -174,6 +183,10 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (map[string]string, string
 
 		value := dim.resolve(c)
 		if value == "" {
+			if dim.optional {
+				continue
+			}
+
 			return nil, dim.name
 		}
 

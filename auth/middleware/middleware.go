@@ -223,9 +223,11 @@ type authzParams struct {
 	// attributes are the instance identifiers the route declared and this request
 	// carried. Nil for a route that declares none, which is every route today.
 	attributes map[string]string
-	// declared reports whether the route declared any dimension at all. It is the
-	// distinction the partner guard turns on: a partner-bound credential reaching
-	// a route that cannot say WHERE it is pointing is unscopeable, not unscoped.
+	// declared reports whether the question names any dimension at all. It is
+	// the distinction the partner guard turns on: a partner-bound credential on a
+	// request that cannot say WHERE it is pointing — a route that declares
+	// nothing, or optional dimensions the request left out — is unscopeable, not
+	// unscoped.
 	declared bool
 }
 
@@ -683,7 +685,6 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			action:      action,
 			accessToken: accessToken,
 			clientIP:    clientIP,
-			declared:    scope.declared(),
 		}, scope, attributes)
 		if refusal != nil {
 			span.End()
@@ -764,6 +765,10 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 
 	for _, question := range asked {
 		params.attributes = question
+		// A question that names no dimension cannot be scoped, whatever the
+		// route declares: an optional dimension the request left out is not a
+		// value the partner's scope can be matched against.
+		params.declared = len(question) > 0
 
 		resolution, principal = auth.decide(ctx, span, params, caller)
 

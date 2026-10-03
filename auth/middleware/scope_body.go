@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,13 @@ import (
 // partner, a body that is not JSON, a field that is absent, empty or not a
 // string, and an array that is empty or not an array are refused with 400 naming
 // the field, before any authorization call and without calling the handler.
+//
+// A dimension declared Optional may be left out: when a key on its path is
+// absent or null, the question is asked without it — and without every other
+// optional field below an absent array. A value that is there is still refused
+// unless it is a non-empty string, and an array that is there must still be a
+// non-empty array. A question that ends up naming no dimension at all is refused
+// for a partner, as a route that declares none is.
 //
 // It is appended after the other sources so their values do not move.
 const FromBody Source = FromQuery + 1
@@ -76,6 +84,9 @@ type bodyGroup struct {
 type bodyPlan struct {
 	groups []bodyGroup
 	fields []string
+	// allOptional is set when every body dimension is optional, so a request
+	// with no body at all names none of them instead of being malformed.
+	allOptional bool
 }
 
 // parseBodyField parses a field path, or describes what is wrong with it.
@@ -180,9 +191,10 @@ func compileBodyPlan(dims []Dimension, constants map[string]struct{}) (*bodyPlan
 		return nil, ""
 	}
 
-	plan := &bodyPlan{fields: make([]string, 0, len(fields))}
+	plan := &bodyPlan{fields: make([]string, 0, len(fields)), allOptional: true}
 	for _, f := range fields {
 		plan.fields = append(plan.fields, f.dim.key)
+		plan.allOptional = plan.allOptional && f.dim.optional
 	}
 
 	for _, leaf := range leafPrefixes(fields) {
@@ -282,8 +294,10 @@ func joinLocation(base, key string) string {
 // lookupKey reads key from obj the way a struct decoder does: an exact key, or
 // else one differing only in letter case. Two keys that both match are refused,
 // because which of them a handler reads depends on its decoder, and the scope
-// must check the value the handler acts on.
-func lookupKey(obj map[string]any, key, location string) (any, *errBodyScope) {
+// must check the value the handler acts on. A key that is absent, or whose value
+// is JSON null, is reported as not named — a struct decoder leaves the field at
+// its zero value for both — and the caller decides whether that is an error.
+func lookupKey(obj map[string]any, key, location string) (any, bool, *errBodyScope) {
 	var (
 		value any
 		found int
@@ -298,12 +312,24 @@ func lookupKey(obj map[string]any, key, location string) (any, *errBodyScope) {
 
 	switch found {
 	case 0:
-		return nil, bodyFieldError(location, "is missing from the request body")
+		return nil, false, nil
 	case 1:
-		return value, nil
+		return value, value != nil, nil
 	default:
-		return nil, bodyFieldError(location, "is given more than once, in different letter case")
+		return nil, false, bodyFieldError(location, "is given more than once, in different letter case")
 	}
+}
+
+// notNamed is the error for a field the body does not name. A null value is
+// reported as what it is, so the caller fixes the value and not the key.
+func notNamed(obj map[string]any, key, location string) *errBodyScope {
+	for k, v := range obj {
+		if strings.EqualFold(k, key) && v == nil {
+			return bodyFieldError(location, "must not be null")
+		}
+	}
+
+	return bodyFieldError(location, "is missing from the request body")
 }
 
 // questionSet accumulates the distinct questions of a request in order.
@@ -349,10 +375,19 @@ func (q *questionSet) add(values map[string]string) *errBodyScope {
 // questions reads the body dimensions of the request and returns every distinct
 // set of identifiers to ask about, each carrying the constants (the dimensions
 // read from the path or headers) too.
+//
+// A request with no body names nothing; when every body dimension is optional
+// that is a body without them, not a malformed one.
 func (p *bodyPlan) questions(body []byte, constants map[string]string) ([]map[string]string, *errBodyScope) {
 	var root any
-	if err := json.Unmarshal(body, &root); err != nil {
-		return nil, bodyFieldError(p.fields[0], "cannot be read: the request body is not valid JSON")
+
+	switch {
+	case p.allOptional && len(bytes.TrimSpace(body)) == 0:
+		root = map[string]any{}
+	default:
+		if err := json.Unmarshal(body, &root); err != nil {
+			return nil, bodyFieldError(p.fields[0], "cannot be read: the request body is not valid JSON")
+		}
 	}
 
 	set := &questionSet{plan: p, constants: constants, seen: make(map[string]struct{})}
@@ -389,9 +424,20 @@ func (w groupWalk) walk(node any, i int, location string, chain []any, locations
 		return bodyFieldError(at, "cannot be read: its parent is not a JSON object")
 	}
 
-	child, err := lookupKey(obj, seg.key, at)
+	child, named, err := lookupKey(obj, seg.key, at)
 	if err != nil {
 		return err
+	}
+
+	if !named {
+		// The body names nothing below this key. That is a question without
+		// the fields below it when every one of them is optional; the fields
+		// of the elements already crossed are still read.
+		if w.optionalFrom(len(chain)) {
+			return w.emit(chain, locations)
+		}
+
+		return notNamed(obj, seg.key, at)
 	}
 
 	if !seg.array {
@@ -414,43 +460,81 @@ func (w groupWalk) walk(node any, i int, location string, chain []any, locations
 	return nil
 }
 
-// emit reads every field of one element and adds the question they make.
+// optionalFrom reports whether every field of the group read inside an element
+// at depth or deeper is optional — the fields an absent array at that depth
+// leaves without a value.
+func (w groupWalk) optionalFrom(depth int) bool {
+	for _, f := range w.group.fields {
+		if f.depth >= depth && !f.dim.optional {
+			return false
+		}
+	}
+
+	return true
+}
+
+// emit reads every field of one element and adds the question they make. chain
+// stops short of the group's innermost element when an optional array was
+// absent; the fields inside the missing elements are then left out.
 func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 	values := make(map[string]string, len(w.group.fields))
 
 	for _, f := range w.group.fields {
-		node := chain[f.depth]
-		location := locations[f.depth]
-
-		for _, seg := range f.segments[f.prefixLen:] {
-			location = joinLocation(location, seg.key)
-
-			obj, ok := node.(map[string]any)
-			if !ok {
-				return bodyFieldError(location, "cannot be read: its parent is not a JSON object")
-			}
-
-			child, err := lookupKey(obj, seg.key, location)
-			if err != nil {
-				return err
-			}
-
-			node = child
+		if f.depth >= len(chain) {
+			continue
 		}
 
-		value, ok := node.(string)
-		if !ok {
-			return bodyFieldError(location, "must be a JSON string")
+		value, named, err := readBodyField(f, chain[f.depth], locations[f.depth])
+		if err != nil {
+			return err
 		}
 
-		if value == "" {
-			return bodyFieldError(location, "must not be empty")
+		if named {
+			values[f.dim.name] = value
 		}
-
-		values[f.dim.name] = value
 	}
 
 	return w.set.add(values)
+}
+
+// readBodyField reads one field relative to its element. The second return is
+// false when the body does not name an optional field: a key on its path is
+// absent or null. Anything else that is not a non-empty string is refused.
+func readBodyField(f bodyField, node any, location string) (string, bool, *errBodyScope) {
+	for _, seg := range f.segments[f.prefixLen:] {
+		location = joinLocation(location, seg.key)
+
+		obj, ok := node.(map[string]any)
+		if !ok {
+			return "", false, bodyFieldError(location, "cannot be read: its parent is not a JSON object")
+		}
+
+		child, named, err := lookupKey(obj, seg.key, location)
+		if err != nil {
+			return "", false, err
+		}
+
+		if !named {
+			if f.dim.optional {
+				return "", false, nil
+			}
+
+			return "", false, notNamed(obj, seg.key, location)
+		}
+
+		node = child
+	}
+
+	value, ok := node.(string)
+	if !ok {
+		return "", false, bodyFieldError(location, "must be a JSON string")
+	}
+
+	if value == "" {
+		return "", false, bodyFieldError(location, "must not be empty")
+	}
+
+	return value, true, nil
 }
 
 // routeBodyScope is one route's dimensions — those its path carries and those

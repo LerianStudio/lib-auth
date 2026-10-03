@@ -106,6 +106,11 @@ type DeclarationRouteDimension struct {
 	// a key followed by "[]" being an array whose every element is read
 	// ("id", "items[].id"). See middleware.FromBody.
 	Field string `json:"field,omitempty" yaml:"field,omitempty"`
+	// Optional means a request may leave the value out: when the body does not
+	// name it (a key on its path is absent or null) the question is asked
+	// without the dimension. A value that is there must still be a non-empty
+	// string. See middleware.Dimension.Optional.
+	Optional bool `json:"optional,omitempty" yaml:"optional,omitempty"`
 }
 
 // DeclarationDimension declares ONE instance dimension of the product.

@@ -369,7 +369,12 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 	for _, r := range m.Scope.Routes {
 		routeDims := make([]middleware.Dimension, 0, len(r.Dimensions))
 		for _, d := range r.Dimensions {
-			routeDims = append(routeDims, middleware.Dim(d.Name, routeDimensionSources[d.From]).At(d.Field))
+			dim := middleware.Dim(d.Name, routeDimensionSources[d.From]).At(d.Field)
+			if d.Optional {
+				dim = dim.Optional()
+			}
+
+			routeDims = append(routeDims, dim)
 		}
 
 		if err := auth.SetManifestRouteScope(m.Service, r.Method, r.Path, routeDims...); err != nil {
