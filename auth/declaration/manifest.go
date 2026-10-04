@@ -184,6 +184,13 @@ type DeclarationDimension struct {
 	// dimension's values. It is read by this library only: it is never
 	// published and is not part of CanonicalHash.
 	Resolve string `json:"resolve,omitempty" yaml:"resolve,omitempty"`
+	// Parent optionally names the dimension whose instances hold this one's
+	// (e.g. a ledgerId dimension's parent is "organizationId"), declaring the
+	// hierarchy of the catalog. It names another declared dimension, and
+	// following parents never comes back to a dimension. A dimension without
+	// one is a root. It is the LAST member and omitted when absent, so a manifest
+	// that declares none publishes and hashes byte-for-byte as before.
+	Parent string `json:"parent,omitempty" yaml:"parent,omitempty"`
 }
 
 // DeclarationPermission is a single declared permission. The action is a free-form
@@ -439,7 +446,8 @@ func resolveProblem(prefix, resolve string) string {
 // a PUT whose hash it already published, so a field left out of the hash would
 // make a covers-only change never reach the service; and because Covers is
 // omitempty, a manifest that declares none serializes to the same bytes, and
-// hashes to the same value, as before the field existed.
+// hashes to the same value, as before the field existed. A dimension's Parent
+// is hashed the same way, as the dimension's last member.
 func (m *DeclarationManifest) CanonicalHash() (string, error) {
 	published := m.serverProjection()
 
@@ -704,7 +712,83 @@ func (m *DeclarationManifest) validateScope() []string {
 		}
 	}
 
+	violations = append(violations, m.validateParents(seenNames)...)
+
 	return append(violations, m.validateScopeRoutes(seenNames)...)
+}
+
+// validateParents validates the dimensions' parents: each names a declared
+// dimension other than itself, and following parents from any dimension ends at
+// a root. A cycle is reported once, at its first dimension in catalog order.
+func (m *DeclarationManifest) validateParents(declared map[string]struct{}) []string {
+	var violations []string
+
+	parents := make(map[string]string, len(m.Scope.Dimensions))
+	for _, d := range m.Scope.Dimensions {
+		if _, seen := parents[d.Name]; !seen {
+			parents[d.Name] = d.Parent
+		}
+	}
+
+	inCycle := make(map[string]struct{})
+
+	for i, d := range m.Scope.Dimensions {
+		if d.Parent == "" {
+			continue
+		}
+
+		prefix := fmt.Sprintf("scope.dimensions[%d]", i)
+
+		if d.Parent == d.Name {
+			violations = append(violations, fmt.Sprintf("%s: parent %q must not be the dimension itself", prefix, d.Parent))
+
+			continue
+		}
+
+		if _, ok := declared[d.Parent]; !ok {
+			violations = append(violations, fmt.Sprintf("%s: parent %q is not a declared dimension", prefix, d.Parent))
+
+			continue
+		}
+
+		if _, reported := inCycle[d.Name]; reported {
+			continue
+		}
+
+		if path := parentCycle(d.Name, parents); path != nil {
+			for _, name := range path {
+				inCycle[name] = struct{}{}
+			}
+
+			violations = append(violations, fmt.Sprintf("%s: parent %q makes a cycle: %s", prefix, d.Parent, strings.Join(path, " -> ")))
+		}
+	}
+
+	return violations
+}
+
+// parentCycle follows parents from name and returns the path back to name when
+// it comes back to it, or nil when it ends at a root, an undeclared parent, or
+// a cycle name is not part of.
+func parentCycle(name string, parents map[string]string) []string {
+	path := []string{name}
+	visited := map[string]struct{}{name: {}}
+
+	for current := parents[name]; current != ""; current = parents[current] {
+		path = append(path, current)
+
+		if current == name {
+			return path
+		}
+
+		if _, again := visited[current]; again {
+			return nil
+		}
+
+		visited[current] = struct{}{}
+	}
+
+	return nil
 }
 
 // validateCovers validates one dimension's covers: every entry names a

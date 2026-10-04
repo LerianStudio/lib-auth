@@ -673,6 +673,32 @@ scope:
 * The order of the entries is content, like the order of the dimensions.
 * A manifest without `covers` publishes the same body and hash as before.
 
+#### Declaring the hierarchy (`parent`)
+
+The order of the dimensions does not say which one holds which. Name, on a
+dimension, the dimension whose instances hold its own:
+
+```yaml
+scope:
+  dimensions:
+    - { name: organizationId, from: path,   param: organization_id, required: true, collection: organizations }
+    - { name: ledgerId,       from: path,   param: ledger_id,       collection: ledgers,    parent: organizationId }
+    - { name: portfolioId,    from: header, param: X-Portfolio-Id,  collection: portfolios, parent: ledgerId }
+    - { name: accountId,      from: path,   param: account_id,      collection: accounts,   parent: ledgerId }
+```
+
+* `parent` is optional. A dimension without it is a root.
+* It must name another declared dimension, and following parents from any
+  dimension must end at a root: a dimension naming itself, an undeclared
+  dimension, or a cycle fails validation.
+* A dimension's depth is 1 for a root and its parent's depth plus 1 otherwise:
+  above, `organizationId` is 1, `ledgerId` 2, and `portfolioId` and `accountId`
+  are both 3 — siblings, neither narrower than the other.
+* It is published (also on a scope-only publication) as the dimension's last
+  member, after `covers` and `label`, and included in the manifest hash, so a
+  change to `parent` alone is republished. A manifest without `parent`
+  publishes the same body and hash as before.
+
 ### Where a dimension is read
 
 Every dimension is read from one of five places, the same for an explicit
