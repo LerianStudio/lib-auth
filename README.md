@@ -1019,6 +1019,55 @@ if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after r
 * `resolve` is read by this library only: it is never published and is not
   part of `CanonicalHash`.
 
+#### Allowing a value when any of its resolved values is allowed (`match`)
+
+By default, every value a request value resolves to must be allowed
+(`match: all`). A dimension that declares `resolve` may instead declare
+`match: any`: the request value is allowed when **at least one** of the values
+it resolves to is allowed. A holder with accounts in two ledgers, for example,
+is then visible to a partner scoped on either ledger:
+
+```yaml
+  routes:
+    - method: GET
+      path: /v1/organizations/:organization_id/holders/:holder_id
+      dimensions:
+        - { name: ledgerId, from: path, field: holder_id, resolve: holderLedgers, match: any }
+```
+
+In Go, `Dim(...).Resolve(name).MatchAny()`.
+
+* **Each request value is judged on its own.** The values one request value
+  resolves to are alternatives: one question per value, asked in the order the
+  resolver returned them, stopping at the first allowed. Two request values
+  (two body elements, two query values) are two separate groups, and each must
+  have a value allowed.
+* **Everything else is unchanged.** Every other question of the request — the
+  other dimensions, and the values of a `match: all` dimension — must still be
+  allowed. Next to a dimension the request names several values of, each of
+  those values must be allowed together with at least one resolved value.
+* **Refusals are the same.** A request value that resolves to no value, and one
+  whose every resolved value is denied, both answer **403** with the same
+  message as with `match: all`. A refusal that is not a denial of the scope —
+  the credential rejected, the authorization service unavailable — ends the
+  request at once, whatever a later value would answer.
+* **Limits and caching are the same.** The first question without the resolved
+  values (and its `pending` member), the cap of 100 questions — counting every
+  value each request value resolves to, even one another request value also
+  resolves to — and the decision cache apply as with `match: all`. A question
+  two groups share is asked once.
+* **`ScopeFromContext` reports what was allowed.** `Sets` holds the questions
+  that were allowed; a resolved value denied or never asked is not among them.
+* **Named directly elsewhere too.** When another carrier names the same
+  dimension (the path's `:ledger_id`, a body field), the values it names are
+  what is asked, and each request value must resolve to at least one of them;
+  otherwise the two disagree and the request is answered **400**, as any two
+  carriers that disagree are.
+* `match` must be `all` or `any`, and only on a dimension that declares
+  `resolve`; anything else fails validation. `MatchAny` on a dimension without a
+  resolver is a misdeclared route. Like `resolve`, `match` is read by this
+  library only: it is never published and is not part of `CanonicalHash`.
+
 ### Filtering a list by the partner's allowed values (`filter`)
 
 A route that lists instances — `GET .../accounts` — usually does not name the

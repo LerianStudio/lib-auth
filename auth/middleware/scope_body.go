@@ -462,11 +462,18 @@ func notNamed(obj map[string]any, key, location string) *errBodyScope {
 // question carries the dimensions the body names for it and the values the
 // other carriers name: a dimension those carriers name several values of asks
 // one question per value.
+//
+// The questions are decided in groups: a group is allowed when one of its
+// questions is. A question stands alone in its group, except those carrying a
+// value resolved with MatchAny, which share a group with the questions
+// carrying the other values the same request value resolved to.
 type questionSet struct {
 	plan      *bodyPlan
 	readings  requestValues
-	seen      map[string]struct{}
+	seen      map[string]int
 	questions []map[string]string
+	// groups are the indexes into questions of each group, in the order made.
+	groups [][]int
 	// carried records, per dimension the other carriers name, the values the
 	// questions carry, so a value they name and the body never does is caught.
 	carried map[string]map[string]struct{}
@@ -478,7 +485,7 @@ type questionSet struct {
 
 func newQuestionSet(plan *bodyPlan, readings requestValues) *questionSet {
 	return &questionSet{
-		plan: plan, readings: readings, seen: make(map[string]struct{}), carried: make(map[string]map[string]struct{}),
+		plan: plan, readings: readings, seen: make(map[string]int), carried: make(map[string]map[string]struct{}),
 		resolvedAt: readings.resolvedAt,
 	}
 }
@@ -486,46 +493,51 @@ func newQuestionSet(plan *bodyPlan, readings requestValues) *questionSet {
 // add adds the questions one set of body values makes. locations name where in
 // the body each of those values was read.
 func (q *questionSet) add(values, locations map[string]string) *errBodyScope {
-	for name, value := range values {
-		if named, ok := q.readings.values[name]; ok && !containsValue(named, value) {
-			return divergence(name, q.readings.where[name], locations[name])
-		}
+	return q.addGroup([]map[string]string{values}, locations)
+}
+
+// addGroup adds the questions one group of alternative sets of body values
+// makes: the alternatives name the same dimensions, and the request is allowed
+// on one of them. An alternative naming a value another carrier does not name
+// for the same dimension is dropped; when every one is, the two disagree.
+func (q *questionSet) addGroup(alternatives []map[string]string, locations map[string]string) *errBodyScope {
+	alternatives, problem := q.agreeing(alternatives, locations)
+	if problem != nil {
+		return problem
 	}
 
-	combinations := []map[string]string{values}
+	// Each requirement is a group: one of its questions must be allowed.
+	requirements := [][]map[string]string{alternatives}
+	count := len(alternatives)
 
 	for _, name := range q.readings.names {
-		if _, inBody := values[name]; inBody {
+		if _, inBody := alternatives[0][name]; inBody {
 			continue
 		}
 
-		named := q.readings.values[name]
-
 		// The values of one carrier are distinct, so every combination is: the
 		// count is exact, and refusing past the cap here never builds them.
-		if len(combinations)*len(named) > maxBodyScopeQuestions {
+		perRequirement := q.valueCount(name)
+		if count*perRequirement > maxBodyScopeQuestions {
 			return q.tooMany()
 		}
 
-		next := make([]map[string]string, 0, len(combinations)*len(named))
+		count *= perRequirement
 
-		for _, combination := range combinations {
-			for _, value := range named {
-				question := make(map[string]string, len(combination)+1)
-				for k, v := range combination {
-					question[k] = v
-				}
+		items := q.items(name)
+		next := make([][]map[string]string, 0, len(requirements)*len(items))
 
-				question[name] = value
-				next = append(next, question)
+		for _, requirement := range requirements {
+			for _, item := range items {
+				next = append(next, withEach(requirement, name, item))
 			}
 		}
 
-		combinations = next
+		requirements = next
 	}
 
-	for _, question := range combinations {
-		if err := q.addOne(question); err != nil {
+	for _, requirement := range requirements {
+		if err := q.addRequirement(requirement); err != nil {
 			return err
 		}
 	}
@@ -533,17 +545,104 @@ func (q *questionSet) add(values, locations map[string]string) *errBodyScope {
 	return nil
 }
 
-func (q *questionSet) addOne(question map[string]string) *errBodyScope {
+// valueCount is the number of values the other carriers name for name, every
+// value of every request value resolved with MatchAny counted.
+func (q *questionSet) valueCount(name string) int {
+	items, matchAny := q.readings.anyOf[name]
+	if !matchAny {
+		return len(q.readings.values[name])
+	}
+
+	count := 0
+	for _, item := range items {
+		count += len(item)
+	}
+
+	return count
+}
+
+// items are the values the other carriers name for name, as the requirements
+// they make: one per value of a dimension matching all; one per request value
+// of a dimension resolved with MatchAny, its resolved values the alternatives.
+func (q *questionSet) items(name string) [][]string {
+	if items, matchAny := q.readings.anyOf[name]; matchAny {
+		return items
+	}
+
+	items := make([][]string, 0, len(q.readings.values[name]))
+	for _, value := range q.readings.values[name] {
+		items = append(items, []string{value})
+	}
+
+	return items
+}
+
+// agreeing returns the alternatives whose every value another carrier naming
+// the same dimension names too, or the disagreement when there is none.
+func (q *questionSet) agreeing(alternatives []map[string]string, locations map[string]string) ([]map[string]string, *errBodyScope) {
+	var (
+		kept    []map[string]string
+		problem *errBodyScope
+	)
+
+	for _, values := range alternatives {
+		diverges := false
+
+		for _, name := range sortedKeys(values) {
+			if named, ok := q.readings.values[name]; ok && !containsValue(named, values[name]) {
+				if problem == nil {
+					problem = divergence(name, q.readings.where[name], locations[name])
+				}
+
+				diverges = true
+
+				break
+			}
+		}
+
+		if !diverges {
+			kept = append(kept, values)
+		}
+	}
+
+	if len(kept) == 0 {
+		return nil, problem
+	}
+
+	return kept, nil
+}
+
+// addRequirement adds the questions of one group and records the group. A
+// question several groups share is added once, and decided once.
+func (q *questionSet) addRequirement(alternatives []map[string]string) *errBodyScope {
+	group := make([]int, 0, len(alternatives))
+
+	for _, question := range alternatives {
+		index, err := q.addOne(question)
+		if err != nil {
+			return err
+		}
+
+		group = append(group, index)
+	}
+
+	q.groups = append(q.groups, group)
+
+	return nil
+}
+
+// addOne adds a question, once, and returns its index.
+func (q *questionSet) addOne(question map[string]string) (int, *errBodyScope) {
 	key := attributesCacheKey(question)
-	if _, dup := q.seen[key]; dup {
-		return nil
+	if index, dup := q.seen[key]; dup {
+		return index, nil
 	}
 
 	if len(q.questions) == maxBodyScopeQuestions {
-		return q.tooMany()
+		return 0, q.tooMany()
 	}
 
-	q.seen[key] = struct{}{}
+	q.seen[key] = len(q.questions)
 	q.questions = append(q.questions, question)
 	q.located = append(q.located, q.resolvedAt)
 
@@ -559,7 +658,7 @@ func (q *questionSet) addOne(question map[string]string) *errBodyScope {
 		q.carried[name][value] = struct{}{}
 	}
 
-	return nil
+	return len(q.questions) - 1, nil
 }
 
 // complete checks that every value another carrier names for a dimension the
@@ -576,6 +675,18 @@ func (q *questionSet) complete() *errBodyScope {
 			continue
 		}
 
+		// A request value resolved with MatchAny agrees with the body when the
+		// body names one of the values it resolved to.
+		if items, matchAny := q.readings.anyOf[name]; matchAny {
+			for _, item := range items {
+				if !q.carriesOne(name, item) {
+					return divergence(name, q.readings.where[name], field)
+				}
+			}
+
+			continue
+		}
+
 		for _, value := range q.readings.values[name] {
 			if _, ok := q.carried[name][value]; !ok {
 				return divergence(name, q.readings.where[name], field)
@@ -584,6 +695,31 @@ func (q *questionSet) complete() *errBodyScope {
 	}
 
 	return nil
+}
+
+// scopeQuestions are the questions a request makes: the sets of identifiers
+// to ask about, where the resolved value each carries was read ("" for none),
+// and the groups they are decided in — each the indexes of sets of which one
+// must be allowed.
+type scopeQuestions struct {
+	sets    []map[string]string
+	located []string
+	groups  [][]int
+}
+
+func (q *questionSet) asked() scopeQuestions {
+	return scopeQuestions{sets: q.questions, located: q.located, groups: q.groups}
+}
+
+// carriesOne reports whether some question carries one of values for name.
+func (q *questionSet) carriesOne(name string, values []string) bool {
+	for _, value := range values {
+		if _, ok := q.carried[name][value]; ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (q *questionSet) tooMany() *errBodyScope {
@@ -620,7 +756,7 @@ func containsValue(values []string, value string) bool {
 //
 // A request with no body names nothing; when every body dimension is optional
 // that is a body without them, not a malformed one.
-func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolution) ([]map[string]string, []string, *errBodyScope) {
+func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolution) (scopeQuestions, *errBodyScope) {
 	var root any
 
 	switch {
@@ -628,7 +764,7 @@ func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolut
 		root = map[string]any{}
 	default:
 		if err := json.Unmarshal(body, &root); err != nil {
-			return nil, nil, bodyFieldError(p.fields[0], "cannot be read: the request body is not valid JSON")
+			return scopeQuestions{}, bodyFieldError(p.fields[0], "cannot be read: the request body is not valid JSON")
 		}
 	}
 
@@ -642,21 +778,21 @@ func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolut
 	for _, group := range p.groups {
 		w := groupWalk{group: group, set: set, raw: raw}
 		if err := w.walk(root, 0, "", []any{root}, []string{""}); err != nil {
-			return nil, nil, err
+			return scopeQuestions{}, err
 		}
 	}
 
 	if raw != nil {
 		if err := r.resolveBody(*raw, set, readings); err != nil {
-			return nil, nil, err
+			return scopeQuestions{}, err
 		}
 	}
 
 	if err := set.complete(); err != nil {
-		return nil, nil, err
+		return scopeQuestions{}, err
 	}
 
-	return set.questions, set.located, nil
+	return set.asked(), nil
 }
 
 type groupWalk struct {
@@ -791,6 +927,7 @@ func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 		values := make(map[string]string, len(chosen))
 		at := make(map[string]string, len(chosen))
 		resolvers := make(map[string]string)
+		matchAny := make(map[string]bool)
 
 		for _, r := range chosen {
 			values[r.field.dim.name] = r.value
@@ -798,11 +935,14 @@ func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 
 			if r.field.dim.resolver != "" {
 				resolvers[r.field.dim.name] = r.field.dim.resolver
+				matchAny[r.field.dim.name] = r.field.dim.matchAny
 			}
 		}
 
 		if w.raw != nil {
-			*w.raw = append(*w.raw, rawQuestion{values: values, at: at, resolvers: resolvers, siblings: siblings(chosen)})
+			*w.raw = append(*w.raw, rawQuestion{
+				values: values, at: at, resolvers: resolvers, siblings: siblings(chosen), matchAny: matchAny,
+			})
 
 			continue
 		}
@@ -1179,19 +1319,19 @@ func (auth *AuthClient) manifestRouteScope(product, key string) (uint64, []Dimen
 // Resolved dimensions are translated only when readBody is set — for a
 // partner-bound caller. Any other caller is asked without them, exactly as a
 // caller whose body is not read is asked without the body's dimensions.
-func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBody bool, r scopeResolution) ([]map[string]string, []string, *errBodyScope) {
+func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBody bool, r scopeResolution) (scopeQuestions, *errBodyScope) {
 	if readBody {
 		readings = readForm(c, s.dims, readings)
 	}
 
 	if readings.problem != nil {
-		return nil, nil, readings.problem
+		return scopeQuestions{}, readings.problem
 	}
 
 	if readBody && len(readings.pending) > 0 {
 		resolved, err := r.resolvePending(readings)
 		if err != nil {
-			return nil, nil, err
+			return scopeQuestions{}, err
 		}
 
 		readings = resolved
@@ -1199,15 +1339,15 @@ func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBod
 
 	if s.body == nil || !readBody {
 		if len(readings.names) == 0 {
-			return nil, nil, nil
+			return scopeQuestions{}, nil
 		}
 
 		set := newQuestionSet(nil, readings)
 		if err := set.add(map[string]string{}, nil); err != nil {
-			return nil, nil, err
+			return scopeQuestions{}, err
 		}
 
-		return set.questions, set.located, nil
+		return set.asked(), nil
 	}
 
 	return s.body.questions(c.Body(), readings, r)

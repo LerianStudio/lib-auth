@@ -347,6 +347,10 @@ func routeDimensions(r DeclarationScopeRoute) []middleware.Dimension {
 			dim = dim.Resolve(d.Resolve)
 		}
 
+		if d.Match == matchAny {
+			dim = dim.MatchAny()
+		}
+
 		dims = append(dims, dim)
 	}
 
@@ -397,6 +401,10 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 			dim := middleware.Dim(d.Name, catalogDimensionSources[d.From]).At(d.Param)
 			if d.Resolve != "" {
 				dim = dim.Resolve(d.Resolve)
+			}
+
+			if d.Match == matchAny {
+				dim = dim.MatchAny()
 			}
 
 			dims = append(dims, dim)

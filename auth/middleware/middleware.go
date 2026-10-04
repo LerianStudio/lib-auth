@@ -779,8 +779,10 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 
 // authorizeRequest decides one request: it derives the caller once, works out
 // the questions the request makes, and asks them in order under ONE deadline for
-// the whole request, stopping at the first that is not allowed. It returns the
-// last resolution and the questions asked, or the refusal.
+// the whole request, group by group, stopping at the first group none of whose
+// questions is allowed. A question stands alone in its group, except those
+// carrying a value resolved with MatchAny (see questionSet). It returns the last
+// resolution and the questions allowed, or the refusal.
 //
 // The body is read only for a partner-bound credential. The authorization
 // service consumes attributes only to decide for a partner; for every other
@@ -790,7 +792,8 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 //
 // The questions are asked one after another, not concurrently: they are few
 // (distinct sets, capped), the decision cache answers repeats without a call,
-// the first denial ends the request, and the single deadline bounds the total.
+// the first group denied ends the request, and the single deadline bounds the
+// total.
 func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, params authzParams, scope ScopeDeclaration, readings requestValues) (authzResolution, Principal, []map[string]string, error) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
@@ -827,66 +830,150 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 	// distinct set of identifiers the body names, and every one must be
 	// allowed. A body that cannot be read for them is the caller's to fix:
 	// refused before any call, naming the field, and never let through.
-	questions, located, badBody := scope.questions(c, readings, caller.partner != "", resolution)
+	asked, badBody := scope.questions(c, readings, caller.partner != "", resolution)
 	if badBody != nil {
 		return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, badBody.statusCode(), badBody.Error())
 	}
 
-	asked := questions
-	if len(asked) == 0 {
-		asked = []map[string]string{nil}
-		located = nil
+	named := len(asked.sets) > 0
+	if !named {
+		asked = scopeQuestions{sets: []map[string]string{nil}, groups: [][]int{{0}}}
 	}
 
-	var (
-		decision  authzResolution
-		principal Principal
-		allowed   allowedValues
-	)
+	d := groupDecider{auth: auth, ctx: ctx, c: c, span: span, params: params, scope: scope, caller: caller, asked: asked}
 
-	for i, question := range asked {
-		params.attributes = question
-
-		// On a route that filters, a partner's question that leaves a filtered
-		// dimension out asks for the values it may see instead of a refusal.
-		params.filter = nil
-		if caller.partner != "" {
-			params.filter = absentFilter(scope.filter, question)
-		}
-
-		// A question that names no dimension cannot be scoped, whatever the
-		// route declares: an optional dimension the request left out is not a
-		// value the partner's scope can be matched against. Unless it asks to
-		// filter: the list is then confined by the values the answer carries.
-		params.declared = len(question) > 0 || len(params.filter) > 0
-
-		decision, principal = auth.decide(ctx, span, params, caller)
-
-		resolvedAt := ""
-		if located != nil {
-			resolvedAt = located[i]
-		}
-
-		if refusal := auth.refusalOfResolved(c, decision, resolvedAt); refusal != nil {
+	for _, group := range asked.groups {
+		if refusal := d.decideGroup(group); refusal != nil {
 			return authzResolution{}, Principal{}, nil, refusal
 		}
-
-		// With no dimension named, the allowed values are the only thing that
-		// confines the request: a grant without them for any filtered
-		// dimension is refused, never served unconfined. A filtered dimension
-		// the answer leaves out is one the partner is not scoped on.
-		if len(question) == 0 && len(params.filter) > 0 && !confinesAny(params.filter, decision.allowed) {
-			logErrorf(ctx, auth.Logger, "Partner-bound credential granted a filtered request naming no dimension without allowed values; denying (fail closed)")
-
-			return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, http.StatusForbidden, http.StatusText(http.StatusForbidden))
-		}
-
-		allowed.add(params.filter, decision.allowed)
 	}
 
-	decision.allowed = allowed.values
+	d.decision.allowed = d.allowed.values
 
-	return decision, principal, questions, nil
+	var authorized []map[string]string
+	if named {
+		authorized = d.authorized
+	}
+
+	return d.decision, d.principal, authorized, nil
+}
+
+// groupDecider decides the groups of one request's questions, each question
+// at most once, recording what the allowed ones were authorized as.
+type groupDecider struct {
+	auth   *AuthClient
+	ctx    context.Context
+	c      fiber.Ctx
+	span   trace.Span
+	params authzParams
+	scope  ScopeDeclaration
+	caller authzCaller
+	asked  scopeQuestions
+
+	// outcomes holds, per question decided, how it was decided.
+	outcomes map[int]outcome
+	// decision and principal are those of the last question allowed.
+	decision   authzResolution
+	principal  Principal
+	allowed    allowedValues
+	authorized []map[string]string
+}
+
+// outcome is how one question was decided: its refusal, nil when allowed, and
+// the status a refused decision answers with (0 when there is none).
+type outcome struct {
+	refusal error
+	status  int
+}
+
+// decideGroup asks the questions of one group in order, stopping at the first
+// allowed. A group with every question refused for being outside the scope is
+// refused as its first question is; any other refusal — the credential
+// rejected, the authorization service unreachable — ends the request at once,
+// whatever the questions after it would answer.
+func (d *groupDecider) decideGroup(group []int) error {
+	var first error
+
+	for _, i := range group {
+		decided := d.decideOne(i)
+		if decided.refusal == nil {
+			return nil
+		}
+
+		if decided.status != http.StatusForbidden {
+			return decided.refusal
+		}
+
+		if first == nil {
+			first = decided.refusal
+		}
+	}
+
+	return first
+}
+
+// decideOne asks question i, once per request.
+func (d *groupDecider) decideOne(i int) outcome {
+	if decided, ok := d.outcomes[i]; ok {
+		return decided
+	}
+
+	decided := d.ask(i)
+
+	if d.outcomes == nil {
+		d.outcomes = make(map[int]outcome)
+	}
+
+	d.outcomes[i] = decided
+
+	return decided
+}
+
+// ask asks the authorization service about question i.
+func (d *groupDecider) ask(i int) outcome {
+	question := d.asked.sets[i]
+	params := d.params
+	params.attributes = question
+
+	// On a route that filters, a partner's question that leaves a filtered
+	// dimension out asks for the values it may see instead of a refusal.
+	params.filter = nil
+	if d.caller.partner != "" {
+		params.filter = absentFilter(d.scope.filter, question)
+	}
+
+	// A question that names no dimension cannot be scoped, whatever the
+	// route declares: an optional dimension the request left out is not a
+	// value the partner's scope can be matched against. Unless it asks to
+	// filter: the list is then confined by the values the answer carries.
+	params.declared = len(question) > 0 || len(params.filter) > 0
+
+	decision, principal := d.auth.decide(d.ctx, d.span, params, d.caller)
+
+	resolvedAt := ""
+	if d.asked.located != nil {
+		resolvedAt = d.asked.located[i]
+	}
+
+	if refusal := d.auth.refusalOfResolved(d.c, decision, resolvedAt); refusal != nil {
+		return outcome{refusal: refusal, status: deniedStatus(decision)}
+	}
+
+	// With no dimension named, the allowed values are the only thing that
+	// confines the request: a grant without them for any filtered
+	// dimension is refused, never served unconfined. A filtered dimension
+	// the answer leaves out is one the partner is not scoped on.
+	if len(question) == 0 && len(params.filter) > 0 && !confinesAny(params.filter, decision.allowed) {
+		logErrorf(d.ctx, d.auth.Logger, "Partner-bound credential granted a filtered request naming no dimension without allowed values; denying (fail closed)")
+
+		return outcome{refusal: d.auth.authorizeRefusal(d.c, http.StatusForbidden, http.StatusText(http.StatusForbidden))}
+	}
+
+	d.allowed.add(params.filter, decision.allowed)
+	d.decision, d.principal = decision, principal
+	d.authorized = append(d.authorized, question)
+
+	return outcome{}
 }
 
 // resolverContext validates a partner-bound caller before any resolver runs
@@ -931,7 +1018,7 @@ func (auth *AuthClient) resolverContext(ctx context.Context, c fiber.Ctx, span t
 func (auth *AuthClient) validateBeforeResolving(ctx context.Context, c fiber.Ctx, span trace.Span, params authzParams, scope ScopeDeclaration, readings requestValues, caller authzCaller) (bool, error) {
 	deferred := pendingDimensions{}
 
-	known, _, badBody := scope.questions(c, readings.clone(), true, scopeResolution{ctx: ctx, auth: auth, product: params.product, deferred: deferred})
+	asked, badBody := scope.questions(c, readings.clone(), true, scopeResolution{ctx: ctx, auth: auth, product: params.product, deferred: deferred})
 	if badBody != nil {
 		return false, auth.authorizeRefusal(c, badBody.statusCode(), badBody.Error())
 	}
@@ -942,6 +1029,9 @@ func (auth *AuthClient) validateBeforeResolving(ctx context.Context, c fiber.Ctx
 
 	params.pending = deferred.names()
 
+	// Nothing is resolved yet, so every question stands alone: each must be
+	// allowed.
+	known := asked.sets
 	if len(known) == 0 {
 		known = []map[string]string{nil}
 	}

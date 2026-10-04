@@ -119,6 +119,37 @@ func (d Dimension) Resolve(name string) Dimension {
 // values, or "" when the request carries the values themselves.
 func (d Dimension) Resolver() string { return d.resolver }
 
+// MatchAny returns a copy of the resolved dimension whose request value is
+// allowed when ANY of the values its resolver translates it to is allowed —
+// a holder with accounts in two ledgers, for a partner scoped on one of them —
+// instead of every one, the default. It never mutates the receiver.
+//
+// Each value the request carries is judged on its own: it is allowed when one
+// of its resolved values is allowed together with everything else the request
+// names, and every other question of the request must still be allowed. A
+// value that resolves to none is refused exactly as with every-one matching.
+// Only a resolved dimension may match any: on any other, the route is
+// misdeclared.
+func (d Dimension) MatchAny() Dimension {
+	d.matchAny = true
+
+	return d
+}
+
+// MatchesAny reports whether a request value of the dimension is allowed when
+// any of its resolved values is (see MatchAny).
+func (d Dimension) MatchesAny() bool { return d.matchAny }
+
+// matchProblem describes a dimension that matches any of its values without
+// a resolver to translate it into several, or returns "".
+func (d Dimension) matchProblem() string {
+	if d.matchAny && d.resolver == "" {
+		return "scope dimension " + d.name + " matches any of its resolved values but names no resolver"
+	}
+
+	return ""
+}
+
 // scopeResolver returns the resolver registered under name.
 func (auth *AuthClient) scopeResolver(name string) (ScopeResolver, bool) {
 	if auth == nil {
@@ -294,24 +325,17 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 			return requestValues{}, err
 		}
 
-		var values []string
-
-		seen := make(map[string]struct{})
-
 		for _, resolved := range out {
 			if len(resolved) == 0 {
 				return requestValues{}, unresolved(p.dim.location())
 			}
-
-			for _, v := range resolved {
-				if _, dup := seen[v]; !dup {
-					seen[v] = struct{}{}
-					values = append(values, v)
-				}
-			}
 		}
 
-		readings.add(p.dim, values)
+		if p.dim.matchAny {
+			readings.addAny(p.dim, out)
+		} else {
+			readings.add(p.dim, distinct(out))
+		}
 
 		if readings.resolvedAt == "" {
 			readings.resolvedAt = p.dim.location()
@@ -325,6 +349,62 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 	return readings, nil
 }
 
+// distinct is every value of every item, each once, in the order first named.
+func distinct(items [][]string) []string {
+	var values []string
+
+	seen := make(map[string]struct{})
+
+	for _, item := range items {
+		for _, v := range item {
+			if _, dup := seen[v]; !dup {
+				seen[v] = struct{}{}
+				values = append(values, v)
+			}
+		}
+	}
+
+	return values
+}
+
+// addAny records the values each request value of a MatchAny dimension
+// resolved to. When another carrier names the dimension directly, those values
+// are what is asked, and each request value must resolve to one of them; one
+// that resolves to none is a disagreement between the two.
+func (rv *requestValues) addAny(dim Dimension, items [][]string) {
+	if named, ok := rv.values[dim.name]; ok && rv.anyOf[dim.name] == nil {
+		for _, item := range items {
+			if !sharesValue(named, item) && rv.problem == nil {
+				rv.problem = divergence(dim.name, rv.where[dim.name], dim.location())
+			}
+		}
+
+		return
+	}
+
+	if rv.anyOf == nil {
+		rv.anyOf = make(map[string][][]string)
+	}
+
+	if _, ok := rv.values[dim.name]; !ok {
+		rv.add(dim, nil)
+	}
+
+	rv.anyOf[dim.name] = append(rv.anyOf[dim.name], items...)
+	rv.values[dim.name] = distinct(rv.anyOf[dim.name])
+}
+
+// sharesValue reports whether the two lists name a value in common.
+func sharesValue(a, b []string) bool {
+	for _, v := range b {
+		if containsValue(a, v) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // rawQuestion is one question of a body whose keys are still to be resolved:
 // the values read for it, where each was read, and, per resolved dimension, the
 // resolver that translates its value and the siblings it was read with.
@@ -333,6 +413,8 @@ type rawQuestion struct {
 	at        map[string]string
 	resolvers map[string]string
 	siblings  map[string]map[string]string
+	// matchAny holds the resolved dimensions read with MatchAny.
+	matchAny map[string]bool
 }
 
 // item is the resolver item a resolved dimension of the question makes.
@@ -390,7 +472,7 @@ func (r scopeResolution) resolveBody(raw []rawQuestion, set *questionSet, readin
 	}
 
 	for _, q := range raw {
-		combinations, err := expandResolved(q, results, set)
+		groups, err := expandResolved(q, results, set)
 		if err != nil {
 			return err
 		}
@@ -400,8 +482,8 @@ func (r scopeResolution) resolveBody(raw []rawQuestion, set *questionSet, readin
 			set.resolvedAt = q.at[names[0]]
 		}
 
-		for _, question := range combinations {
-			if err := set.add(question, q.at); err != nil {
+		for _, alternatives := range groups {
+			if err := set.addGroup(alternatives, q.at); err != nil {
 				return err
 			}
 		}
@@ -463,10 +545,13 @@ func collectBatches(raw []rawQuestion) ([]string, map[string]*resolveBatch) {
 	return order, batches
 }
 
-// expandResolved returns the questions one collected question makes: one per
-// combination of the values its resolved keys stand for.
-func expandResolved(q rawQuestion, results map[string]map[string][]string, set *questionSet) ([]map[string]string, *errBodyScope) {
-	combinations := []map[string]string{q.values}
+// expandResolved returns the questions one collected question makes, in
+// groups of which one must be allowed: one question per combination of the
+// values its resolved keys stand for, a key resolved with MatchAny making its
+// values alternatives within a group and any other key one group per value.
+func expandResolved(q rawQuestion, results map[string]map[string][]string, set *questionSet) ([][]map[string]string, *errBodyScope) {
+	groups := [][]map[string]string{{q.values}}
+	count := 1
 
 	for _, name := range sortedKeys(q.resolvers) {
 		resolved := results[batchKey(q.resolvers[name], name)][itemKey(q.item(name))]
@@ -474,28 +559,49 @@ func expandResolved(q rawQuestion, results map[string]map[string][]string, set *
 			return nil, unresolved(q.at[name])
 		}
 
-		if len(combinations)*len(resolved) > maxBodyScopeQuestions {
+		if count*len(resolved) > maxBodyScopeQuestions {
 			return nil, set.tooMany()
 		}
 
-		next := make([]map[string]string, 0, len(combinations)*len(resolved))
+		count *= len(resolved)
 
-		for _, combination := range combinations {
+		next := make([][]map[string]string, 0, len(groups)*len(resolved))
+
+		for _, group := range groups {
+			if q.matchAny[name] {
+				next = append(next, withEach(group, name, resolved))
+
+				continue
+			}
+
 			for _, value := range resolved {
-				question := make(map[string]string, len(combination))
-				for k, v := range combination {
-					question[k] = v
-				}
-
-				question[name] = value
-				next = append(next, question)
+				next = append(next, withEach(group, name, []string{value}))
 			}
 		}
 
-		combinations = next
+		groups = next
 	}
 
-	return combinations, nil
+	return groups, nil
+}
+
+// withEach returns every question of group with name set to each of values.
+func withEach(group []map[string]string, name string, values []string) []map[string]string {
+	out := make([]map[string]string, 0, len(group)*len(values))
+
+	for _, combination := range group {
+		for _, value := range values {
+			question := make(map[string]string, len(combination)+1)
+			for k, v := range combination {
+				question[k] = v
+			}
+
+			question[name] = value
+			out = append(out, question)
+		}
+	}
+
+	return out
 }
 
 func sortedKeys(m map[string]string) []string {

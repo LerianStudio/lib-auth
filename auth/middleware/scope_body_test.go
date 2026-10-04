@@ -31,6 +31,22 @@ type decidingAuthServer struct {
 	mu    sync.Mutex
 	calls []map[string]string
 	hits  atomic.Int64
+	// allow, when set, decides each question in place of denied.
+	allow func(attributes map[string]string) bool
+}
+
+// newDecidingAuthServerFunc is a deciding server whose answer to each question
+// is allow's.
+func newDecidingAuthServerFunc(t *testing.T, allow func(attributes map[string]string) bool) *decidingAuthServer {
+	t.Helper()
+
+	srv := newDecidingAuthServer(t)
+
+	srv.mu.Lock()
+	srv.allow = allow
+	srv.mu.Unlock()
+
+	return srv
 }
 
 func newDecidingAuthServer(t *testing.T, denied ...string) *decidingAuthServer {
@@ -56,6 +72,7 @@ func newDecidingAuthServer(t *testing.T, denied ...string) *decidingAuthServer {
 
 		srv.mu.Lock()
 		srv.calls = append(srv.calls, body.Attributes)
+		allow := srv.allow
 		srv.mu.Unlock()
 		srv.hits.Add(1)
 
@@ -65,6 +82,10 @@ func newDecidingAuthServer(t *testing.T, denied ...string) *decidingAuthServer {
 			if srv.denied[v] {
 				authorized = false
 			}
+		}
+
+		if allow != nil {
+			authorized = allow(body.Attributes)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

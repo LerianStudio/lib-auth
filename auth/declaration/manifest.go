@@ -141,6 +141,12 @@ type DeclarationRouteDimension struct {
 	// id into the account ids of its legs. With it, From may also be "path",
 	// Field then naming a parameter of the route path.
 	Resolve string `json:"resolve,omitempty" yaml:"resolve,omitempty"`
+	// Match optionally says, for a dimension that declares Resolve, how the
+	// values one request value resolves to are judged: "all" (the default)
+	// allows the request only when every one is allowed, "any" when at least
+	// one is. See middleware.Dimension.MatchAny. Read by this library only, like
+	// the rest of scope.routes.
+	Match string `json:"match,omitempty" yaml:"match,omitempty"`
 }
 
 // DeclarationDimension declares ONE instance dimension of the product.
@@ -184,6 +190,12 @@ type DeclarationDimension struct {
 	// dimension's values. It is read by this library only: it is never
 	// published and is not part of CanonicalHash.
 	Resolve string `json:"resolve,omitempty" yaml:"resolve,omitempty"`
+	// Match optionally says, for a dimension that declares Resolve, how the
+	// values one request value resolves to are judged: "all" (the default)
+	// allows the request only when every one is allowed, "any" when at least
+	// one is. See middleware.Dimension.MatchAny. Like Resolve, it is read by
+	// this library only: never published and not part of CanonicalHash.
+	Match string `json:"match,omitempty" yaml:"match,omitempty"`
 	// Parent optionally names the dimension whose instances hold this one's
 	// (e.g. a ledgerId dimension's parent is "organizationId"), declaring the
 	// hierarchy of the catalog. It names another declared dimension, and
@@ -386,7 +398,8 @@ func (m *DeclarationManifest) hasScopeCatalog() bool {
 }
 
 // serverProjection is the manifest the identity service knows: everything but
-// scope.routes and the dimensions' resolve, which only this library reads. Both
+// scope.routes and the dimensions' resolve and match, which only this library
+// reads. Both
 // the wire body and CanonicalHash are taken from it, so neither ever changes
 // what is published nor the hash the service compares. The receiver is not
 // modified.
@@ -400,6 +413,7 @@ func (m *DeclarationManifest) serverProjection() *DeclarationManifest {
 		dims = make([]DeclarationDimension, len(m.Scope.Dimensions))
 		for i, d := range m.Scope.Dimensions {
 			d.Resolve = ""
+			d.Match = ""
 			dims[i] = d
 		}
 	}
@@ -410,10 +424,11 @@ func (m *DeclarationManifest) serverProjection() *DeclarationManifest {
 	return &projected
 }
 
-// resolves reports whether a catalog dimension names a resolver.
+// resolves reports whether a catalog dimension names a resolver or how its
+// resolved values match.
 func (s *DeclarationScope) resolves() bool {
 	for _, d := range s.Dimensions {
-		if d.Resolve != "" {
+		if d.Resolve != "" || d.Match != "" {
 			return true
 		}
 	}
@@ -429,6 +444,28 @@ func resolveProblem(prefix, resolve string) string {
 	}
 
 	return fmt.Sprintf("%s: resolve %q must be a resolver name with no surrounding whitespace", prefix, resolve)
+}
+
+// matchAny is the match that allows a resolved request value when any of its
+// values is allowed; matchAll, the default, when every one is.
+const (
+	matchAll = "all"
+	matchAny = "any"
+)
+
+// matchProblem describes what is wrong with match on a dimension resolved by
+// resolve, or returns "" when it is absent or valid.
+func matchProblem(prefix, match, resolve string) string {
+	switch {
+	case match == "":
+		return ""
+	case match != matchAll && match != matchAny:
+		return fmt.Sprintf(`%s: match must be "all" or "any", got %q`, prefix, match)
+	case resolve == "":
+		return prefix + ": match requires resolve"
+	default:
+		return ""
+	}
 }
 
 // CanonicalHash returns a stable hex-encoded SHA-256 over a deterministic
@@ -710,6 +747,10 @@ func (m *DeclarationManifest) validateScope() []string {
 		if problem := resolveProblem(prefix, d.Resolve); problem != "" {
 			violations = append(violations, problem)
 		}
+
+		if problem := matchProblem(prefix, d.Match, d.Resolve); problem != "" {
+			violations = append(violations, problem)
+		}
 	}
 
 	violations = append(violations, m.validateParents(seenNames)...)
@@ -927,6 +968,10 @@ func validateRouteDimension(prefix string, d DeclarationRouteDimension, catalog 
 	}
 
 	if problem := resolveProblem(prefix, d.Resolve); problem != "" {
+		violations = append(violations, problem)
+	}
+
+	if problem := matchProblem(prefix, d.Match, d.Resolve); problem != "" {
 		violations = append(violations, problem)
 	}
 

@@ -58,6 +58,9 @@ type Dimension struct {
 	// request carries into the dimension's values; empty when the request
 	// carries the values themselves.
 	resolver string
+	// matchAny allows a resolved value when ANY of the values it stands for is
+	// allowed, instead of every one.
+	matchAny bool
 }
 
 // Dim declares a dimension read from source under the SAME key as its name. Use
@@ -288,6 +291,10 @@ type requestValues struct {
 	// resolvedAt locates the first value resolved outside the body, once
 	// resolved: the place a refusal of the questions carrying it names.
 	resolvedAt string
+	// anyOf holds, per dimension resolved with MatchAny, the values each
+	// request value resolved to: one of each must be allowed. values holds them
+	// all, for the checks against the other carriers.
+	anyOf map[string][][]string
 }
 
 // clone copies the readings, so reading the request twice — before and after
@@ -517,6 +524,10 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 			return nil, "scope dimension " + dim.name + " declares an empty request key"
 		}
 
+		if problem := dim.matchProblem(); problem != "" {
+			return nil, problem
+		}
+
 		// A body dimension may repeat, read from distinct fields, each asked; the
 		// body plan refuses one field read twice.
 		if dim.source == FromBody {
@@ -584,6 +595,8 @@ func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) erro
 			return errors.New("manifest scope: dimension " + dim.name + " must be read from the path, the query or a header")
 		case dim.key == "":
 			return errors.New("manifest scope: dimension " + dim.name + " declares an empty request key")
+		case dim.matchProblem() != "":
+			return errors.New("manifest scope: " + dim.matchProblem())
 		}
 
 		if _, dup := names[dim.name]; dup {
