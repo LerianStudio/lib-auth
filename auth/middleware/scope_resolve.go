@@ -159,8 +159,29 @@ type scopeResolution struct {
 	product string
 	// deferred, when non-nil, makes the pass that runs BEFORE the credential is
 	// validated: no resolver is called, the resolved dimensions are left out of
-	// the questions, and *deferred records whether any value awaits resolution.
-	deferred *bool
+	// the questions, and deferred records each dimension a value awaits
+	// resolution for.
+	deferred pendingDimensions
+}
+
+// pendingDimensions is the set of dimensions a request names values of that
+// are still to be resolved.
+type pendingDimensions map[string]struct{}
+
+// names is the set in name order, nil when empty.
+func (p pendingDimensions) names() []string {
+	if len(p) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(p))
+	for name := range p {
+		out = append(out, name)
+	}
+
+	sort.Strings(out)
+
+	return out
 }
 
 // call asks the named resolver to translate items, validating its answer. The
@@ -255,7 +276,10 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 	readings.pending = nil
 
 	if r.deferred != nil {
-		*r.deferred = *r.deferred || len(pending) > 0
+		for _, p := range pending {
+			r.deferred[p.dim.name] = struct{}{}
+		}
+
 		pending = nil
 	}
 
@@ -387,14 +411,14 @@ func (r scopeResolution) resolveBody(raw []rawQuestion, set *questionSet, readin
 }
 
 // deferBody adds the questions of a body without its resolved fields, and
-// records whether any field awaits resolution.
-func deferBody(raw []rawQuestion, set *questionSet, deferred *bool) *errBodyScope {
+// records the dimension of each field that awaits resolution.
+func deferBody(raw []rawQuestion, set *questionSet, deferred pendingDimensions) *errBodyScope {
 	for _, q := range raw {
 		values := make(map[string]string, len(q.values))
 
 		for name, value := range q.values {
 			if _, resolved := q.resolvers[name]; resolved {
-				*deferred = true
+				deferred[name] = struct{}{}
 
 				continue
 			}

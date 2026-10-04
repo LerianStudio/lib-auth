@@ -931,6 +931,9 @@ if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after r
   (401 or 403) never reaches a resolver. A route whose every dimension is
   resolved is first asked a question naming no dimension, which validates the
   credential only; the request is still decided on the resolved values.
+  That first question lists the dimensions about to be resolved in a
+  [`pending`](#-expected-authorization-service-response) member, so the
+  service does not refuse it for leaving them out.
 * **The resolver's context carries the validated identity.**
   `authMiddleware.PrincipalFromContext(ctx)` returns the subject, type, client
   id and `TenantID` of the credential that first question accepted — pick the
@@ -1207,6 +1210,34 @@ request and answer with the values the partner may see:
   request that names no dimension at all, which is then refused.
 * A request without `filter` never needs `allowed`, and a denial is a denial
   whatever it carries.
+
+A partner-bound request on a route that [resolves](#resolving-a-request-value-into-a-dimension-resolve)
+is first asked without its resolved values. That question names, in a
+`pending` member, the dimensions the request carries values of that are about
+to be resolved:
+
+```json
+{
+    "sub": "acme/app",
+    "resource": "transactions",
+    "action": "post",
+    "product": "midaz",
+    "attributes": {"organizationId": "org-1", "ledgerId": "led-1"},
+    "pending": ["accountId"]
+}
+```
+
+* `pending` is a list of dimension names, each once, in name order. A
+  dimension in it is not absent from the request: the service must not deny
+  because it is missing (a scoped dimension whose `covers` include the
+  resource, say), while still validating the credential and every dimension
+  the request names.
+* It is sent only on that first question, and only for resolved dimensions the
+  request carries a value of. The questions about the resolved values name
+  them in `attributes` and carry no `pending`; no other request carries it.
+* A service that does not know `pending` ignores it and decides as before.
+* `pending` is part of the decision cache key: the same question with and
+  without it are two questions.
 
 ## 🔒 gRPC usage
 

@@ -245,6 +245,27 @@ type authzParams struct {
 	// to answer with allowed values for, instead of refusing. Nil on every route
 	// that does not filter, and for every caller that is not partner-bound.
 	filter []string
+	// pending names the dimensions the request carries values of that are still
+	// to be resolved: set only on the question a partner-bound caller is asked
+	// before its values are resolved, so the service does not take a dimension
+	// about to be named for one the request left out. Nil on every other question.
+	pending []string
+}
+
+// addScopeMembers adds to an authorize payload the scope members the question
+// carries: each is added only when non-empty.
+func (p authzParams) addScopeMembers(payload map[string]any) {
+	if len(p.attributes) > 0 {
+		payload["attributes"] = p.attributes
+	}
+
+	if len(p.filter) > 0 {
+		payload["filter"] = p.filter
+	}
+
+	if len(p.pending) > 0 {
+		payload["pending"] = p.pending
+	}
 }
 
 type oauth2Token struct {
@@ -874,21 +895,26 @@ func (auth *AuthClient) resolverContext(ctx context.Context, c fiber.Ctx, span t
 // validates the credential — and confines the dimensions already known —
 // before any resolver looks anything up. A question naming no dimension only
 // validates the credential; the request is still decided on the resolved
-// values that follow.
+// values that follow. Every one of these questions names, in "pending", the
+// dimensions the request carries values of that are about to be resolved, so
+// the service does not refuse a dimension the request will name as one it
+// left out.
 //
 // It reports whether it asked: a request with no value to resolve is decided
 // in one pass, as before. A refusal ends the request, and no resolver runs.
 func (auth *AuthClient) validateBeforeResolving(ctx context.Context, c fiber.Ctx, span trace.Span, params authzParams, scope ScopeDeclaration, readings requestValues, caller authzCaller) (bool, error) {
-	var deferred bool
+	deferred := pendingDimensions{}
 
-	known, _, badBody := scope.questions(c, readings.clone(), true, scopeResolution{ctx: ctx, auth: auth, product: params.product, deferred: &deferred})
+	known, _, badBody := scope.questions(c, readings.clone(), true, scopeResolution{ctx: ctx, auth: auth, product: params.product, deferred: deferred})
 	if badBody != nil {
 		return false, auth.authorizeRefusal(c, badBody.statusCode(), badBody.Error())
 	}
 
-	if !deferred {
+	if len(deferred) == 0 {
 		return false, nil
 	}
+
+	params.pending = deferred.names()
 
 	if len(known) == 0 {
 		known = []map[string]string{nil}
@@ -1389,8 +1415,9 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 		return authzResolution{statusCode: http.StatusInternalServerError, err: err, partner: partner}, Principal{}
 	}
 
-	// attributes is the ONLY member this version can add, and it is added only
-	// when the route declared dimensions. With none declared the payload is the
+	// attributes, filter and pending are the only members this version can add,
+	// and each is added only on a route that declares dimensions. With none
+	// declared the payload is the
 	// same set of string members in the same encoder as before, so a deployed
 	// caller's bytes on the wire do not move.
 	payload := make(map[string]any, len(requestBody)+1)
@@ -1398,13 +1425,7 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 		payload[k] = v
 	}
 
-	if len(p.attributes) > 0 {
-		payload["attributes"] = p.attributes
-	}
-
-	if len(p.filter) > 0 {
-		payload["filter"] = p.filter
-	}
+	p.addScopeMembers(payload)
 
 	requestBodyJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -1432,6 +1453,7 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 		clientIP:    p.clientIP,
 		attributes:  attributesCacheKey(p.attributes),
 		filter:      foldFilter(p.filter),
+		pending:     foldFilter(p.pending),
 	}
 
 	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so

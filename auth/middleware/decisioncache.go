@@ -65,6 +65,10 @@ type cacheKey struct {
 	// without it are two different questions: one may be allowed with values
 	// where the other is refused.
 	filter string
+	// pending is the dimensions the question declared still to be resolved,
+	// folded like filter. A question with a dimension pending may be allowed
+	// where the same question without it is refused.
+	pending string
 }
 
 // cacheEntry is a cached authorization decision with its expiry.
