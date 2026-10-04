@@ -1194,7 +1194,16 @@ answered with:
 
 * `suspended` and `expired` mean the credential itself is finished — widening a
   permission would not help, it has to be re-issued — so the middleware answers
-  **401**.
+  **401**. The refusal carries a code of its own, recoverable with `errors.As`
+  as a `commons.Response`, so it is not mistaken for an invalid token:
+
+  | Reason | Status | Code | Message |
+  |---|---|---|---|
+  | `suspended` | 401 | `AUT-1009` | the partner of this credential is suspended |
+  | `expired` | 401 | `AUT-1010` | the partner of this credential is outside its validity period |
+
+  A missing, invalid or expired token is still the plain 401 it has always been,
+  with no code.
 * `permission`, `scope`, an unknown reason, and no reason at all stay the **403**
   every denial has always been. Which axis failed is never told apart to the end
   caller: that would turn the field into an enumeration oracle over another

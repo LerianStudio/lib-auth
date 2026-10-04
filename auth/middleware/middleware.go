@@ -225,6 +225,32 @@ func denialStatus(reason string) int {
 	}
 }
 
+// partnerDenial is the refusal a credential-finished reason is answered with:
+// the 401 denialStatus picks, carrying a code and message that name the partner
+// as the cause. The codes are the ones the authorization service answers a token
+// request for the same partner with, so a client handles both alike. The token
+// itself is valid — it works again once the partner is honoured — and a refusal
+// that reads as a bad token sends its holder to debug the wrong thing. ok is
+// false for every other reason.
+func partnerDenial(reason string) (response commons.Response, ok bool) {
+	switch reason {
+	case reasonSuspended:
+		return commons.Response{
+			Code:    "AUT-1009",
+			Title:   "Partner Suspended",
+			Message: "the partner of this credential is suspended",
+		}, true
+	case reasonExpired:
+		return commons.Response{
+			Code:    "AUT-1010",
+			Title:   "Partner Outside Its Validity Period",
+			Message: "the partner of this credential is outside its validity period",
+		}, true
+	default:
+		return commons.Response{}, false
+	}
+}
+
 // authzParams are the inputs of one authorization decision.
 type authzParams struct {
 	product     string
@@ -986,6 +1012,10 @@ func (auth *AuthClient) refusalFor(c fiber.Ctx, resolution authzResolution) erro
 		// so its holder re-issues it, while every other denial stays the 403 it
 		// has always been.
 		status := denialStatus(resolution.reason)
+
+		if response, ok := partnerDenial(resolution.reason); ok {
+			return auth.authorizeCommonsRefusal(c, status, response)
+		}
 
 		return auth.authorizeRefusal(c, status, http.StatusText(status))
 	}
