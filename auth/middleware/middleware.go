@@ -202,8 +202,16 @@ type AuthResponse struct {
 	// in its filter; an empty list or null means the partner may see none. A
 	// grant without it confines nothing on the dimension. A request that names
 	// no dimension at all is refused unless the grant carries it for at least
-	// one filtered dimension.
+	// one filtered dimension — or carries Unrestricted.
 	Allowed map[string][]string `json:"allowed,omitempty"`
+	// Unrestricted states, on a grant to a partner-bound credential, that the
+	// partner is not confined on the product at all — it has no scope on it.
+	// It lets a filtered request that names no dimension be served without
+	// allowed values, every filtered dimension unrestricted. Allowed values
+	// the grant carries as well still confine: they are the narrower answer.
+	// It is read only on a grant, only for a partner-bound credential, and
+	// only on a filtered request naming no dimension; absent, it is false.
+	Unrestricted bool `json:"unrestricted,omitempty"`
 }
 
 // Denial reasons the authorization service publishes. Only the two that mean
@@ -961,9 +969,11 @@ func (d *groupDecider) ask(i int) outcome {
 
 	// With no dimension named, the allowed values are the only thing that
 	// confines the request: a grant without them for any filtered
-	// dimension is refused, never served unconfined. A filtered dimension
-	// the answer leaves out is one the partner is not scoped on.
-	if len(question) == 0 && len(params.filter) > 0 && !confinesAny(params.filter, decision.allowed) {
+	// dimension is refused, never served unconfined — unless it says, in so
+	// many words, that the partner is unrestricted on the product. A
+	// filtered dimension the answer leaves out is one the partner is not
+	// scoped on.
+	if len(question) == 0 && len(params.filter) > 0 && !confinesAny(params.filter, decision.allowed) && !decision.unrestricted {
 		logErrorf(d.ctx, d.auth.Logger, "Partner-bound credential granted a filtered request naming no dimension without allowed values; denying (fail closed)")
 
 		return outcome{refusal: d.auth.authorizeRefusal(d.c, http.StatusForbidden, http.StatusText(http.StatusForbidden))}
@@ -1580,8 +1590,10 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 	// the breaker only ever runs on a miss — its open state then denies (never
 	// serving a stale grant).
 	if auth.cache != nil {
-		if authorized, reason, allowed, hit := auth.cache.get(key); hit {
-			return authzResolution{authorized: authorized, statusCode: http.StatusOK, reason: reason, allowed: allowed, partner: partner}, principal
+		if authorized, reason, allowed, unrestricted, hit := auth.cache.get(key); hit {
+			return authzResolution{
+				authorized: authorized, statusCode: http.StatusOK, reason: reason, allowed: allowed, unrestricted: unrestricted, partner: partner,
+			}, principal
 		}
 	}
 

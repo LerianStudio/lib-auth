@@ -1136,7 +1136,11 @@ func (h *Handler) ListAccounts(c fiber.Ctx) error {
   only for the dimensions the partner is scoped on — a partner scoped on one
   dimension of a route filtering four is answered for that one — and the
   others are unrestricted, as above. A grant with no `allowed` values for any
-  filtered dimension is refused with 403, since nothing else confines the list.
+  filtered dimension is refused with 403, since nothing else confines the list —
+  unless it carries `"unrestricted": true`: the partner has no scope on the
+  product, and the request is served with every filtered dimension
+  unrestricted (`Allowed` reports `false` for each). `allowed` values carried
+  as well still confine the list on their dimensions.
 
   ```go
   // filter: [merchantId, accountId]; the partner is scoped on merchantId only.
@@ -1308,7 +1312,21 @@ request and answer with the values the partner may see:
   named in `filter`. A list, possibly empty, of non-empty strings; `null` reads
   as an empty list. Any other shape is the service failing to answer (503).
 * A grant without `allowed` for a dimension confines nothing on it, except on a
-  request that names no dimension at all, which is then refused.
+  request that names no dimension at all, which is then refused — unless the
+  grant carries `unrestricted`.
+* `unrestricted` (boolean, default `false`) is the explicit statement that the
+  partner is not confined on the product at all: it has no scope on it. It
+  lets a request that names no dimension be served with no `allowed` values,
+  every filtered dimension unrestricted:
+
+  ```json
+  {"authorized": true, "timestamp": "2025-03-03T12:00:00Z", "unrestricted": true}
+  ```
+
+  It is read only on a grant, only for a partner-bound credential, and only on
+  a request that carries `filter` and names no dimension; anywhere else it is
+  ignored. Send it only for a partner with no scope on the product. `allowed`
+  values sent with it win on their dimensions — they are the narrower answer.
 * A request without `filter` never needs `allowed`, and a denial is a denial
   whatever it carries.
 
