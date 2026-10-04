@@ -389,8 +389,10 @@ func TestAuthorize_Resolve_TooManyValuesIsRefusedBeforeResolving(t *testing.T) {
 	assert.Equal(t, int64(1+1+maxBodyScopeQuestions), srv.hits.Load())
 }
 
-// A resolved value and the same dimension named directly elsewhere must agree.
-func TestAuthorize_Resolve_DivergenceIsJudgedOnResolvedValues(t *testing.T) {
+// A resolved value joins the same dimension named directly elsewhere: it is
+// derived by the server, not asserted by the client, so the two are not
+// checked for agreement — both are asked, and both must be allowed.
+func TestAuthorize_Resolve_BodyResolvedValueJoinsThePath(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -398,21 +400,44 @@ func TestAuthorize_Resolve_DivergenceIsJudgedOnResolvedValues(t *testing.T) {
 		target = "/v1/organizations/org-1/ledgers/led-1/accounts/acc-a/transfers"
 	)
 
-	srv := newDecidingAuthServer(t)
-	resolver := &fakeResolver{table: map[string][]string{"@a": {"acc-a"}, "@b": {"acc-b"}}}
-	auth := resolvingClient(t, srv.URL, "alias", resolver, http.MethodPost, route,
-		Dim("accountId", FromBody).At("alias").Resolve("alias"))
+	q := func(account string) map[string]string {
+		return map[string]string{"organizationId": "org-1", "ledgerId": "led-1", "accountId": account}
+	}
 
-	app := fiber.New()
-	app.Post(route, auth.Authorize("midaz", "transfers", "post"), ok)
+	for name, tc := range map[string]struct {
+		denied []string
+		alias  string
+		want   int
+	}{
+		"same_account":        {nil, "@a", http.StatusOK},
+		"both_allowed":        {nil, "@b", http.StatusOK},
+		"resolved_one_denied": {[]string{"acc-b"}, "@b", http.StatusForbidden},
+		"the_path_one_denied": {[]string{"acc-a"}, "@b", http.StatusForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	got := doRequest(t, app, http.MethodPost, target, partnerToken("acme/p1"), `{"alias":"@a"}`)
-	assert.Equal(t, http.StatusOK, got.status, "the alias resolves to the account the path names")
+			srv := newDecidingAuthServer(t, tc.denied...)
+			resolver := &fakeResolver{table: map[string][]string{"@a": {"acc-a"}, "@b": {"acc-b"}}}
+			auth := resolvingClient(t, srv.URL, "alias", resolver, http.MethodPost, route,
+				Dim("accountId", FromBody).At("alias").Resolve("alias"))
 
-	got = doRequest(t, app, http.MethodPost, target, partnerToken("acme/p1"), `{"alias":"@b"}`)
-	assert.Equal(t, http.StatusBadRequest, got.status)
-	assert.Contains(t, got.body, `path parameter "account_id"`)
-	assert.Contains(t, got.body, `body field "alias"`)
+			app := fiber.New()
+			app.Post(route, auth.Authorize("midaz", "transfers", "post"), ok)
+
+			got := doRequest(t, app, http.MethodPost, target, partnerToken("acme/p1"), `{"alias":"`+tc.alias+`"}`)
+			require.Equal(t, tc.want, got.status, got.body)
+
+			if tc.want == http.StatusOK && tc.alias == "@b" {
+				assert.Contains(t, srv.attributeCalls(), q("acc-a"))
+				assert.Contains(t, srv.attributeCalls(), q("acc-b"))
+			}
+
+			if name == "resolved_one_denied" {
+				assert.Contains(t, got.body, `body field "alias" is outside this credential's scope`)
+			}
+		})
+	}
 }
 
 // Values read from the query are resolved like any other carrier.
@@ -512,15 +537,19 @@ func TestSetManifestRouteScope_ResolvedPathDimension(t *testing.T) {
 	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodGet, txRoute, Dim("accountId", FromPath).At("transaction_id").Resolve("legs")))
 }
 
-// A value resolved from the query and the same dimension named by the path
-// must agree.
-func TestAuthorize_Resolve_QueryDivergesFromPath(t *testing.T) {
+// A value resolved from the query joins the same dimension named by the
+// path: both are asked, and both must be allowed.
+func TestAuthorize_Resolve_QueryResolvedValueJoinsThePath(t *testing.T) {
 	t.Parallel()
 
 	const (
 		route  = "/v1/organizations/:organization_id/ledgers/:ledger_id/accounts/:account_id/balances"
 		target = "/v1/organizations/org-1/ledgers/led-1/accounts/acc-a/balances"
 	)
+
+	q := func(account string) map[string]string {
+		return map[string]string{"organizationId": "org-1", "ledgerId": "led-1", "accountId": account}
+	}
 
 	srv := newDecidingAuthServer(t)
 	resolver := &fakeResolver{table: map[string][]string{"@a": {"acc-a"}, "@b": {"acc-b"}}}
@@ -531,11 +560,22 @@ func TestAuthorize_Resolve_QueryDivergesFromPath(t *testing.T) {
 	app.Get(route, auth.Authorize("midaz", "balances", "get"), ok)
 
 	got := doRequest(t, app, http.MethodGet, target+"?alias=@a", partnerToken("acme/p1"), "")
-	assert.Equal(t, http.StatusOK, got.status, got.body)
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Equal(t, []map[string]string{q("acc-a"), q("acc-a")}, srv.attributeCalls(), "the same account is asked once")
 
 	got = doRequest(t, app, http.MethodGet, target+"?alias=@b", partnerToken("acme/p1"), "")
-	assert.Equal(t, http.StatusBadRequest, got.status)
-	assert.Contains(t, got.body, `path parameter "account_id"`)
-	assert.Contains(t, got.body, `query parameter "alias"`)
-	assert.Equal(t, int64(2+1), srv.hits.Load(), "the divergent request is asked only its known question")
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Equal(t, []map[string]string{q("acc-a"), q("acc-a"), q("acc-b")}, srv.attributeCalls()[2:],
+		"the known question, then the account the path names and the one the alias resolves to")
+
+	denying := newDecidingAuthServer(t, "acc-b")
+	auth = resolvingClient(t, denying.URL, "alias", resolver, http.MethodGet, route,
+		Dim("accountId", FromQuery).At("alias").Resolve("alias"))
+
+	app = fiber.New()
+	app.Get(route, auth.Authorize("midaz", "balances", "get"), ok)
+
+	got = doRequest(t, app, http.MethodGet, target+"?alias=@b", partnerToken("acme/p1"), "")
+	assert.Equal(t, http.StatusForbidden, got.status)
+	assert.Contains(t, got.body, `query parameter "alias" is outside this credential's scope`)
 }

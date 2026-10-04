@@ -81,6 +81,13 @@ func (d Dimension) At(key string) Dimension {
 // request that does not carry it — a body field absent or null — asks its
 // question without it; a value that is there must still be a non-empty string.
 // It never mutates the receiver.
+//
+// On a resolved dimension it also covers a value that resolves to none — an
+// account in no portfolio: the question goes without the dimension instead of
+// being refused, and the authorization service decides on what the credential
+// is scoped on. Outside the body, when one of several values of a carrier
+// resolves to none, the request is asked without the dimension at all.
+// A resolved dimension that is not optional refuses such a value.
 func (d Dimension) Optional() Dimension {
 	d.optional = true
 
@@ -295,6 +302,11 @@ type requestValues struct {
 	// request value resolved to: one of each must be allowed. values holds them
 	// all, for the checks against the other carriers.
 	anyOf map[string][][]string
+	// derived holds the dimensions a resolved carrier contributed values to.
+	// Those values are derived by the server, not asserted by the client: they
+	// join the values of the other carriers instead of having to agree with
+	// them.
+	derived map[string]bool
 }
 
 // clone copies the readings, so reading the request twice — before and after
@@ -360,6 +372,37 @@ func (rv *requestValues) add(dim Dimension, values []string) {
 	rv.names = append(rv.names, dim.name)
 	rv.values[dim.name] = values
 	rv.where[dim.name] = dim.location()
+}
+
+// union records the values a resolved carrier derives for a dimension. They
+// join the values the other carriers name — every one is asked — instead of
+// having to agree with them.
+func (rv *requestValues) union(dim Dimension, values []string) {
+	rv.markDerived(dim.name)
+
+	previous, ok := rv.values[dim.name]
+	if !ok {
+		rv.add(dim, values)
+
+		return
+	}
+
+	for _, v := range values {
+		if !containsValue(previous, v) {
+			previous = append(previous, v)
+		}
+	}
+
+	rv.values[dim.name] = previous
+}
+
+// markDerived records that a resolved carrier contributed values to name.
+func (rv *requestValues) markDerived(name string) {
+	if rv.derived == nil {
+		rv.derived = make(map[string]bool)
+	}
+
+	rv.derived[name] = true
 }
 
 // sameValues reports whether two lists of distinct values name the same set.

@@ -740,7 +740,10 @@ authorization call and no handler call: the handler may act on either value, and
 no single question checks both. A place that does not carry the value is not a
 disagreement. For the body, every body value must be one the other place names,
 and every value the other place names must appear in the body; a body element
-that leaves an optional field out is asked with the other place's value. Reading
+that leaves an optional field out is asked with the other place's value. This
+holds between places that carry the value itself; a place whose value is
+[resolved](#resolving-a-request-value-into-a-dimension-resolve) is not
+checked for agreement, but joined (see there). Reading
 one dimension twice from the same place (the same header in two spellings, the
 same body field twice) is a misdeclaration and refuses every request on the
 route. Two **distinct** body fields are not the same place: see
@@ -1003,8 +1006,22 @@ if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after r
     string among its values is answered **503** naming the resolver; the error
     is logged, not returned to the caller;
   * more than 100 distinct items to resolve is answered **400**.
-* A resolved value and the same dimension named directly elsewhere (the path's
-  `:account_id` and a resolved alias, say) must agree, as any two carriers must.
+* **Optional and resolving to nothing.** On a resolved dimension declared
+  `optional`, an item the resolver maps to no value is not refused: its
+  question is asked **without the dimension**, and the authorization service
+  decides on the dimensions the credential is scoped on. A credential scoped on
+  that dimension is still denied, since the question does not name it. A body
+  element is asked without it on its own; outside the body, when one of several
+  values of a carrier resolves to nothing, the request is asked without the
+  dimension at all. A resolved dimension not declared optional keeps refusing
+  such an item with 403, as above.
+* **A resolved value joins the other carriers.** A resolved value is derived by
+  the server, not asserted by the client, so it is not checked for agreement
+  with the same dimension named elsewhere (the path's `:account_id` and a
+  resolved alias, or a body field naming a target and the path resolving to
+  the current value, say): the values of both are asked, and **every one must
+  be allowed** — moving a record from one value to another needs both allowed.
+  Two carriers that both name the value itself must still agree.
 * `resolve` may be declared on any dimension: a catalog dimension, or a
   `scope.routes` dimension from any carrier. A route may declare `from: path`
   **only** with `resolve`, `field` naming a parameter of its path; a path
@@ -1060,9 +1077,9 @@ In Go, `Dim(...).Resolve(name).MatchAny()`.
   that were allowed; a resolved value denied or never asked is not among them.
 * **Named directly elsewhere too.** When another carrier names the same
   dimension (the path's `:ledger_id`, a body field), the values it names are
-  what is asked, and each request value must resolve to at least one of them;
-  otherwise the two disagree and the request is answered **400**, as any two
-  carriers that disagree are.
+  asked on their own and must each be allowed, and each request value must
+  still have one of its resolved values allowed; the two are joined, not checked
+  for agreement, as for any resolved value.
 * `match` must be `all` or `any`, and only on a dimension that declares
   `resolve`; anything else fails validation. `MatchAny` on a dimension without a
   resolver is a misdeclared route. Like `resolve`, `match` is read by this

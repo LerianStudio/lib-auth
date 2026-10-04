@@ -291,9 +291,9 @@ func TestAuthorize_ResolveAny_EachBodyElementOnItsOwn(t *testing.T) {
 	}
 }
 
-// The resolved value and the same dimension named directly: each resolved
-// item must share a value with what the request names, and the named values
-// are what is asked.
+// The resolved value and the same dimension named directly: the named values
+// are asked on their own, and each resolved item must still have one of its
+// values allowed — they are not checked for agreement.
 func TestAuthorize_ResolveAny_NamedDirectlyToo(t *testing.T) {
 	t.Parallel()
 
@@ -302,8 +302,12 @@ func TestAuthorize_ResolveAny_NamedDirectlyToo(t *testing.T) {
 		target = "/v1/organizations/org-1/ledgers/led-2/holders/h-1"
 	)
 
-	srv := newDecidingAuthServer(t)
 	resolver := &fakeResolver{table: map[string][]string{"h-1": {"led-1", "led-2"}, "h-2": {"led-1"}}}
+	led := func(ledger string) map[string]string {
+		return map[string]string{"organizationId": "org-1", "ledgerId": ledger}
+	}
+
+	srv := newDecidingAuthServer(t, "led-1")
 	auth := resolvingClient(t, srv.URL, "holderLedgers", resolver, http.MethodGet, route,
 		holderLedgers().MatchAny())
 
@@ -312,15 +316,24 @@ func TestAuthorize_ResolveAny_NamedDirectlyToo(t *testing.T) {
 
 	got := doRequest(t, app, http.MethodGet, target, partnerToken("acme/p1"), "")
 	require.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, []map[string]string{
-		{"organizationId": "org-1", "ledgerId": "led-2"},
-		{"organizationId": "org-1", "ledgerId": "led-2"},
-	}, srv.attributeCalls(), "the ledger the path names, the holder being in it")
+	assert.Equal(t, []map[string]string{led("led-2"), led("led-2"), led("led-1")}, srv.attributeCalls(),
+		"the ledger the path names, then the holder's ledgers until one is allowed")
 
 	got = doRequest(t, app, http.MethodGet, "/v1/organizations/org-1/ledgers/led-2/holders/h-2", partnerToken("acme/p1"), "")
-	assert.Equal(t, http.StatusBadRequest, got.status)
-	assert.Contains(t, got.body, `path parameter "ledger_id"`)
-	assert.Contains(t, got.body, `path parameter "holder_id"`)
+	assert.Equal(t, http.StatusForbidden, got.status, "the holder's only ledger is denied")
+	assert.Contains(t, got.body, holderRefusal)
+
+	allowing := newDecidingAuthServer(t)
+	auth = resolvingClient(t, allowing.URL, "holderLedgers", resolver, http.MethodGet, route,
+		holderLedgers().MatchAny())
+
+	app = fiber.New()
+	app.Get(route, auth.Authorize("midaz", "holders", "get"), ok)
+
+	got = doRequest(t, app, http.MethodGet, "/v1/organizations/org-1/ledgers/led-2/holders/h-2", partnerToken("acme/p1"), "")
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Equal(t, []map[string]string{led("led-2"), led("led-2"), led("led-1")}, allowing.attributeCalls(),
+		"both ledgers are asked")
 }
 
 // MatchAny names how the values of a resolver are judged: without one it is a
@@ -406,8 +419,8 @@ func TestAuthorize_ResolveAny_SharedQuestionIsAskedOnce(t *testing.T) {
 }
 
 // A body value resolved with MatchAny next to the same dimension named by the
-// path: only the values the path names are asked; none of them is a
-// disagreement.
+// path: the path's value is asked on its own, and one of the values the body
+// value resolves to must be allowed besides.
 func TestAuthorize_ResolveAny_BodyValueNamedByThePath(t *testing.T) {
 	t.Parallel()
 
@@ -416,8 +429,13 @@ func TestAuthorize_ResolveAny_BodyValueNamedByThePath(t *testing.T) {
 		target = "/v1/organizations/org-1/ledgers/led-1/accounts/acc-a/transfers"
 	)
 
-	srv := newDecidingAuthServer(t)
+	q := func(account string) map[string]string {
+		return map[string]string{"organizationId": "org-1", "ledgerId": "led-1", "accountId": account}
+	}
+
 	resolver := &fakeResolver{table: map[string][]string{"@ab": {"acc-b", "acc-a"}, "@bc": {"acc-b", "acc-c"}}}
+
+	srv := newDecidingAuthServer(t, "acc-b")
 	auth := resolvingClient(t, srv.URL, "alias", resolver, http.MethodPost, route,
 		Dim("accountId", FromBody).At("alias").Resolve("alias").MatchAny())
 
@@ -426,41 +444,68 @@ func TestAuthorize_ResolveAny_BodyValueNamedByThePath(t *testing.T) {
 
 	got := doRequest(t, app, http.MethodPost, target, partnerToken("acme/p1"), `{"alias":"@ab"}`)
 	require.Equal(t, http.StatusOK, got.status, got.body)
-
-	known := map[string]string{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-a"}
-	assert.Equal(t, []map[string]string{known, known}, srv.attributeCalls(), "acc-b is never asked")
+	assert.Equal(t, []map[string]string{q("acc-a"), q("acc-b"), q("acc-a")}, srv.attributeCalls(),
+		"the known question, the alias's accounts until one is allowed, then the path's")
 
 	got = doRequest(t, app, http.MethodPost, target, partnerToken("acme/p1"), `{"alias":"@bc"}`)
-	assert.Equal(t, http.StatusBadRequest, got.status)
-	assert.Contains(t, got.body, `path parameter "account_id"`)
-	assert.Contains(t, got.body, `body field "alias"`)
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Contains(t, srv.attributeCalls()[3:], q("acc-c"), "the alias's other account is asked")
+
+	denying := newDecidingAuthServer(t, "acc-b", "acc-c")
+	auth = resolvingClient(t, denying.URL, "alias", resolver, http.MethodPost, route,
+		Dim("accountId", FromBody).At("alias").Resolve("alias").MatchAny())
+
+	app = fiber.New()
+	app.Post(route, auth.Authorize("midaz", "transfers", "post"), ok)
+
+	got = doRequest(t, app, http.MethodPost, target, partnerToken("acme/p1"), `{"alias":"@bc"}`)
+	assert.Equal(t, http.StatusForbidden, got.status, "no account of the alias is allowed")
+	assert.Contains(t, got.body, `body field "alias" is outside this credential's scope`)
 }
 
 // Values resolved with MatchAny outside the body and the same dimension named
-// by the body agree when the body names one of the values of EACH request
-// value.
+// by the body: the body's value is asked, and each request value must have one
+// of its values allowed besides — they are not checked for agreement.
 func TestAuthorize_ResolveAny_BodyNamesOneValueOfEachItem(t *testing.T) {
 	t.Parallel()
 
 	const route = "/v1/organizations/:organization_id/holders"
 
-	srv := newDecidingAuthServer(t)
 	resolver := &fakeResolver{table: map[string][]string{"h-1": {"led-1", "led-2"}, "h-2": {"led-3"}}}
-	auth := resolvingClient(t, srv.URL, "holderLedgers", resolver, http.MethodPost, route,
-		Dim("ledgerId", FromQuery).At("holder").Resolve("holderLedgers").MatchAny(),
-		Dim("ledgerId", FromBody).At("ledgerId"))
+	led := func(ledger string) map[string]string {
+		return map[string]string{"organizationId": "org-1", "ledgerId": ledger}
+	}
 
-	app := fiber.New()
-	app.Post(route, auth.Authorize("midaz", "holders", "post"), ok)
+	newApp := func(srv *decidingAuthServer) *fiber.App {
+		auth := resolvingClient(t, srv.URL, "holderLedgers", resolver, http.MethodPost, route,
+			Dim("ledgerId", FromQuery).At("holder").Resolve("holderLedgers").MatchAny(),
+			Dim("ledgerId", FromBody).At("ledgerId"))
+
+		app := fiber.New()
+		app.Post(route, auth.Authorize("midaz", "holders", "post"), ok)
+
+		return app
+	}
+
+	srv := newDecidingAuthServer(t, "led-1")
+	app := newApp(srv)
 
 	got := doRequest(t, app, http.MethodPost, "/v1/organizations/org-1/holders?holder=h-1", partnerToken("acme/p1"), `{"ledgerId":"led-2"}`)
 	require.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, map[string]string{"organizationId": "org-1", "ledgerId": "led-2"}, srv.attributeCalls()[len(srv.attributeCalls())-1])
+	assert.Contains(t, srv.attributeCalls(), led("led-2"))
 
 	got = doRequest(t, app, http.MethodPost, "/v1/organizations/org-1/holders?holder=h-1,h-2", partnerToken("acme/p1"), `{"ledgerId":"led-2"}`)
-	assert.Equal(t, http.StatusBadRequest, got.status)
-	assert.Contains(t, got.body, `query parameter "holder"`)
-	assert.Contains(t, got.body, `body field "ledgerId"`)
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Contains(t, srv.attributeCalls(), led("led-3"), "the second holder's ledger is asked")
+
+	denying := newDecidingAuthServer(t, "led-3")
+	got = doRequest(t, newApp(denying), http.MethodPost, "/v1/organizations/org-1/holders?holder=h-1,h-2", partnerToken("acme/p1"), `{"ledgerId":"led-2"}`)
+	assert.Equal(t, http.StatusForbidden, got.status, "the second holder's only ledger is denied")
+	assert.Contains(t, got.body, `query parameter "holder" is outside this credential's scope`)
+
+	got = doRequest(t, newApp(newDecidingAuthServer(t, "led-2")), http.MethodPost,
+		"/v1/organizations/org-1/holders?holder=h-1", partnerToken("acme/p1"), `{"ledgerId":"led-2"}`)
+	assert.Equal(t, http.StatusForbidden, got.status, "the body's ledger must be allowed itself")
 }
 
 // The values one request value resolves to count toward the cap of questions.

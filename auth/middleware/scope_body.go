@@ -481,6 +481,10 @@ type questionSet struct {
 	// "" when they carry none; located holds it per question.
 	resolvedAt string
 	located    []string
+	// unioned holds the dimensions the body and another carrier both name
+	// where one of the two is resolved: the values of each are asked, rather
+	// than checked for agreement.
+	unioned map[string]bool
 }
 
 func newQuestionSet(plan *bodyPlan, readings requestValues) *questionSet {
@@ -493,15 +497,17 @@ func newQuestionSet(plan *bodyPlan, readings requestValues) *questionSet {
 // add adds the questions one set of body values makes. locations name where in
 // the body each of those values was read.
 func (q *questionSet) add(values, locations map[string]string) *errBodyScope {
-	return q.addGroup([]map[string]string{values}, locations)
+	return q.addGroup([]map[string]string{values}, locations, nil)
 }
 
 // addGroup adds the questions one group of alternative sets of body values
 // makes: the alternatives name the same dimensions, and the request is allowed
 // on one of them. An alternative naming a value another carrier does not name
 // for the same dimension is dropped; when every one is, the two disagree.
-func (q *questionSet) addGroup(alternatives []map[string]string, locations map[string]string) *errBodyScope {
-	alternatives, problem := q.agreeing(alternatives, locations)
+// resolved names the dimensions whose body values were resolved: those, and
+// the dimensions another carrier resolved, are not checked for agreement.
+func (q *questionSet) addGroup(alternatives []map[string]string, locations, resolved map[string]string) *errBodyScope {
+	alternatives, problem := q.agreeing(alternatives, locations, resolved)
 	if problem != nil {
 		return problem
 	}
@@ -578,8 +584,9 @@ func (q *questionSet) items(name string) [][]string {
 }
 
 // agreeing returns the alternatives whose every value another carrier naming
-// the same dimension names too, or the disagreement when there is none.
-func (q *questionSet) agreeing(alternatives []map[string]string, locations map[string]string) ([]map[string]string, *errBodyScope) {
+// the same dimension names too, or the disagreement when there is none. A
+// dimension resolved on either side is recorded as unioned instead.
+func (q *questionSet) agreeing(alternatives []map[string]string, locations, resolved map[string]string) ([]map[string]string, *errBodyScope) {
 	var (
 		kept    []map[string]string
 		problem *errBodyScope
@@ -589,7 +596,18 @@ func (q *questionSet) agreeing(alternatives []map[string]string, locations map[s
 		diverges := false
 
 		for _, name := range sortedKeys(values) {
-			if named, ok := q.readings.values[name]; ok && !containsValue(named, values[name]) {
+			named, ok := q.readings.values[name]
+			if !ok {
+				continue
+			}
+
+			if _, bodyResolved := resolved[name]; bodyResolved || q.readings.derived[name] {
+				q.markUnioned(name)
+
+				continue
+			}
+
+			if !containsValue(named, values[name]) {
 				if problem == nil {
 					problem = divergence(name, q.readings.where[name], locations[name])
 				}
@@ -610,6 +628,15 @@ func (q *questionSet) agreeing(alternatives []map[string]string, locations map[s
 	}
 
 	return kept, nil
+}
+
+// markUnioned records that the values of name on both sides are asked.
+func (q *questionSet) markUnioned(name string) {
+	if q.unioned == nil {
+		q.unioned = make(map[string]bool)
+	}
+
+	q.unioned[name] = true
 }
 
 // addRequirement adds the questions of one group and records the group. A
@@ -663,15 +690,24 @@ func (q *questionSet) addOne(question map[string]string) (int, *errBodyScope) {
 
 // complete checks that every value another carrier names for a dimension the
 // body also names is carried by some question: one the body never names is a
-// disagreement between the two.
+// disagreement between the two. When one side of the two is resolved, the
+// values of the other carriers are asked instead, on their own questions.
 func (q *questionSet) complete() *errBodyScope {
 	if q.plan == nil {
 		return nil
 	}
 
+	union := false
+
 	for _, name := range q.readings.names {
 		field, inBody := q.plan.firstField[name]
 		if !inBody {
+			continue
+		}
+
+		if q.unioned[name] {
+			union = true
+
 			continue
 		}
 
@@ -694,7 +730,13 @@ func (q *questionSet) complete() *errBodyScope {
 		}
 	}
 
-	return nil
+	if !union {
+		return nil
+	}
+
+	q.resolvedAt = q.readings.resolvedAt
+
+	return q.add(map[string]string{}, nil)
 }
 
 // scopeQuestions are the questions a request makes: the sets of identifiers
@@ -928,6 +970,7 @@ func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 		at := make(map[string]string, len(chosen))
 		resolvers := make(map[string]string)
 		matchAny := make(map[string]bool)
+		optional := make(map[string]bool)
 
 		for _, r := range chosen {
 			values[r.field.dim.name] = r.value
@@ -936,12 +979,14 @@ func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 			if r.field.dim.resolver != "" {
 				resolvers[r.field.dim.name] = r.field.dim.resolver
 				matchAny[r.field.dim.name] = r.field.dim.matchAny
+				optional[r.field.dim.name] = r.field.dim.optional
 			}
 		}
 
 		if w.raw != nil {
 			*w.raw = append(*w.raw, rawQuestion{
 				values: values, at: at, resolvers: resolvers, siblings: siblings(chosen), matchAny: matchAny,
+				optional: optional,
 			})
 
 			continue

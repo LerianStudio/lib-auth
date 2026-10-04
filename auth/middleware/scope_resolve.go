@@ -55,7 +55,9 @@ type ResolveItem struct {
 // values the item stands for — one or several. An item mapped to no value is
 // unknown: the request is refused with 403 naming where it was read, exactly as
 // a resolved value outside the credential's scope is, so the answer never tells
-// whether the value exists. A returned error means the lookup itself failed:
+// whether the value exists — unless the dimension is optional, when its
+// question is asked without the dimension (see Dimension.Optional). A returned
+// error means the lookup itself failed:
 // the request is refused with 503 naming the resolver, and the error is logged,
 // never sent to the caller. An answer with a different number of entries than
 // items, or an empty string among the returned values, is treated as such a
@@ -127,7 +129,7 @@ func (d Dimension) Resolver() string { return d.resolver }
 // Each value the request carries is judged on its own: it is allowed when one
 // of its resolved values is allowed together with everything else the request
 // names, and every other question of the request must still be allowed. A
-// value that resolves to none is refused exactly as with every-one matching.
+// value that resolves to none is treated exactly as with every-one matching.
 // Only a resolved dimension may match any: on any other, the route is
 // misdeclared.
 func (d Dimension) MatchAny() Dimension {
@@ -299,8 +301,10 @@ func knownValues(readings requestValues) map[string][]string {
 }
 
 // resolvePending translates the values read for resolved dimensions outside the
-// body and records them as the dimensions' values. A dimension a carrier also
-// names directly must then name the same values in both.
+// body and records them as the dimensions' values, joined with the values a
+// carrier names directly for the same dimension: a resolved value is derived
+// by the server, never asserted by the client, so the two are not checked for
+// agreement — every one is asked.
 func (r scopeResolution) resolvePending(readings requestValues) (requestValues, *errBodyScope) {
 	known := knownValues(readings)
 	pending := readings.pending
@@ -325,16 +329,20 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 			return requestValues{}, err
 		}
 
-		for _, resolved := range out {
-			if len(resolved) == 0 {
+		if resolvesToNone(out) {
+			if !p.dim.optional {
 				return requestValues{}, unresolved(p.dim.location())
 			}
+
+			// Asked without the dimension: a question naming a value some
+			// other request value resolved to cannot make the answer looser.
+			continue
 		}
 
 		if p.dim.matchAny {
 			readings.addAny(p.dim, out)
 		} else {
-			readings.add(p.dim, distinct(out))
+			readings.union(p.dim, distinct(out))
 		}
 
 		if readings.resolvedAt == "" {
@@ -347,6 +355,17 @@ func (r scopeResolution) resolvePending(readings requestValues) (requestValues, 
 	}
 
 	return readings, nil
+}
+
+// resolvesToNone reports whether some item resolved to no value.
+func resolvesToNone(out [][]string) bool {
+	for _, resolved := range out {
+		if len(resolved) == 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 // distinct is every value of every item, each once, in the order first named.
@@ -368,41 +387,28 @@ func distinct(items [][]string) []string {
 }
 
 // addAny records the values each request value of a MatchAny dimension
-// resolved to. When another carrier names the dimension directly, those values
-// are what is asked, and each request value must resolve to one of them; one
-// that resolves to none is a disagreement between the two.
+// resolved to: one of each must be allowed. A value another carrier names
+// directly for the dimension joins them as a request value of its own, which
+// must be allowed itself.
 func (rv *requestValues) addAny(dim Dimension, items [][]string) {
-	if named, ok := rv.values[dim.name]; ok && rv.anyOf[dim.name] == nil {
-		for _, item := range items {
-			if !sharesValue(named, item) && rv.problem == nil {
-				rv.problem = divergence(dim.name, rv.where[dim.name], dim.location())
-			}
-		}
-
-		return
-	}
-
 	if rv.anyOf == nil {
 		rv.anyOf = make(map[string][][]string)
 	}
 
-	if _, ok := rv.values[dim.name]; !ok {
+	named, ok := rv.values[dim.name]
+
+	switch {
+	case !ok:
 		rv.add(dim, nil)
-	}
-
-	rv.anyOf[dim.name] = append(rv.anyOf[dim.name], items...)
-	rv.values[dim.name] = distinct(rv.anyOf[dim.name])
-}
-
-// sharesValue reports whether the two lists name a value in common.
-func sharesValue(a, b []string) bool {
-	for _, v := range b {
-		if containsValue(a, v) {
-			return true
+	case rv.anyOf[dim.name] == nil:
+		for _, v := range named {
+			rv.anyOf[dim.name] = append(rv.anyOf[dim.name], []string{v})
 		}
 	}
 
-	return false
+	rv.markDerived(dim.name)
+	rv.anyOf[dim.name] = append(rv.anyOf[dim.name], items...)
+	rv.values[dim.name] = distinct(rv.anyOf[dim.name])
 }
 
 // rawQuestion is one question of a body whose keys are still to be resolved:
@@ -415,6 +421,9 @@ type rawQuestion struct {
 	siblings  map[string]map[string]string
 	// matchAny holds the resolved dimensions read with MatchAny.
 	matchAny map[string]bool
+	// optional holds the resolved dimensions read optional: a value resolving
+	// to none is asked without the dimension.
+	optional map[string]bool
 }
 
 // item is the resolver item a resolved dimension of the question makes.
@@ -483,7 +492,7 @@ func (r scopeResolution) resolveBody(raw []rawQuestion, set *questionSet, readin
 		}
 
 		for _, alternatives := range groups {
-			if err := set.addGroup(alternatives, q.at); err != nil {
+			if err := set.addGroup(alternatives, q.at, q.resolvers); err != nil {
 				return err
 			}
 		}
@@ -548,7 +557,8 @@ func collectBatches(raw []rawQuestion) ([]string, map[string]*resolveBatch) {
 // expandResolved returns the questions one collected question makes, in
 // groups of which one must be allowed: one question per combination of the
 // values its resolved keys stand for, a key resolved with MatchAny making its
-// values alternatives within a group and any other key one group per value.
+// values alternatives within a group and any other key one group per value. An
+// optional key resolving to none leaves its dimension out.
 func expandResolved(q rawQuestion, results map[string]map[string][]string, set *questionSet) ([][]map[string]string, *errBodyScope) {
 	groups := [][]map[string]string{{q.values}}
 	count := 1
@@ -556,7 +566,13 @@ func expandResolved(q rawQuestion, results map[string]map[string][]string, set *
 	for _, name := range sortedKeys(q.resolvers) {
 		resolved := results[batchKey(q.resolvers[name], name)][itemKey(q.item(name))]
 		if len(resolved) == 0 {
-			return nil, unresolved(q.at[name])
+			if !q.optional[name] {
+				return nil, unresolved(q.at[name])
+			}
+
+			groups = without(groups, name)
+
+			continue
 		}
 
 		if count*len(resolved) > maxBodyScopeQuestions {
@@ -583,6 +599,30 @@ func expandResolved(q rawQuestion, results map[string]map[string][]string, set *
 	}
 
 	return groups, nil
+}
+
+// without returns every question of groups with name left out.
+func without(groups [][]map[string]string, name string) [][]map[string]string {
+	out := make([][]map[string]string, 0, len(groups))
+
+	for _, group := range groups {
+		next := make([]map[string]string, 0, len(group))
+
+		for _, combination := range group {
+			question := make(map[string]string, len(combination))
+			for k, v := range combination {
+				if k != name {
+					question[k] = v
+				}
+			}
+
+			next = append(next, question)
+		}
+
+		out = append(out, next)
+	}
+
+	return out
 }
 
 // withEach returns every question of group with name set to each of values.

@@ -33,6 +33,9 @@ type decidingAuthServer struct {
 	hits  atomic.Int64
 	// allow, when set, decides each question in place of denied.
 	allow func(attributes map[string]string) bool
+	// allowPending, when set, decides each question with the dimensions it
+	// declares pending, in place of allow and denied.
+	allowPending func(attributes map[string]string, pending []string) bool
 }
 
 // newDecidingAuthServerFunc is a deciding server whose answer to each question
@@ -65,6 +68,7 @@ func newDecidingAuthServer(t *testing.T, denied ...string) *decidingAuthServer {
 
 		var body struct {
 			Attributes map[string]string `json:"attributes"`
+			Pending    []string          `json:"pending"`
 		}
 		if err := json.Unmarshal(raw, &body); err != nil {
 			t.Errorf("mock authz server: failed to decode body: %v", err)
@@ -73,6 +77,7 @@ func newDecidingAuthServer(t *testing.T, denied ...string) *decidingAuthServer {
 		srv.mu.Lock()
 		srv.calls = append(srv.calls, body.Attributes)
 		allow := srv.allow
+		allowPending := srv.allowPending
 		srv.mu.Unlock()
 		srv.hits.Add(1)
 
@@ -86,6 +91,10 @@ func newDecidingAuthServer(t *testing.T, denied ...string) *decidingAuthServer {
 
 		if allow != nil {
 			authorized = allow(body.Attributes)
+		}
+
+		if allowPending != nil {
+			authorized = allowPending(body.Attributes, body.Pending)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
