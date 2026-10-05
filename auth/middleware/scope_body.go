@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"mime"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -384,29 +383,6 @@ func buildBodyGroup(leaf []bodySegment, fields []bodyField, names map[string]str
 	}
 
 	return group, ""
-}
-
-// errBodyScope is the refusal of a request whose scope cannot be read for its
-// declared dimensions. It carries the message it answers with, and its status:
-// 400 unless set.
-type errBodyScope struct {
-	message string
-	status  int
-}
-
-func (e *errBodyScope) Error() string { return e.message }
-
-// statusCode is the status the request is refused with.
-func (e *errBodyScope) statusCode() int {
-	if e.status == 0 {
-		return http.StatusBadRequest
-	}
-
-	return e.status
-}
-
-func bodyFieldError(location, problem string) *errBodyScope {
-	return &errBodyScope{message: "scope field " + strconv.Quote(location) + " " + problem}
 }
 
 func joinLocation(base, key string) string {
