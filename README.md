@@ -971,14 +971,20 @@ partner's scope:
 ```yaml
 permissions:
   - { resource: organizations, action: update, effect: allow, roles: [admin], level: tenant }
-  - { resource: ledgers,       action: update, effect: allow, roles: [admin], level: organization }
-  - { resource: accounts,      action: update, effect: allow, roles: [admin], level: ledger }
+  - { resource: ledgers,       action: update, effect: allow, roles: [admin], level: organizationId }
+  - { resource: accounts,      action: update, effect: allow, roles: [admin], level: ledgerId }
   - { resource: balances,      action: update, effect: allow, roles: [admin], level: accountId }
 ```
 
-* `level` is `tenant`, `organization`, `ledger`, or the `name` of a dimension of
-  the manifest's `scope` catalog, spelled exactly. Anything else fails
-  validation, at boot.
+* `level` is `tenant` (the resource spans the whole tenant) or the `name` of a
+  dimension of the manifest's `scope` catalog, spelled exactly. `tenant` is
+  the only built-in keyword: every narrower level is a dimension the product
+  declares itself. Anything else fails validation, at boot, naming the
+  permission and the allowed values:
+
+  ```text
+  permissions[1]: level "organization" must be "tenant" or the name of a scope dimension declared in scope.dimensions (organizationId, ledgerId, accountId)
+  ```
 * It is optional, published with the permission, and part of `CanonicalHash`:
   changing it republishes the manifest. It is the last member of a permission
   on the wire and in the hash, and a permission without it serializes exactly
@@ -991,8 +997,8 @@ permissions:
   ```json
   "levels": [
     {"resource": "organizations", "action": "update", "level": "tenant"},
-    {"resource": "ledgers", "action": "update", "level": "organization"},
-    {"resource": "accounts", "action": "update", "level": "ledger"},
+    {"resource": "ledgers", "action": "update", "level": "organizationId"},
+    {"resource": "accounts", "action": "update", "level": "ledgerId"},
     {"resource": "balances", "action": "update", "level": "accountId"}
   ]
   ```

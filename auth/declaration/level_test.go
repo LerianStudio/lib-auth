@@ -20,7 +20,7 @@ permissions:
     action: read
     effect: allow
     roles: [fees/viewer]
-    level: ledger
+    level: ledgerId
 roles:
   - name: fees/viewer
 scope:
@@ -32,7 +32,7 @@ scope:
 // leveledCanonical is the exact canonical serialization of leveledYAML, written
 // out by hand: "level" is the LAST member of a permission. The identity service
 // recomputes the hash over the same bytes, so the member order is contract.
-const leveledCanonical = `{"service":"plugin-fees","permissions":[{"resource":"billing-packages","action":"read","effect":"allow","roles":["fees/viewer"],"level":"ledger"}],"roles":[{"name":"fees/viewer"}],"scope":{"dimensions":[{"name":"organizationId","from":"path","param":"organization_id","required":true,"collection":"organizations","label":"Organization"},{"name":"ledgerId","from":"path","param":"ledger_id","multi":true,"collection":"ledgers","label":"ledger"}]}}`
+const leveledCanonical = `{"service":"plugin-fees","permissions":[{"resource":"billing-packages","action":"read","effect":"allow","roles":["fees/viewer"],"level":"ledgerId"}],"roles":[{"name":"fees/viewer"}],"scope":{"dimensions":[{"name":"organizationId","from":"path","param":"organization_id","required":true,"collection":"organizations","label":"Organization"},{"name":"ledgerId","from":"path","param":"ledger_id","multi":true,"collection":"ledgers","label":"ledger"}]}}`
 
 func TestCanonicalHash_IncludesLevel(t *testing.T) {
 	t.Parallel()
@@ -50,7 +50,7 @@ func TestCanonicalHash_IncludesLevel(t *testing.T) {
 
 	wire, err := m.wireJSON()
 	require.NoError(t, err)
-	assert.Contains(t, string(wire), `"roles":["fees/viewer"],"level":"ledger"}`)
+	assert.Contains(t, string(wire), `"roles":["fees/viewer"],"level":"ledgerId"}`)
 }
 
 // A manifest without levels publishes the same bytes and hash as before the
@@ -82,14 +82,29 @@ func TestValidate_PermissionLevel(t *testing.T) {
 	}{
 		{name: "absent", level: ""},
 		{name: "tenant", level: "tenant"},
-		{name: "organization", level: "organization"},
-		{name: "ledger", level: "ledger"},
 		{name: "catalog_dimension", level: "ledgerId"},
+		{name: "other_catalog_dimension", level: "organizationId"},
 		{name: "keyword_without_scope", level: "tenant", noScope: true},
 		{
 			name:    "unknown",
 			level:   "portfolio",
-			wantErr: `permissions[0]: level "portfolio" must be "tenant", "organization", "ledger" or a scope dimension name`,
+			wantErr: `permissions[0]: level "portfolio" must be "tenant" or the name of a scope dimension declared in scope.dimensions (organizationId, ledgerId)`,
+		},
+		{
+			name:    "retired_organization_keyword",
+			level:   "organization",
+			wantErr: `permissions[0]: level "organization" must be "tenant" or the name of a scope dimension declared in scope.dimensions (organizationId, ledgerId)`,
+		},
+		{
+			name:    "retired_ledger_keyword",
+			level:   "ledger",
+			wantErr: `permissions[0]: level "ledger" must be "tenant" or the name of a scope dimension declared in scope.dimensions (organizationId, ledgerId)`,
+		},
+		{
+			name:    "retired_keyword_without_scope",
+			level:   "ledger",
+			noScope: true,
+			wantErr: `permissions[0]: level "ledger" must be "tenant" or the name of a scope dimension declared in scope.dimensions (none declared)`,
 		},
 		{
 			name:    "keyword_in_other_case",
@@ -98,8 +113,8 @@ func TestValidate_PermissionLevel(t *testing.T) {
 		},
 		{
 			name:    "padded",
-			level:   " ledger",
-			wantErr: `permissions[0]: level " ledger" must be`,
+			level:   " ledgerId",
+			wantErr: `permissions[0]: level " ledgerId" must be`,
 		},
 		{
 			name:    "dimension_without_scope",

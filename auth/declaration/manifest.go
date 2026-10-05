@@ -188,8 +188,8 @@ type DeclarationPermission struct {
 	Effect   string   `json:"effect,omitempty" yaml:"effect,omitempty"`
 	Roles    []string `json:"roles,omitempty" yaml:"roles,omitempty"`
 	// Level optionally names how wide one instance of the resource is: "tenant"
-	// (the resource spans the whole tenant), "organization", "ledger", or the
-	// name of a scope dimension (scope.dimensions[].name) whose instances hold it.
+	// (the resource spans the whole tenant) or the name of a scope dimension
+	// (scope.dimensions[].name) whose instances hold it.
 	// The access manager uses it to refuse granting a partner a write on a
 	// resource wider than the partner's narrowest scope. It is published and
 	// hashed; it is the LAST member of a permission, and omitted when empty, so a

@@ -142,35 +142,43 @@ func (m *DeclarationManifest) validatePermissions(declaredRoles map[string]struc
 	return violations
 }
 
-// Resource levels a permission may name besides a scope dimension.
-const (
-	levelTenant       = "tenant"
-	levelOrganization = "organization"
-	levelLedger       = "ledger"
-)
+// levelTenant is the one level a permission may name besides a scope
+// dimension: the resource spans the whole tenant. Every narrower level is a
+// dimension of the product's own scope catalog.
+const levelTenant = "tenant"
 
-// validateLevels checks every permission's level is a level keyword or the
-// name of a scope dimension, spelled exactly: the access manager compares it
-// as written, so a near miss would be a level nobody recognizes.
+// validateLevels checks every permission's level is "tenant" or the name of a
+// scope dimension, spelled exactly: the access manager compares it as written,
+// so a near miss would be a level nobody recognizes.
 func (m *DeclarationManifest) validateLevels() []string {
 	var violations []string
 
 	for i, p := range m.Permissions {
-		switch p.Level {
-		case "", levelTenant, levelOrganization, levelLedger:
-			continue
-		}
-
-		if m.hasDimension(p.Level) {
+		if p.Level == "" || p.Level == levelTenant || m.hasDimension(p.Level) {
 			continue
 		}
 
 		violations = append(violations, fmt.Sprintf(
-			`permissions[%d]: level %q must be %q, %q, %q or a scope dimension name`,
-			i, p.Level, levelTenant, levelOrganization, levelLedger))
+			`permissions[%d]: level %q must be %q or the name of a scope dimension declared in scope.dimensions (%s)`,
+			i, p.Level, levelTenant, m.dimensionNames()))
 	}
 
 	return violations
+}
+
+// dimensionNames lists the scope catalog's dimension names in declaration
+// order, comma-separated, or "none declared" when the catalog has none.
+func (m *DeclarationManifest) dimensionNames() string {
+	if m.Scope == nil || len(m.Scope.Dimensions) == 0 {
+		return "none declared"
+	}
+
+	names := make([]string, 0, len(m.Scope.Dimensions))
+	for _, d := range m.Scope.Dimensions {
+		names = append(names, d.Name)
+	}
+
+	return strings.Join(names, ", ")
 }
 
 // hasDimension reports whether the scope catalog declares a dimension named name.

@@ -84,7 +84,7 @@ func TestScopeOnly_CanonicalHash_IncludesLevels(t *testing.T) {
 
 	// A level change alone must change the hash, or the publisher would skip it.
 	changed := mustParse(t, levelsYAML)
-	changed.Permissions[2].Level = "organization"
+	changed.Permissions[2].Level = "organizationId"
 
 	changedHash, err := changed.scopeOnly().CanonicalHash()
 	require.NoError(t, err)
