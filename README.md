@@ -150,7 +150,7 @@ AUTH_REQUIRED=false
 AUTH_TIMEOUT=30s
 # AUTH_CACHE_TTL enables a short-lived decision cache when > 0, keyed by
 # (SHA-256 digest of the bearer token, subject, resource, action, product,
-# clientIp, scope attributes, filter) — never the raw token. Empty/0 disables it
+# clientIp, scope attributes) — never the raw token. Empty/0 disables it
 # (default). Security tradeoff: a permission revocation takes up to
 # the TTL to propagate, so keep it small (5–15s). It sheds load and, with the
 # breaker, survives brief authz outages by serving fresh positive decisions.
@@ -557,31 +557,39 @@ f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
   `FromBody` or `FromForm` (see [Where a dimension is read](#where-a-dimension-is-read)).
   The request key defaults to the name; use `At("...")` when the route calls it
   something else, and `Optional()` when a request may leave it out.
-* The resolved values are sent as an additional `attributes` object on
-  `POST /v1/authorize`. **A route that declares nothing sends exactly the bytes it
-  sends today** — the member is omitted, not sent empty — so adopting this is
-  route by route, with no flag day.
+* The values are read **only for a partner-bound credential** (a token carrying
+  a `partner` claim) and sent as an additional `attributes` object on
+  `POST /v1/authorize`. **Every other credential sends exactly the bytes it sends
+  today**, on every route — the member is omitted, not sent empty — and its
+  request is never read for a scope, so adopting this changes nothing for it.
 * The accepted field names are the authorization service's, per product. Sending
   a name it does not know for that product matches nothing, and a dimension
   nobody matches never denies — which is why a declaration whose product does not
   match the route's product is refused rather than forwarded.
 
-Two refusals are deliberate and both answer **403**, before any call is made:
+For a partner-bound credential, two refusals are deliberate and both answer
+**403**, before any call is made:
 
-1. A credential bound to a partner on a request that names no dimension — a route
-   that declares none, or one whose dimensions are all optional and all left out.
-   Such a credential is only ever allowed to reach *some* instances, and a request
-   that cannot say which instance it points at leaves the "where" with nothing to
-   decide on. A route that filters its list is the one exception (see
-   [Filtering a list](#filtering-a-list-by-the-partners-allowed-values-filter)).
+1. A request that names no dimension — a route whose declaration or manifest
+   gives it none (a service whose manifest scope is not wired gives every route
+   none), or one whose dimensions are all optional and all left out. Such a
+   credential is only ever allowed to reach *some* instances, and a request that
+   cannot say which instance it points at leaves the "where" with nothing to
+   decide on. The refusal is the same 403 a denial by the authorization service
+   answers.
 2. A required dimension the request carries no value for (header or query
    parameter absent, empty path parameter). An identifier with no value cannot be
    matched, and sending it absent would quietly ask a question the route did not
    promise.
 
-A request that carries a dimension malformed — an empty value, an empty element
-of a list — or names different values for one dimension in two places is
-answered **400** naming where, also before any call.
+A partner-bound request that carries a dimension malformed — an empty value, an
+empty element of a list — or names different values for one dimension in two
+places is answered **400** naming where, also before any call.
+
+The scope is decided **on the way in only**, from what the request carries: the
+path, the query, headers, a urlencoded form and the JSON body. Nothing is looked
+up and the response is not inspected; the handler and its queries are the
+product's, unchanged.
 
 Inside the handler, `ScopeFromContext` returns what was resolved, for the checks a
 route declaration cannot reach — a scope that has to be applied to the request
@@ -609,9 +617,15 @@ scope:
     - { name: portfolioId,    from: header, param: X-Portfolio-Id,               collection: portfolios,    label: "Portfolio" }
 ```
 
+A product that builds its declaration publisher with the client its routes use
+needs nothing else: `declaration.New` wires the manifest's scope into the
+`*middleware.AuthClient` it is given as `Auth`.
+
 ```go
 auth := authMiddleware.NewAuthClient(authHost, authEnabled, logger)
-if err := declaration.WireScope(auth, embeddedManifest); err != nil { // before registering routes
+
+pub, err := declaration.New(declaration.Config{Auth: auth, Manifest: embeddedManifest /* , ... */})
+if err != nil {
     return err
 }
 
@@ -620,6 +634,15 @@ f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
     accountHandler.GetAccounts)
 ```
 
+Any other client takes it with `declaration.WireScope(auth, embeddedManifest)`.
+
+* The order does not matter: a route works out its scope on its **first
+  request**, not when it is registered, and again after every later wiring. A
+  route registered before the publisher is built derives from the manifest as
+  one registered after.
+* A service that never builds a publisher (its declaration switched off) has no
+  scope: every partner-bound request is refused 403, and nothing changes for any
+  other credential.
 * The scope is registered under the manifest's `service`, which must be the
   product the routes pass to `Authorize`. Routes of other products are untouched.
 * A `from: path` dimension applies to a route when one **whole** path segment is
@@ -634,7 +657,7 @@ f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
   declares nothing (a partner-bound credential is refused with 403).
 * An explicit `RequireScope` still works and wins, but may only name dimensions
   the manifest declares; one that names another is refused on every request and
-  logged at ERROR when the route is registered.
+  logged at ERROR on the route's first request.
 * Validation: `from` must be `path`, `query` or `header`; `name`, `param` and
   `collection` are required; names are unique, and so is each `param` within its
   `from` (header names compared without regard to letter case); a `path` param is
@@ -706,7 +729,7 @@ Every dimension is read from one of five places, the same for an explicit
 
 | Source | `from:` | Key (`param` / `field`) | Several values | Catalog | `scope.routes` |
 |---|---|---|---|---|---|
-| `FromPath` | `path` | path parameter, without `:` | never — one segment is one value | yes | no (derived from the path) |
+| `FromPath` | `path` | path parameter, without `:` | never — one segment is one value | yes | yes (the route's own parameter, see [Mapping a route's own path parameter](#mapping-a-routes-own-path-parameter-from-path)) |
 | `FromQuery` | `query` | query parameter | yes | yes | yes |
 | `FromHeader` | `header` | header name, any letter case | yes | yes | yes |
 | `FromBody` | `body` | path of keys in the JSON body | one per array element | no | yes |
@@ -740,10 +763,7 @@ authorization call and no handler call: the handler may act on either value, and
 no single question checks both. A place that does not carry the value is not a
 disagreement. For the body, every body value must be one the other place names,
 and every value the other place names must appear in the body; a body element
-that leaves an optional field out is asked with the other place's value. This
-holds between places that carry the value itself; a place whose value is
-[resolved](#resolving-a-request-value-into-a-dimension-resolve) is not
-checked for agreement, but joined (see there). Reading
+that leaves an optional field out is asked with the other place's value. Reading
 one dimension twice from the same place (the same header in two spellings, the
 same body field twice) is a misdeclaration and refuses every request on the
 route. Two **distinct** body fields are not the same place: see
@@ -799,17 +819,18 @@ scope:
     asked with that element's other fields;
   * no other field may read inside its elements (`accountTarget.ids[].x`): the
     route fails at `WireScope`.
-* The body is read **only for a partner-bound credential**. Every other caller is
-  decided as before: one authorization call carrying only the dimensions read
-  from the path, headers or query, and the body left to the handler.
+* The body is read **only for a partner-bound credential**, like the rest of the
+  scope. Every other caller is decided as before: one authorization call without
+  attributes, and the body left to the handler.
 * For a partner-bound credential, a body that is not JSON, a field that is
   missing, empty or not a string, an array that is missing or empty, or a key
   repeated in another letter case is answered **400 naming the field**, with no
   authorization call and no handler call. The handler reads the body untouched.
 * All the questions of one request share one timeout (`AUTH_TIMEOUT`), the
   token is verified once, and the first denial ends the request.
-* Validation at `WireScope`: `from` must be `body`, `form`, `query` or `header`,
-  `field` is required and valid for its `from`, `name` must be a catalog
+* Validation when the manifest is wired (`declaration.New` or `WireScope`):
+  `from` must be `body`, `form`, `query`, `header` or `path`, `field` is
+  required and valid for its `from`, `name` must be a catalog
   dimension, routes are unique by method and path, a route reads its body as
   JSON or as a form but not both, and the fields must fit together; any error
   fails the boot.
@@ -850,9 +871,7 @@ organization from the path — and is refused when any one is denied.
 * **Per field.** `optional` applies to each field on its own: an optional field
   left out adds no value and the other fields are still asked; a required one
   left out is refused with 400 naming it. When every field of the dimension is
-  left out, the questions are asked without it. `resolve` applies per field
-  too: each field is translated by its own resolver, its value given the
-  siblings of its own element, in one call per resolver for the whole body.
+  left out, the questions are asked without it.
 * **Same rules as any body.** The questions of every field count together
   toward the cap of 100 distinct sets per request; over it, the request is
   refused with 400 before any call.
@@ -897,265 +916,38 @@ fields with `from: form`, the field name as `field`:
 * A route reads its body either as JSON (`from: body`) or as a form
   (`from: form`), never both. The catalog reads no body.
 
-### Resolving a request value into a dimension (`resolve`)
+### Mapping a route's own path parameter (`from: path`)
 
-Some requests do not carry the dimension's value, but a key the product can
-translate into it: an account alias where the scope names account ids, a
-transaction id whose legs name the accounts. Name a resolver on the dimension,
-and register it at boot:
-
-```yaml
-scope:
-  dimensions:
-    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations }
-    - { name: ledgerId,       from: path, param: ledger_id,       collection: ledgers }
-    - { name: accountId,      from: path, param: account_id,      collection: accounts }
-  routes:
-    - method: GET
-      path: /v1/organizations/:organization_id/ledgers/:ledger_id/transactions/:transaction_id
-      dimensions:
-        - { name: accountId, from: path, field: transaction_id, resolve: transactionAccounts }
-    - method: POST
-      path: /v1/transfers
-      dimensions:
-        - { name: organizationId, from: body, field: "debits[].organizationId" }
-        - { name: ledgerId,       from: body, field: "debits[].ledgerId" }
-        - { name: accountId,      from: body, field: "debits[].alias", resolve: accountByAlias }
-```
-
-```go
-auth.RegisterScopeResolver("transactionAccounts", func(ctx context.Context, in authMiddleware.ResolveInput) ([][]string, error) {
-    // in.Items: the transaction ids the request names, distinct ({Value: "tx-1"}).
-    // in.Known: {"organizationId": [...], "ledgerId": [...]} read from the path.
-    // The answer has one entry per item, in the same order.
-    return repo.AccountsOfTransactions(ctx, in.Known["organizationId"], in.Known["ledgerId"], in.Items)
-})
-
-auth.RegisterScopeResolver("accountByAlias", func(ctx context.Context, in authMiddleware.ResolveInput) ([][]string, error) {
-    principal, ok := authMiddleware.PrincipalFromContext(ctx) // validated before any resolver runs
-    if !ok {
-        return nil, errors.New("no validated principal")
-    }
-    repo := reposByTenant(principal.TenantID)
-
-    out := make([][]string, len(in.Items))
-    for i, item := range in.Items {
-        // item.Siblings: the fields read from the same element as the alias,
-        // {"organizationId": "...", "ledgerId": "..."}.
-        out[i] = repo.AccountIDsByAlias(ctx, item.Siblings["organizationId"], item.Siblings["ledgerId"], item.Value)
-    }
-    return out, nil
-})
-
-if err := declaration.WireScope(auth, embeddedManifest); err != nil { // after registering
-    return err
-}
-```
-
-* **A resolver runs only for a validated credential.** For a partner-bound
-  credential, the request is first asked **without** its resolved values: the
-  dimensions read from the path, query, headers, form and the body's plain
-  fields, one question per distinct set. Only once every one is allowed do the
-  resolvers run; then the resolved values are asked. A credential refused there
-  (401 or 403) never reaches a resolver. A route whose every dimension is
-  resolved is first asked a question naming no dimension, which validates the
-  credential only; the request is still decided on the resolved values.
-  That first question lists the dimensions about to be resolved in a
-  [`pending`](#-expected-authorization-service-response) member, so the
-  service does not refuse it for leaving them out.
-* **The resolver's context carries the validated identity.**
-  `authMiddleware.PrincipalFromContext(ctx)` returns the subject, type, client
-  id and `TenantID` of the credential that first question accepted — pick the
-  tenant's database from it. The context also carries the request's deadline.
-  This holds under either M2M derivation model: an application token's
-  `Subject` is its own `sub` claim, even when `AUTH_M2M_INVERSION_ENABLED` is
-  off and the authorization service is asked under the product role. A
-  credential whose claims name no principal (an application token without a
-  `sub`, or a type other than `normal-user` or `application`) is refused with
-  401 before any resolver runs.
-* A resolver receives every distinct value one request names for the
-  dimension in **one call** (at most 100 items), together with `Known`: the
-  dimensions the request names directly — path, query, headers, form — so the
-  lookup can be confined to them. It returns one entry per item, in the order
-  of `Items`: the dimension values the item stands for.
-* **A body value comes with its siblings.** `Item.Siblings` holds the values of
-  the route's other body dimensions read from the same element — those declared
-  under the same element prefix (`debits[].organizationId` and
-  `debits[].ledgerId` for `debits[].alias`) that the element names and that are
-  not resolved themselves. For a string of an array of strings
-  (`targets[].aliases[]`), the element is the one holding the array
-  (`targets[].ledgerId`). The same value read with different siblings is one
-  item per context, so an alias unique only within its ledger is looked up in
-  each. `Siblings` is `nil` when the element names none, and always for a value
-  read outside the body.
-* **One value may resolve to several.** Each resolved value is its own question
-  and every one must be allowed, combined with the request's other dimensions
-  exactly as several values from one carrier are. A body value stays with the
-  other fields of its array element — the siblings it was resolved with.
-* **Calls are bounded.** At most 100 questions about the known dimensions, one
-  resolver call per resolved dimension, then at most 100 questions about the
-  resolved values. The decision cache answers repeats of either. A request with
-  no value to resolve (an optional one left out) is asked once, as before.
-* **Failures never let the request through:**
-  * an item the resolver maps to no value, and a resolved value the
-    authorization service denies, both answer **403** with the same message,
-    naming where the value was read — `scope body field "debits[2].alias" is
-    outside this credential's scope or does not exist` — so a partner cannot
-    tell a value that does not exist from one it may not see;
-  * a resolver error, an answer whose length differs from `Items`, or an empty
-    string among its values is answered **503** naming the resolver; the error
-    is logged, not returned to the caller;
-  * more than 100 distinct items to resolve is answered **400**.
-* **Optional and resolving to nothing.** On a resolved dimension declared
-  `optional`, an item the resolver maps to no value is not refused: its
-  question is asked **without the dimension**, and the authorization service
-  decides on the dimensions the credential is scoped on. A credential scoped on
-  that dimension is still denied, since the question does not name it. A body
-  element is asked without it on its own; outside the body, when one of several
-  values of a carrier resolves to nothing, the request is asked without the
-  dimension at all. A resolved dimension not declared optional keeps refusing
-  such an item with 403, as above.
-* **A resolved value joins the other carriers.** A resolved value is derived by
-  the server, not asserted by the client, so it is not checked for agreement
-  with the same dimension named elsewhere (the path's `:account_id` and a
-  resolved alias, or a body field naming a target and the path resolving to
-  the current value, say): the values of both are asked, and **every one must
-  be allowed** — moving a record from one value to another needs both allowed.
-  Two carriers that both name the value itself must still agree.
-* `resolve` may be declared on any dimension: a catalog dimension, or a
-  `scope.routes` dimension from any carrier. A route may declare `from: path`
-  **only** with `resolve`, `field` naming a parameter of its path; a path
-  dimension without it is derived from the catalog.
-* Resolution runs **only for a partner-bound credential**, like the body's
-  dimensions. Any other caller is asked without the resolved dimension, and no
-  resolver is called.
-* A manifest naming a resolver that is not registered fails `WireScope`; an
-  explicit `Dim(...).Resolve(name)` naming one is a misdeclared route, refused
-  on every request and logged at ERROR when registered. Register resolvers
-  first.
-* `resolve` is read by this library only: it is never published and is not
-  part of `CanonicalHash`.
-
-#### Allowing a value when any of its resolved values is allowed (`match`)
-
-By default, every value a request value resolves to must be allowed
-(`match: all`). A dimension that declares `resolve` may instead declare
-`match: any`: the request value is allowed when **at least one** of the values
-it resolves to is allowed. A holder with accounts in two ledgers, for example,
-is then visible to a partner scoped on either ledger:
-
-```yaml
-  routes:
-    - method: GET
-      path: /v1/organizations/:organization_id/holders/:holder_id
-      dimensions:
-        - { name: ledgerId, from: path, field: holder_id, resolve: holderLedgers, match: any }
-```
-
-In Go, `Dim(...).Resolve(name).MatchAny()`.
-
-* **Each request value is judged on its own.** The values one request value
-  resolves to are alternatives: one question per value, asked in the order the
-  resolver returned them, stopping at the first allowed. Two request values
-  (two body elements, two query values) are two separate groups, and each must
-  have a value allowed.
-* **Everything else is unchanged.** Every other question of the request — the
-  other dimensions, and the values of a `match: all` dimension — must still be
-  allowed. Next to a dimension the request names several values of, each of
-  those values must be allowed together with at least one resolved value.
-* **Refusals are the same.** A request value that resolves to no value, and one
-  whose every resolved value is denied, both answer **403** with the same
-  message as with `match: all`. A refusal that is not a denial of the scope —
-  the credential rejected, the authorization service unavailable — ends the
-  request at once, whatever a later value would answer.
-* **Limits and caching are the same.** The first question without the resolved
-  values (and its `pending` member), the cap of 100 questions — counting every
-  value each request value resolves to, even one another request value also
-  resolves to — and the decision cache apply as with `match: all`. A question
-  two groups share is asked once.
-* **`ScopeFromContext` reports what was allowed.** `Sets` holds the questions
-  that were allowed; a resolved value denied or never asked is not among them.
-* **Named directly elsewhere too.** When another carrier names the same
-  dimension (the path's `:ledger_id`, a body field), the values it names are
-  asked on their own and must each be allowed, and each request value must
-  still have one of its resolved values allowed; the two are joined, not checked
-  for agreement, as for any resolved value.
-* `match` must be `all` or `any`, and only on a dimension that declares
-  `resolve`; anything else fails validation. `MatchAny` on a dimension without a
-  resolver is a misdeclared route. Like `resolve`, `match` is read by this
-  library only: it is never published and is not part of `CanonicalHash`.
-
-### Filtering a list by the partner's allowed values (`filter`)
-
-A route that lists instances — `GET .../accounts` — usually does not name the
-one the partner is scoped on: it asks for all of them. Instead of refusing such
-a request, a route can opt in to filtering: the authorization service answers
-with the values the partner may see, and the handler confines its list to them.
+The catalog names each path dimension by one parameter (`:account_id`). A route
+that calls the same instance something else — a generic `:id` — maps its own
+parameter to the dimension under `scope.routes`, without renaming the route:
 
 ```yaml
 scope:
+  dimensions: [ ... ]    # accountId read from path param account_id
   routes:
     - method: GET
-      path: /v1/organizations/:organization_id/ledgers/:ledger_id/accounts
-      filter: [accountId]
-    - method: GET
-      path: /v1/organizations
-      filter: [organizationId]
+      path: /v1/organizations/:organization_id/ledgers/:ledger_id/accounts/:id
+      dimensions:
+        - { name: accountId, from: path, field: id }
 ```
 
-```go
-func (h *Handler) ListAccounts(c fiber.Ctx) error {
-    filter := AccountFilter{}
+`GET /v1/organizations/org-1/ledgers/led-1/accounts/acc-1` then asks
+`{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-1"}`.
 
-    if scope, ok := authMiddleware.ScopeFromContext(c.Context()); ok {
-        if ids, ok := scope.Allowed("accountId"); ok {
-            filter.IDs = ids // WHERE id IN (...); an empty list lists nothing
-        }
-    }
-    // ...
-}
-```
+* `field` is the parameter as written after the `:` marker, and the route path
+  must carry it as one whole segment; anything else fails when the manifest is
+  wired.
+* **The route's mapping wins, for that route only.** On it, the catalog does not
+  derive the mapped dimension from its own parameter, nor any catalog dimension
+  from the mapped parameter: the parameter answers for the one dimension the
+  route names. Every other route derives from the catalog as before, and the
+  other dimensions of the route's path are still derived.
+* The catalog's rule of one parameter per dimension is the catalog's: several
+  routes may map the same generic parameter, each to its own dimension.
+* In code, `auth.SetManifestRouteScope(product, method, path, authMiddleware.Dim("accountId", authMiddleware.FromPath).At("id"))`.
 
-* `filter` names catalog dimensions, each once. A `scope.routes` entry may
-  declare a filter, dimensions, or both. Without a manifest,
-  `RequireScope(...).Filter("accountId")` declares the same on one route.
-* For a **partner-bound credential**, every question that leaves a filtered
-  dimension out carries it in a `filter` member (see
-  [the response](#-expected-authorization-service-response)). The service may
-  then allow the request and answer with `allowed` values for it.
-* `RequestScope.Allowed(dimension)` returns those values and `true`. **An empty
-  list (or `null`) means the partner may see none** — list nothing; it never
-  means "no restriction". `false` — the dimension absent from the answer — means
-  the service confined nothing on that dimension: it is **unrestricted**, and
-  the handler does not confine the list on it. Values the service returns for a
-  dimension the request did not ask to filter are ignored. When the request
-  asked several questions, `Allowed` returns the values any of them returned.
-* A filter route whose request names **no dimension at all** (`GET
-  /v1/organizations`) is asked instead of refused, and must be answered with
-  `allowed` values for **at least one** filtered dimension. The service answers
-  only for the dimensions the partner is scoped on — a partner scoped on one
-  dimension of a route filtering four is answered for that one — and the
-  others are unrestricted, as above. A grant with no `allowed` values for any
-  filtered dimension is refused with 403, since nothing else confines the list —
-  unless it carries `"unrestricted": true`: the partner has no scope on the
-  product, and the request is served with every filtered dimension
-  unrestricted (`Allowed` reports `false` for each). `allowed` values carried
-  as well still confine the list on their dimensions.
-
-  ```go
-  // filter: [merchantId, accountId]; the partner is scoped on merchantId only.
-  ids, ok := scope.Allowed("merchantId") // ["m-1"], true -> WHERE merchant_id IN ('m-1')
-  _, ok = scope.Allowed("accountId")      // nil, false    -> no condition on accounts
-  ```
-* A dimension the request does name is asked about, as on any other route, and
-  is not filtered.
-* Callers that are not partner-bound, and routes that do not filter, send no
-  `filter` member and read no allowed values: their requests are unchanged.
-* A service that does not know `filter` keeps denying the request as before.
-  The allowed values are cached with the decision, and the filter is part of
-  the cache key.
-* `filter` lives under `scope.routes`, which this library reads alone: it is
-  never published and is not part of `CanonicalHash`.
+### Publishing the scope
 
 **Publication.** The scope section is published to the access manager whenever
 the product's auth is on, independently of the permission declaration switch.
@@ -1281,82 +1073,6 @@ answered with:
 
 The field is optional and additive. A service that never publishes it produces
 exactly the behavior this middleware had before the field existed.
-
-A partner-bound request on a route that [filters](#filtering-a-list-by-the-partners-allowed-values-filter)
-names, in a `filter` member of the request, the filtered dimensions it leaves
-out:
-
-```json
-{
-    "sub": "acme/app",
-    "resource": "accounts",
-    "action": "get",
-    "product": "midaz",
-    "attributes": {"organizationId": "org-1", "ledgerId": "led-1"},
-    "filter": ["accountId"]
-}
-```
-
-Instead of denying because `accountId` is absent, the service may allow the
-request and answer with the values the partner may see:
-
-```json
-{
-    "authorized": true,
-    "timestamp": "2025-03-03T12:00:00Z",
-    "allowed": {"accountId": ["acc-1", "acc-2"]}
-}
-```
-
-* `allowed` is read only on a grant, and only for the dimensions the request
-  named in `filter`. A list, possibly empty, of non-empty strings; `null` reads
-  as an empty list. Any other shape is the service failing to answer (503).
-* A grant without `allowed` for a dimension confines nothing on it, except on a
-  request that names no dimension at all, which is then refused — unless the
-  grant carries `unrestricted`.
-* `unrestricted` (boolean, default `false`) is the explicit statement that the
-  partner is not confined on the product at all: it has no scope on it. It
-  lets a request that names no dimension be served with no `allowed` values,
-  every filtered dimension unrestricted:
-
-  ```json
-  {"authorized": true, "timestamp": "2025-03-03T12:00:00Z", "unrestricted": true}
-  ```
-
-  It is read only on a grant, only for a partner-bound credential, and only on
-  a request that carries `filter` and names no dimension; anywhere else it is
-  ignored. Send it only for a partner with no scope on the product. `allowed`
-  values sent with it win on their dimensions — they are the narrower answer.
-* A request without `filter` never needs `allowed`, and a denial is a denial
-  whatever it carries.
-
-A partner-bound request on a route that [resolves](#resolving-a-request-value-into-a-dimension-resolve)
-is first asked without its resolved values. That question names, in a
-`pending` member, the dimensions the request carries values of that are about
-to be resolved:
-
-```json
-{
-    "sub": "acme/app",
-    "resource": "transactions",
-    "action": "post",
-    "product": "midaz",
-    "attributes": {"organizationId": "org-1", "ledgerId": "led-1"},
-    "pending": ["accountId"]
-}
-```
-
-* `pending` is a list of dimension names, each once, in name order. A
-  dimension in it is not absent from the request: the service must not deny
-  because it is missing (a scoped dimension whose `covers` include the
-  resource, say), while still validating the credential and every dimension
-  the request names.
-* It is sent only on that first question, and only for resolved dimensions the
-  request carries a value of. The questions about the resolved values name
-  them in `attributes` and carry no `pending`; no other request carries it.
-* A service that does not know `pending` ignores it and decides as before.
-* `pending` is part of the decision cache key: the same question with and
-  without it are two questions.
 
 ## 🔒 gRPC usage
 
