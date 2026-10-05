@@ -393,25 +393,7 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 		return fmt.Errorf("wire scope: %w", err)
 	}
 
-	var dims []middleware.Dimension
-
-	if m.Scope != nil {
-		dims = make([]middleware.Dimension, 0, len(m.Scope.Dimensions))
-		for _, d := range m.Scope.Dimensions {
-			dim := middleware.Dim(d.Name, catalogDimensionSources[d.From]).At(d.Param)
-			if d.Resolve != "" {
-				dim = dim.Resolve(d.Resolve)
-			}
-
-			if d.Match == matchAny {
-				dim = dim.MatchAny()
-			}
-
-			dims = append(dims, dim)
-		}
-	}
-
-	if err := auth.SetManifestScope(m.Service, dims...); err != nil {
+	if err := auth.SetManifestScope(m.Service, catalogDimensions(m.Scope)...); err != nil {
 		return fmt.Errorf("wire scope: %w", err)
 	}
 
@@ -420,19 +402,49 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 	}
 
 	for _, r := range m.Scope.Routes {
-		routeDims := routeDimensions(r)
+		if err := wireRoute(auth, m.Service, r); err != nil {
+			return fmt.Errorf("wire scope: %w", err)
+		}
+	}
 
-		if len(routeDims) > 0 {
-			if err := auth.SetManifestRouteScope(m.Service, r.Method, r.Path, routeDims...); err != nil {
-				return fmt.Errorf("wire scope: %w", err)
-			}
+	return nil
+}
+
+// catalogDimensions builds the middleware dimensions of the scope catalog, in
+// catalog order; none for a manifest without a scope section.
+func catalogDimensions(scope *DeclarationScope) []middleware.Dimension {
+	if scope == nil {
+		return nil
+	}
+
+	dims := make([]middleware.Dimension, 0, len(scope.Dimensions))
+	for _, d := range scope.Dimensions {
+		dim := middleware.Dim(d.Name, catalogDimensionSources[d.From]).At(d.Param)
+		if d.Resolve != "" {
+			dim = dim.Resolve(d.Resolve)
 		}
 
-		if len(r.Filter) > 0 {
-			if err := auth.SetManifestRouteFilter(m.Service, r.Method, r.Path, r.Filter...); err != nil {
-				return fmt.Errorf("wire scope: %w", err)
-			}
+		if d.Match == matchAny {
+			dim = dim.MatchAny()
 		}
+
+		dims = append(dims, dim)
+	}
+
+	return dims
+}
+
+// wireRoute registers what one scope.routes entry declares: the dimensions it
+// reads, then the dimensions it filters on.
+func wireRoute(auth *middleware.AuthClient, service string, r DeclarationScopeRoute) error {
+	if routeDims := routeDimensions(r); len(routeDims) > 0 {
+		if err := auth.SetManifestRouteScope(service, r.Method, r.Path, routeDims...); err != nil {
+			return err
+		}
+	}
+
+	if len(r.Filter) > 0 {
+		return auth.SetManifestRouteFilter(service, r.Method, r.Path, r.Filter...)
 	}
 
 	return nil
