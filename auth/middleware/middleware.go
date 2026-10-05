@@ -37,17 +37,11 @@ type AuthClient struct {
 	Enabled bool
 	Logger  obs.Logger
 
-	// manifestScopes holds each product's scope catalog, set by
-	// SetManifestScope and read by each route on its first request.
-	manifestScopes  map[string][]Dimension
-	manifestScopeMu sync.RWMutex
-	// manifestRouteScopes holds, per product, the dimensions single routes
-	// read from their request body, set by SetManifestRouteScope and keyed by
-	// method and path. Guarded by manifestScopeMu.
-	manifestRouteScopes map[string]map[string]routeBodyScope
-	// manifestGen counts manifest scope changes; routes compare it to what they
-	// derived from. Guarded by manifestScopeMu.
-	manifestGen uint64
+	// manifestScope holds each product's scope catalog and route scopes, set by
+	// SetManifestScope and SetManifestRouteScope and read by each route on its
+	// first request. A product it has no catalog for falls back to the
+	// process-wide one (see SetProductManifestScope).
+	manifestScope manifestScopeStore
 
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the

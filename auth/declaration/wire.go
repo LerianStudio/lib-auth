@@ -350,9 +350,11 @@ func routeDimensions(r DeclarationScopeRoute) []middleware.Dimension {
 // registers its scope under manifest.service, which must be the product name the
 // routes pass to Authorize.
 //
-// New does this for the client it is given as Config.Auth, so a product that
-// builds its publisher with the client its routes use needs no call of its own.
-// WireScope is for any other client. It may be called before or after the
+// New does this for the client it is given as Config.Auth, and registers the
+// scope process-wide for every client with no catalog of its own for the
+// product, so a product that builds a publisher needs no call of its own.
+// WireScope is for a client whose routes must follow a manifest no publisher
+// is built from. It may be called before or after the
 // routes are registered: each route works out its scope on its first request.
 //
 //	auth := middleware.NewAuthClient(authHost, authEnabled, logger)
@@ -389,11 +391,30 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 	return nil
 }
 
+// scopeTarget is where a manifest's scope section is wired: one authorization
+// client, or the process-wide registry every client without a catalog of its
+// own falls back to.
+type scopeTarget interface {
+	SetManifestScope(product string, dims ...middleware.Dimension) error
+	SetManifestRouteScope(product, method, path string, dims ...middleware.Dimension) error
+}
+
+// productScopes is the process-wide registry as a scopeTarget.
+type productScopes struct{}
+
+func (productScopes) SetManifestScope(product string, dims ...middleware.Dimension) error {
+	return middleware.SetProductManifestScope(product, dims...)
+}
+
+func (productScopes) SetManifestRouteScope(product, method, path string, dims ...middleware.Dimension) error {
+	return middleware.SetProductManifestRouteScope(product, method, path, dims...)
+}
+
 // wireManifestScope registers a validated manifest's scope section under its
 // service: the catalog, then the dimensions of every scope.routes entry. A
 // manifest without a scope section removes the service's catalog, leaving the
-// client as if none had been wired.
-func wireManifestScope(auth *middleware.AuthClient, m *DeclarationManifest) error {
+// target as if none had been wired.
+func wireManifestScope(auth scopeTarget, m *DeclarationManifest) error {
 	if err := auth.SetManifestScope(m.Service, catalogDimensions(m.Scope)...); err != nil {
 		return err
 	}

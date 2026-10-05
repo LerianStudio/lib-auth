@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -92,11 +93,15 @@ func TestWireScope_ManifestWithoutScopeIsANoop(t *testing.T) {
 	rec := newAuthorizeRecorder(t)
 	auth := middleware.NewAuthClient(rec.URL, true, obs.Nop())
 
-	require.NoError(t, WireScope(auth, []byte(feesJSON)))
+	// A service no other test registers: the process-wide registry has no
+	// catalog for it either.
+	unscoped := strings.Replace(feesJSON, `"service": "plugin-fees"`, `"service": "plugin-fees-unscoped"`, 1)
+	require.Contains(t, unscoped, `"plugin-fees-unscoped"`)
+	require.NoError(t, WireScope(auth, []byte(unscoped)))
 
 	app := fiber.New()
 	app.Get("/v1/organizations/:organization_id",
-		auth.Authorize("plugin-fees", "ledgers", "get"),
+		auth.Authorize("plugin-fees-unscoped", "ledgers", "get"),
 		func(c fiber.Ctx) error { return c.SendString("ok") })
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/organizations/org-1", nil)

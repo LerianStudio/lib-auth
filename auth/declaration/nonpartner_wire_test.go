@@ -69,11 +69,11 @@ func compatToken(claims jwt.MapClaims) string {
 }
 
 // nonPartnerAuthorizeBodies builds the product the way a service does — one
-// client for its routes and its publisher, declaration.New given that client —
-// and returns the raw /v1/authorize body of each request a credential that is
+// client for its routes and its publisher, declaration.New given that client,
+// or, with separateGuard, declaration.New given a client of its own — and returns the raw /v1/authorize body of each request a credential that is
 // not partner-bound makes on it: a user and an application, on a route the
 // catalog scopes, a body route, and a route the catalog gives no account.
-func nonPartnerAuthorizeBodies(t *testing.T, manifest string) []string {
+func nonPartnerAuthorizeBodies(t *testing.T, manifest string, separateGuard bool) []string {
 	t.Helper()
 
 	var (
@@ -101,9 +101,14 @@ func nonPartnerAuthorizeBodies(t *testing.T, manifest string) []string {
 
 	auth := &middleware.AuthClient{Address: srv.URL, Enabled: true, Logger: obs.Nop(), M2MInversionEnabled: true}
 
+	minter := auth
+	if separateGuard {
+		minter = &middleware.AuthClient{Logger: obs.Nop()}
+	}
+
 	_, err := New(Config{
 		Slug: "midaz", Manifest: []byte(manifest), IdentityAddr: "http://identity.invalid",
-		Auth: auth, ClientID: "id", ClientSecret: "secret",
+		Auth: minter, ClientID: "id", ClientSecret: "secret",
 	})
 	require.NoError(t, err)
 
@@ -143,7 +148,7 @@ func nonPartnerAuthorizeBodies(t *testing.T, manifest string) []string {
 }
 
 // A credential that is not partner-bound sends, on a product whose manifest
-// declaration.New wired into its client, exactly the authorize bodies the
+// declaration.New wired into its client or registered for another one, exactly the authorize bodies the
 // develop line sends — where the same wiring attached no scope: no attributes,
 // no other member, the same bytes.
 func TestNew_NonPartnerAuthorizeBodiesMatchTheDevelopLine(t *testing.T) {
@@ -156,10 +161,12 @@ func TestNew_NonPartnerAuthorizeBodiesMatchTheDevelopLine(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &golden))
 	require.Len(t, golden, 10, "the golden file holds one body per request")
 
-	got := nonPartnerAuthorizeBodies(t, wireCompatManifest)
-	assert.Equal(t, golden, got)
+	for _, separateGuard := range []bool{false, true} {
+		got := nonPartnerAuthorizeBodies(t, wireCompatManifest, separateGuard)
+		assert.Equal(t, golden, got, "separate guard client: %v", separateGuard)
 
-	for _, body := range got {
-		assert.NotContains(t, body, "attributes")
+		for _, body := range got {
+			assert.NotContains(t, body, "attributes")
+		}
 	}
 }

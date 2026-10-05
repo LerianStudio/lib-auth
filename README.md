@@ -634,6 +634,12 @@ f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
     accountHandler.GetAccounts)
 ```
 
+`declaration.New` also registers the scope process-wide under the manifest's
+`service`. A route that authorizes that product with a different client, one
+with no scope of its own for the product, uses the registered scope, so a
+product whose publisher and routes are built with separate clients needs
+nothing else either. A client with a scope of its own for the product keeps it.
+
 Any other client takes it with `declaration.WireScope(auth, embeddedManifest)`.
 
 * The order does not matter: a route works out its scope on its **first

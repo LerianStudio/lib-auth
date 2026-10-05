@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -94,8 +95,14 @@ func status(t *testing.T, app *fiber.App, method, target, token string) int {
 func newPublisher(t *testing.T, auth TokenMinter, manifest string) {
 	t.Helper()
 
+	newPublisherFor(t, "midaz", auth, manifest)
+}
+
+func newPublisherFor(t *testing.T, slug string, auth TokenMinter, manifest string) {
+	t.Helper()
+
 	_, err := New(Config{
-		Slug: "midaz", Manifest: []byte(manifest), IdentityAddr: "http://identity.invalid",
+		Slug: slug, Manifest: []byte(manifest), IdentityAddr: "http://identity.invalid",
 		Auth: auth, ClientID: "id", ClientSecret: "secret",
 	})
 	require.NoError(t, err)
@@ -134,11 +141,18 @@ func TestNew_WiresTheManifestScopeIntoTheClient(t *testing.T) {
 func TestNew_NotCalledLeavesPartnersDenied(t *testing.T) {
 	t.Parallel()
 
+	// A service no other test publishes, so nothing is registered for it
+	// process-wide until this test calls New.
+	const product = "midaz-not-called"
+
+	manifest := strings.Replace(wireCompatManifest, "service: midaz", "service: "+product, 1)
+	t.Cleanup(func() { require.NoError(t, middleware.SetProductManifestScope(product)) })
+
 	rec := newScopeRecorder(t, "")
 	auth := &middleware.AuthClient{Address: rec.URL, Enabled: true, Logger: obs.Nop(), M2MInversionEnabled: true}
 
 	app := fiber.New()
-	app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts/:account_id", auth.Authorize("midaz", "accounts", "get"), compatOK)
+	app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts/:account_id", auth.Authorize(product, "accounts", "get"), compatOK)
 
 	target := "/v1/organizations/org-1/ledgers/led-1/accounts/acc-1"
 	user := compatToken(jwt.MapClaims{"type": "normal-user", "owner": "acme-org", "sub": "user-1"})
@@ -151,7 +165,7 @@ func TestNew_NotCalledLeavesPartnersDenied(t *testing.T) {
 
 	// Positive control: once New wires the manifest, the same partner request
 	// is asked and allowed.
-	newPublisher(t, auth, wireCompatManifest)
+	newPublisherFor(t, product, auth, manifest)
 	assert.Equal(t, http.StatusOK, status(t, app, http.MethodGet, target, compatPartner))
 }
 

@@ -108,7 +108,10 @@ type Config struct {
 	// When it is a *middleware.AuthClient, New also wires the manifest's scope
 	// section into it (see WireScope): the routes that client authorizes derive
 	// their partner scope from this manifest, whatever the order the routes and
-	// the publisher are built in.
+	// the publisher are built in. New also registers the scope process-wide under
+	// manifest.service (see middleware.SetProductManifestScope), so routes that
+	// authorize that product with another client, one with no catalog of its
+	// own, derive it too.
 	Auth TokenMinter
 	// ClientID / ClientSecret are the plugin's M2M credentials (from manual
 	// provisioning). Required. ClientSecret is NEVER logged.
@@ -253,6 +256,14 @@ func New(cfg Config) (*Publisher, error) {
 		if err := wireManifestScope(auth, manifest); err != nil {
 			return nil, fmt.Errorf("wire manifest scope: %w", err)
 		}
+	}
+
+	// A product may authorize its routes with a client other than the one it
+	// hands the publisher. The scope is also registered process-wide under the
+	// manifest's service, and every client with no catalog of its own for that
+	// product uses it.
+	if err := wireManifestScope(productScopes{}, manifest); err != nil {
+		return nil, fmt.Errorf("register manifest scope: %w", err)
 	}
 
 	var published publication = manifest

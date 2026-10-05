@@ -4,7 +4,27 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// manifestScopeStore holds products' scope catalogs and route scopes. Every
+// AuthClient has one, wired for the routes it authorizes; productScopes is the
+// process-wide one, used by any client that has no catalog of its own for the
+// product a route authorizes.
+type manifestScopeStore struct {
+	mu sync.RWMutex
+	// scopes holds each product's scope catalog.
+	scopes map[string][]Dimension
+	// routes holds, per product, the dimensions single routes read from
+	// somewhere other than their path, keyed by method and path.
+	routes map[string]map[string]routeBodyScope
+	// gen counts changes; routes compare it to what they derived from.
+	gen uint64
+}
+
+// productScopes is the process-wide store declaration.New registers a manifest's
+// scope in, keyed by the manifest's service.
+var productScopes manifestScopeStore
 
 // SetManifestScope wires the product's scope catalog — the scope section of its
 // declaration manifest — into the client, so Authorize can derive each route's
@@ -13,8 +33,9 @@ import (
 // dims are the catalog in tree order, each read from a path parameter
 // (Dim(name, FromPath).At(param)), a query parameter (FromQuery) or a header
 // (FromHeader); no two read the same place. The declaration package builds them from the
-// embedded manifest: declaration.New wires it into the client it is given, and
-// declaration.WireScope(auth, manifest) into any other. It may be called before
+// embedded manifest: declaration.New wires it into the client it is given and
+// registers it process-wide (see SetProductManifestScope), and
+// declaration.WireScope(auth, manifest) wires it into any other client. It may be called before
 // or after the routes are registered: a route works out its scope on its first
 // request, and again on the first request after every later call.
 //
@@ -35,6 +56,30 @@ func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) erro
 		return errors.New("manifest scope: nil auth client")
 	}
 
+	return auth.manifestScope.setScope(product, dims)
+}
+
+// SetProductManifestScope registers the product's scope catalog process-wide:
+// every AuthClient that has no catalog of its own for the product uses it, as if
+// SetManifestScope had been called on it. A client with a catalog of its own for
+// the product keeps it. Calling it with no dims removes the registered catalog.
+//
+// declaration.New registers the manifest it is given here, so the routes of a
+// product derive their scope from its manifest even when they authorize with a
+// client other than the one the publisher was built with.
+func SetProductManifestScope(product string, dims ...Dimension) error {
+	return productScopes.setScope(product, dims)
+}
+
+// SetProductManifestRouteScope declares, process-wide, the dimensions one route
+// of the product reads from somewhere other than its path (see
+// SetManifestRouteScope), for a product whose catalog SetProductManifestScope
+// registered.
+func SetProductManifestRouteScope(product, method, path string, dims ...Dimension) error {
+	return productScopes.setRouteScope(product, method, path, dims)
+}
+
+func (store *manifestScopeStore) setScope(product string, dims []Dimension) error {
 	if strings.TrimSpace(product) == "" {
 		return errors.New("manifest scope: product must not be empty")
 	}
@@ -64,25 +109,25 @@ func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) erro
 		keys[dim.carrier()] = struct{}{}
 	}
 
-	auth.manifestScopeMu.Lock()
-	defer auth.manifestScopeMu.Unlock()
+	store.mu.Lock()
+	defer store.mu.Unlock()
 
 	// Route body scopes were checked against the catalog being replaced, and
 	// routes already registered must stop using what they derived from it.
-	delete(auth.manifestRouteScopes, product)
-	auth.manifestGen++
+	delete(store.routes, product)
+	store.gen++
 
 	if len(dims) == 0 {
-		delete(auth.manifestScopes, product)
+		delete(store.scopes, product)
 
 		return nil
 	}
 
-	if auth.manifestScopes == nil {
-		auth.manifestScopes = make(map[string][]Dimension)
+	if store.scopes == nil {
+		store.scopes = make(map[string][]Dimension)
 	}
 
-	auth.manifestScopes[product] = append([]Dimension(nil), dims...)
+	store.scopes[product] = append([]Dimension(nil), dims...)
 
 	return nil
 }
@@ -116,15 +161,23 @@ func routeScopeKey(method, path string) string {
 // RequireScope keeps its own declaration and ignores this. SetManifestScope
 // drops every route declared for the product.
 func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims ...Dimension) error {
-	method, err := auth.routeTarget(product, method, path, len(dims))
+	if auth == nil {
+		return errors.New("manifest route scope: nil auth client")
+	}
+
+	return auth.manifestScope.setRouteScope(product, method, path, dims)
+}
+
+func (store *manifestScopeStore) setRouteScope(product, method, path string, dims []Dimension) error {
+	method, err := routeTarget(product, method, path, len(dims))
 	if err != nil {
 		return err
 	}
 
-	auth.manifestScopeMu.Lock()
-	defer auth.manifestScopeMu.Unlock()
+	store.mu.Lock()
+	defer store.mu.Unlock()
 
-	catalog := auth.manifestScopes[product]
+	catalog := store.scopes[product]
 	if len(catalog) == 0 {
 		return errors.New("manifest route scope: product " + product + " has no manifest scope; call SetManifestScope first")
 	}
@@ -147,27 +200,23 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 		return errors.New("manifest route scope: " + method + " " + path + ": " + problem)
 	}
 
-	if auth.manifestRouteScopes == nil {
-		auth.manifestRouteScopes = make(map[string]map[string]routeBodyScope)
+	if store.routes == nil {
+		store.routes = make(map[string]map[string]routeBodyScope)
 	}
 
-	if auth.manifestRouteScopes[product] == nil {
-		auth.manifestRouteScopes[product] = make(map[string]routeBodyScope)
+	if store.routes[product] == nil {
+		store.routes[product] = make(map[string]routeBodyScope)
 	}
 
-	auth.manifestRouteScopes[product][routeScopeKey(method, path)] = routeBodyScope{dims: routeDims, plan: plan}
-	auth.manifestGen++
+	store.routes[product][routeScopeKey(method, path)] = routeBodyScope{dims: routeDims, plan: plan}
+	store.gen++
 
 	return nil
 }
 
 // routeTarget checks the route SetManifestRouteScope addresses, and returns its
 // method normalized.
-func (auth *AuthClient) routeTarget(product, method, path string, count int) (string, error) {
-	if auth == nil {
-		return "", errors.New("manifest route scope: nil auth client")
-	}
-
+func routeTarget(product, method, path string, count int) (string, error) {
 	method = strings.ToUpper(strings.TrimSpace(method))
 
 	switch {
@@ -199,22 +248,40 @@ func checkRouteDimension(product string, dim Dimension, catalog map[string]struc
 	return ""
 }
 
-// manifestGeneration is the count of manifest scope changes, read by routes to
-// tell whether what they derived is still current.
+// manifestGeneration is the count of manifest scope changes, the client's and
+// the process-wide ones, read by routes to tell whether what they derived is
+// still current. Both counts only grow, so their sum changes with either.
 func (auth *AuthClient) manifestGeneration() uint64 {
-	auth.manifestScopeMu.RLock()
-	defer auth.manifestScopeMu.RUnlock()
-
-	return auth.manifestGen
+	return auth.manifestScope.generation() + productScopes.generation()
 }
 
-// manifestRouteScope returns, in one consistent read, the manifest generation,
-// the product's catalog and the scope declared for the route key, if any.
+// manifestRouteScope returns the manifest generation, the product's catalog and
+// the scope declared for the route key, if any: the client's own when it has a
+// catalog for the product, the process-wide ones otherwise. Each store is read
+// in one consistent read; the generation covers both.
 func (auth *AuthClient) manifestRouteScope(product, key string) (uint64, []Dimension, routeBodyScope, bool) {
-	auth.manifestScopeMu.RLock()
-	defer auth.manifestScopeMu.RUnlock()
+	gen, catalog, body, declared := auth.manifestScope.route(product, key)
+	sharedGen, sharedCatalog, sharedBody, sharedDeclared := productScopes.route(product, key)
 
-	body, declared := auth.manifestRouteScopes[product][key]
+	if len(catalog) > 0 {
+		return gen + sharedGen, catalog, body, declared
+	}
 
-	return auth.manifestGen, auth.manifestScopes[product], body, declared
+	return gen + sharedGen, sharedCatalog, sharedBody, sharedDeclared
+}
+
+func (store *manifestScopeStore) generation() uint64 {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	return store.gen
+}
+
+func (store *manifestScopeStore) route(product, key string) (uint64, []Dimension, routeBodyScope, bool) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	body, declared := store.routes[product][key]
+
+	return store.gen, store.scopes[product], body, declared
 }
