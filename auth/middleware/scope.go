@@ -26,7 +26,7 @@ type Source int
 
 const (
 	// SourceUnset is the zero value and reads nothing. A dimension left at this
-	// source resolves empty, which the fail-closed guard denies.
+	// source is a misdeclaration, refused when the declaration is validated.
 	SourceUnset Source = iota
 	// FromPath reads a path parameter (fiber.Ctx.Params).
 	FromPath

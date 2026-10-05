@@ -1138,8 +1138,8 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 	}
 
 	// attributes is the ONLY member this version can add, and it is added only
-	// for a partner-bound question, which always names dimensions. For every
-	// other credential the payload is the same set of string members in the
+	// for a partner-bound question that names at least one dimension. For every
+	// other question the payload is the same set of string members in the
 	// same encoder as before, so a deployed caller's bytes on the wire do not
 	// move.
 	payload := make(map[string]any, len(requestBody)+1)
