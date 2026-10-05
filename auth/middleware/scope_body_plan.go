@@ -117,6 +117,39 @@ func renderPrefix(prefix []bodySegment) string {
 // header) is held, per request, to naming the same values in both. It returns a
 // nil plan when no dimension is read from the body.
 func compileBodyPlan(dims []Dimension) (*bodyPlan, string) {
+	fields, names, problem := bodyFieldsOf(dims)
+	if problem != "" || len(fields) == 0 {
+		return nil, problem
+	}
+
+	if problem = sameFieldTwice(fields); problem != "" {
+		return nil, problem
+	}
+
+	if problem = readInsideStrings(fields); problem != "" {
+		return nil, problem
+	}
+
+	plan := newBodyPlan(fields)
+
+	for _, leaf := range leafPrefixes(fields) {
+		var group bodyGroup
+
+		group, problem = buildBodyGroup(leaf, fields, names)
+		if problem != "" {
+			return nil, problem
+		}
+
+		plan.groups = append(plan.groups, group)
+	}
+
+	return plan, ""
+}
+
+// bodyFieldsOf parses the dimensions read from the body, in declaration
+// order, and returns them with the names they declare, or describes the first
+// whose field path is wrong.
+func bodyFieldsOf(dims []Dimension) ([]bodyField, map[string]struct{}, string) {
 	fields := make([]bodyField, 0, len(dims))
 	names := make(map[string]struct{})
 
@@ -125,43 +158,49 @@ func compileBodyPlan(dims []Dimension) (*bodyPlan, string) {
 			continue
 		}
 
-		segments, problem := parseBodyField(dim.key)
+		field, problem := newBodyField(dim)
 		if problem != "" {
-			return nil, "scope dimension " + dim.name + " " + problem
-		}
-
-		field := bodyField{dim: dim, segments: segments}
-
-		for i, seg := range segments {
-			if seg.array {
-				field.prefixLen = i + 1
-				field.depth++
-			}
-		}
-
-		field.strings = segments[len(segments)-1].array
-
-		field.element = segments[:field.prefixLen]
-		if field.strings {
-			field.element = segments[:enclosingArrayEnd(segments[:len(segments)-1])]
+			return nil, nil, problem
 		}
 
 		fields = append(fields, field)
 		names[dim.name] = struct{}{}
 	}
 
-	if len(fields) == 0 {
-		return nil, ""
+	return fields, names, ""
+}
+
+// newBodyField parses the field path of one body dimension, or describes what
+// is wrong with it.
+func newBodyField(dim Dimension) (bodyField, string) {
+	segments, problem := parseBodyField(dim.key)
+	if problem != "" {
+		return bodyField{}, "scope dimension " + dim.name + " " + problem
 	}
 
-	if problem := sameFieldTwice(fields); problem != "" {
-		return nil, problem
+	field := bodyField{dim: dim, segments: segments}
+
+	for i, seg := range segments {
+		if seg.array {
+			field.prefixLen = i + 1
+			field.depth++
+		}
 	}
 
-	if problem := readInsideStrings(fields); problem != "" {
-		return nil, problem
+	field.strings = segments[len(segments)-1].array
+
+	field.element = segments[:field.prefixLen]
+	if field.strings {
+		field.element = segments[:enclosingArrayEnd(segments[:len(segments)-1])]
 	}
 
+	return field, ""
+}
+
+// newBodyPlan is the plan of fields before its groups are built: the fields it
+// reads, the first location of each name, and whether every field is optional
+// and any is resolved.
+func newBodyPlan(fields []bodyField) *bodyPlan {
 	plan := &bodyPlan{fields: make([]string, 0, len(fields)), firstField: make(map[string]string), allOptional: true}
 	for _, f := range fields {
 		plan.fields = append(plan.fields, f.dim.key)
@@ -173,16 +212,7 @@ func compileBodyPlan(dims []Dimension) (*bodyPlan, string) {
 		}
 	}
 
-	for _, leaf := range leafPrefixes(fields) {
-		group, problem := buildBodyGroup(leaf, fields, names)
-		if problem != "" {
-			return nil, problem
-		}
-
-		plan.groups = append(plan.groups, group)
-	}
-
-	return plan, ""
+	return plan
 }
 
 // enclosingArrayEnd is the number of segments up to and including the last
