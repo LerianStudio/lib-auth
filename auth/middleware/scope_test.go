@@ -305,13 +305,13 @@ func TestAuthorize_CachedDenialKeepsItsReason(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// (5) Fail-closed guard, both halves
+// (5) A partner on an undeclared route is asked, and the answer stands
 // ---------------------------------------------------------------------------
 
-func TestAuthorize_GuardDeniesPartnerTokenOnUndeclaredRoute(t *testing.T) {
+func TestAuthorize_PartnerOnUndeclaredRouteIsAsked(t *testing.T) {
 	t.Parallel()
 
-	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	rec := newScopedPartnerAuthServer(t)
 	auth := &AuthClient{Address: rec.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
 
 	app := fiber.New()
@@ -323,9 +323,9 @@ func TestAuthorize_GuardDeniesPartnerTokenOnUndeclaredRoute(t *testing.T) {
 
 	resp, err := app.Test(req)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
-	assert.Equal(t, int64(0), rec.hits.Load(),
-		"an undeclared route cannot be scoped, so the decision is taken here and never asked")
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "the service's denial stands")
+	assert.Equal(t, `{"action":"get","product":"midaz","resource":"accounts","sub":"acme/app"}`, rec.lastBody(t),
+		"asked like any partner question, with no attributes member")
 
 	// Positive control, same route and same rig: a token with no partner claim is
 	// authorized normally. Without this the 403 above could be an unrelated denial.
@@ -335,7 +335,7 @@ func TestAuthorize_GuardDeniesPartnerTokenOnUndeclaredRoute(t *testing.T) {
 	ctrlResp, err := app.Test(ctrl)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, ctrlResp.StatusCode)
-	assert.Equal(t, int64(1), rec.hits.Load())
+	assert.Equal(t, int64(2), rec.hits.Load())
 }
 
 func TestAuthorize_GuardDeniesEmptyDeclaredSource(t *testing.T) {

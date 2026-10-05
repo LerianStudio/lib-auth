@@ -109,8 +109,15 @@ func TestWireScope_ManifestWithoutScopeIsANoop(t *testing.T) {
 
 	resp, err := app.Test(req)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusForbidden, resp.StatusCode,
-		"without a catalog the route declares nothing, and a partner credential is refused as before")
+	assert.Equal(t, http.StatusOK, resp.StatusCode,
+		"without a catalog the route declares nothing, and a partner credential is asked as is")
+
+	rec.mu.Lock()
+	body := rec.last
+	rec.mu.Unlock()
+
+	assert.NotEmpty(t, body, "the partner request reached the authorization service")
+	assert.NotContains(t, body, `"attributes"`)
 }
 
 func TestWireScope_Errors(t *testing.T) {

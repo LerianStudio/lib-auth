@@ -197,8 +197,8 @@ type authzParams struct {
 	clientIP    string
 	// attributes are the instance identifiers one question of a partner-bound
 	// request names. Nil for every other credential, and for a partner-bound
-	// request that names none — which the partner guard refuses: a request that
-	// cannot say WHERE it is pointing is unscopeable, not unscoped.
+	// request that names none — which is still asked: the authorization service
+	// decides it by the partner's own scope for the product.
 	attributes map[string]string
 }
 
@@ -540,7 +540,8 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // (see SetManifestScope), on its first request. The scope is read only for a
 // partner-bound credential: any other credential is decided exactly as on a
 // route with no scope, down to the bytes on the wire. A partner-bound
-// credential on a request that names no scope dimension is refused 403.
+// credential on a request that names no scope dimension is asked without
+// attributes, and the authorization service decides it.
 func (auth *AuthClient) Authorize(product, resource, action string, scopes ...ScopeDeclaration) fiber.Handler {
 	auth.warnMissingTrustedProxies()
 
@@ -1089,19 +1090,6 @@ func (auth *AuthClient) deriveCaller(ctx context.Context, span trace.Span, acces
 func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzParams, caller authzCaller) (authzResolution, Principal) {
 	principal, partner := caller.principal, caller.partner
 	userType, sub := principal.Type, principal.Subject
-
-	// Fail closed on an unscopeable partner. A credential bound to a partner is
-	// only ever allowed to reach SOME instances; a request that names no scope
-	// dimension — on a route whose manifest declares none, or with the optional
-	// ones left out — cannot say which instance it points at, so the
-	// authorization service would have to decide the "where" with nothing to
-	// decide it on. Refusing here — before the call — is the only answer that
-	// cannot accidentally widen the credential.
-	if partner != "" && len(p.attributes) == 0 {
-		logErrorf(ctx, auth.Logger, "Partner-bound credential on a request that names no scope dimension; denying (fail closed)")
-
-		return authzResolution{statusCode: http.StatusForbidden, partner: partner}, principal
-	}
 
 	requestBody := map[string]string{
 		"sub":      sub,

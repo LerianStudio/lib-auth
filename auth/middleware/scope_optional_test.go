@@ -218,13 +218,13 @@ func TestAuthorize_OptionalBody_ArrayOfARequiredFieldStaysRequired(t *testing.T)
 	assert.Equal(t, []map[string]string{{"organizationId": "org-1"}}, srv.attributeCalls())
 }
 
-// A partner request that ends up naming no dimension at all is a partner
-// request the route cannot scope: refused before the call, as a route that
-// declares nothing is. A body that names one is asked about.
-func TestAuthorize_OptionalBody_NothingNamedIsUnscopeable(t *testing.T) {
+// A partner request that ends up naming no dimension at all is asked without
+// attributes, as on a route that declares nothing, and the authorization
+// service's answer stands. A body that names one is asked about it.
+func TestAuthorize_OptionalBody_NothingNamedIsAskedWithoutAttributes(t *testing.T) {
 	t.Parallel()
 
-	srv := newDecidingAuthServer(t)
+	srv := newScopedPartnerAuthServer(t)
 	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath,
 		Dim("organizationId", FromBody).At("organizationId").Optional())
 
@@ -236,19 +236,20 @@ func TestAuthorize_OptionalBody_NothingNamedIsUnscopeable(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, got.status, body)
 	}
 
-	assert.Equal(t, int64(0), srv.hits.Load(), "refused before any call")
+	assert.Equal(t, []map[string]string{nil, nil, nil}, srv.attributeCalls(), "each asked, with no attributes")
 
 	got := doPost(t, app, directPath, partnerToken("acme/p1"), `{"organizationId":"org-1"}`)
 	assert.Equal(t, http.StatusOK, got.status, "positive control")
-	assert.Equal(t, []map[string]string{{"organizationId": "org-1"}}, srv.attributeCalls())
+	assert.Equal(t, []map[string]string{nil, nil, nil, {"organizationId": "org-1"}}, srv.attributeCalls())
 }
 
-// One element naming nothing among elements that do is refused the same way:
-// it is a question with no dimension, and every question must be scopeable.
-func TestAuthorize_OptionalBody_ElementNamingNothingIsUnscopeable(t *testing.T) {
+// One element naming nothing among elements that do is asked the same way: a
+// question with no attributes, which the authorization service decides, and
+// one denied question refuses the request.
+func TestAuthorize_OptionalBody_ElementNamingNothingIsAskedWithoutAttributes(t *testing.T) {
 	t.Parallel()
 
-	srv := newDecidingAuthServer(t)
+	srv := newScopedPartnerAuthServer(t)
 	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath,
 		Dim("ledgerId", FromBody).At("items[].ledgerId").Optional())
 
@@ -257,6 +258,7 @@ func TestAuthorize_OptionalBody_ElementNamingNothingIsUnscopeable(t *testing.T) 
 
 	got := doPost(t, app, directPath, partnerToken("acme/p1"), `{"items":[{"ledgerId":"led-1"},{}]}`)
 	assert.Equal(t, http.StatusForbidden, got.status)
+	assert.Equal(t, []map[string]string{{"ledgerId": "led-1"}, nil}, srv.attributeCalls())
 
 	got = doPost(t, app, directPath, partnerToken("acme/p1"), `{"items":[{"ledgerId":"led-1"},{"ledgerId":"led-2"}]}`)
 	assert.Equal(t, http.StatusOK, got.status, "positive control")

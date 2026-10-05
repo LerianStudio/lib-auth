@@ -443,7 +443,7 @@ func TestAuthorize_BodyScope_PathAndBodyOnOneRoute(t *testing.T) {
 func TestAuthorize_BodyScope_OnlyForItsRoute(t *testing.T) {
 	t.Parallel()
 
-	srv := newDecidingAuthServer(t)
+	srv := newScopedPartnerAuthServer(t)
 	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath, Dim("organizationId", FromBody).At("organizationId"))
 
 	handler := auth.Authorize("midaz", "transactions", "post")
@@ -455,8 +455,8 @@ func TestAuthorize_BodyScope_OnlyForItsRoute(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, doPost(t, app, directPath, partnerToken("acme/p1"), `{"organizationId":"org-1"}`).status)
 
-	// No dimension on the other two routes: a partner credential is refused
-	// before the call, exactly as an undeclared route.
+	// No dimension on the other two routes: a partner credential is asked with
+	// no attributes, exactly as on an undeclared route.
 	assert.Equal(t, http.StatusForbidden, doPost(t, app, "/v2/transactions/hold", partnerToken("acme/p1"), `{"organizationId":"org-1"}`).status)
 
 	req := httptest.NewRequest(http.MethodPut, directPath, strings.NewReader(`{"organizationId":"org-1"}`))
@@ -468,7 +468,7 @@ func TestAuthorize_BodyScope_OnlyForItsRoute(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
-	assert.Equal(t, int64(1), srv.hits.Load())
+	assert.Equal(t, []map[string]string{{"organizationId": "org-1"}, nil, nil}, srv.attributeCalls())
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +616,7 @@ func TestSetManifestRouteScope_NeedsTheCatalog(t *testing.T) {
 func TestSetManifestScope_ResetDropsRouteScopes(t *testing.T) {
 	t.Parallel()
 
-	srv := newDecidingAuthServer(t)
+	srv := newScopedPartnerAuthServer(t)
 	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath, Dim("organizationId", FromBody).At("organizationId"))
 	require.NoError(t, auth.SetManifestScope("midaz"))
 	require.NoError(t, auth.SetManifestScope("midaz", manifestDims()...))
@@ -625,7 +625,7 @@ func TestSetManifestScope_ResetDropsRouteScopes(t *testing.T) {
 	app.Post(directPath, auth.Authorize("midaz", "transactions", "post"), ok)
 
 	assert.Equal(t, http.StatusForbidden, doPost(t, app, directPath, partnerToken("acme/p1"), `{"organizationId":"org-1"}`).status)
-	assert.Equal(t, int64(0), srv.hits.Load())
+	assert.Equal(t, []map[string]string{nil}, srv.attributeCalls(), "the body is not read for a dropped route scope")
 }
 
 func TestRequireScope_BodyFieldValidation(t *testing.T) {
@@ -680,7 +680,7 @@ func TestAuthorize_RouteScope_HeaderAndBodyShareOnePipeline(t *testing.T) {
 func TestSetManifestScope_ResetAfterRegistrationReachesTheRoute(t *testing.T) {
 	t.Parallel()
 
-	srv := newDecidingAuthServer(t)
+	srv := newScopedPartnerAuthServer(t)
 	auth := bodyScopedClient(t, srv.URL, http.MethodPost, batchPath,
 		Dim("organizationId", FromBody).At("organizationId"),
 		Dim("ledgerId", FromBody).At("items[].ledgerId"))
@@ -694,11 +694,12 @@ func TestSetManifestScope_ResetAfterRegistrationReachesTheRoute(t *testing.T) {
 	require.Equal(t, http.StatusOK, doPost(t, app, batchPath, partnerToken("acme/p1"), body).status)
 	require.Equal(t, int64(1), srv.hits.Load())
 
-	// Reset: no catalog, no route scope. The partner request is refused before
-	// the call, as on any route that declares nothing.
+	// Reset: no catalog, no route scope. The partner request is asked with no
+	// attributes, as on any route that declares nothing.
 	require.NoError(t, auth.SetManifestScope("midaz"))
 	assert.Equal(t, http.StatusForbidden, doPost(t, app, batchPath, partnerToken("acme/p1"), body).status)
-	assert.Equal(t, int64(1), srv.hits.Load(), "the dropped plan is not used")
+	require.Equal(t, []map[string]string{{"organizationId": "org-1", "ledgerId": "led-1"}, nil}, srv.attributeCalls(),
+		"the dropped plan is not used")
 
 	// Redeclared with another field: the route reads the new one.
 	require.NoError(t, auth.SetManifestScope("midaz", manifestDims()...))
@@ -715,7 +716,7 @@ func TestSetManifestScope_ResetAfterRegistrationReachesTheRoute(t *testing.T) {
 func TestSetManifestRouteScope_AfterARequestReachesTheRoute(t *testing.T) {
 	t.Parallel()
 
-	srv := newDecidingAuthServer(t)
+	srv := newScopedPartnerAuthServer(t)
 	auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
 	require.NoError(t, auth.SetManifestScope("midaz", manifestDims()...))
 
@@ -724,13 +725,13 @@ func TestSetManifestRouteScope_AfterARequestReachesTheRoute(t *testing.T) {
 
 	const body = `{"organizationId":"org-1"}`
 
-	// Nothing declared yet: refused before the call.
+	// Nothing declared yet: asked with no attributes.
 	require.Equal(t, http.StatusForbidden, doPost(t, app, batchPath, partnerToken("acme/p1"), body).status)
-	require.Equal(t, int64(0), srv.hits.Load())
+	require.Equal(t, []map[string]string{nil}, srv.attributeCalls())
 
 	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, batchPath,
 		Dim("organizationId", FromBody).At("organizationId")))
 
 	assert.Equal(t, http.StatusOK, doPost(t, app, batchPath, partnerToken("acme/p1"), body).status)
-	assert.Equal(t, []map[string]string{{"organizationId": "org-1"}}, srv.attributeCalls())
+	assert.Equal(t, []map[string]string{nil, {"organizationId": "org-1"}}, srv.attributeCalls())
 }

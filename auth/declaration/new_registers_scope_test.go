@@ -45,9 +45,10 @@ func TestNew_ScopesRoutesOfAnotherClient(t *testing.T) {
 
 	target := "/v1/organizations/org-1/ledgers/led-1/accounts/acc-1"
 
-	// Before New, nothing is registered: the partner is refused before any call.
-	assert.Equal(t, http.StatusForbidden, status(t, app, http.MethodGet, target, compatPartner))
-	assert.Empty(t, rec.questions(), "refused before any call")
+	// Before New, nothing is registered: the partner is asked with no
+	// attributes, and the service's answer stands.
+	assert.Equal(t, http.StatusOK, status(t, app, http.MethodGet, target, compatPartner))
+	assert.Equal(t, []map[string]string{nil}, rec.questions(), "asked, with no attributes")
 
 	newPublisherFor(t, product, minter, manifest)
 
@@ -65,6 +66,7 @@ func TestNew_ScopesRoutesOfAnotherClient(t *testing.T) {
 	assert.Equal(t, http.StatusOK, status(t, app, http.MethodGet, target, user))
 
 	assert.Equal(t, []map[string]string{
+		nil,
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-1"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-denied"},
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-1"},
@@ -114,11 +116,12 @@ func TestNew_ReregisteringReachesRoutesAlreadyServed(t *testing.T) {
 
 	unscoped := manifest[:strings.Index(manifest, "scope:")]
 	newPublisherFor(t, product, &middleware.AuthClient{Logger: obs.Nop()}, unscoped)
-	assert.Equal(t, http.StatusForbidden, status(t, app, http.MethodGet, target, compatPartner))
+	assert.Equal(t, http.StatusOK, status(t, app, http.MethodGet, target, compatPartner))
 
 	assert.Equal(t, []map[string]string{
 		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-1"},
-	}, rec.questions(), "the second request is refused before any call")
+		nil,
+	}, rec.questions(), "the second request no longer carries the dropped scope")
 }
 
 func newBodyRequest(method, target, body, token string) *http.Request {

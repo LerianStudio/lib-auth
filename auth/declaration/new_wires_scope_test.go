@@ -136,9 +136,9 @@ func TestNew_WiresTheManifestScopeIntoTheClient(t *testing.T) {
 }
 
 // A service whose declaration is off never builds a publisher, so its client
-// has no scope: a partner-bound credential is refused before any call, and any
-// other credential is decided as always.
-func TestNew_NotCalledLeavesPartnersDenied(t *testing.T) {
+// has no scope: a partner-bound credential is asked with no attributes and the
+// authorization service decides, and any other credential is decided as always.
+func TestNew_NotCalledAsksForPartnersWithoutScope(t *testing.T) {
 	t.Parallel()
 
 	// A service no other test publishes, so nothing is registered for it
@@ -148,7 +148,7 @@ func TestNew_NotCalledLeavesPartnersDenied(t *testing.T) {
 	manifest := strings.Replace(wireCompatManifest, "service: midaz", "service: "+product, 1)
 	t.Cleanup(func() { require.NoError(t, middleware.SetProductManifestScope(product)) })
 
-	rec := newScopeRecorder(t, "")
+	rec := newScopeRecorder(t, "acc-denied")
 	auth := &middleware.AuthClient{Address: rec.URL, Enabled: true, Logger: obs.Nop(), M2MInversionEnabled: true}
 
 	app := fiber.New()
@@ -157,16 +157,23 @@ func TestNew_NotCalledLeavesPartnersDenied(t *testing.T) {
 	target := "/v1/organizations/org-1/ledgers/led-1/accounts/acc-1"
 	user := compatToken(jwt.MapClaims{"type": "normal-user", "owner": "acme-org", "sub": "user-1"})
 
-	assert.Equal(t, http.StatusForbidden, status(t, app, http.MethodGet, target, compatPartner))
-	assert.Empty(t, rec.questions(), "refused before any call")
+	assert.Equal(t, http.StatusOK, status(t, app, http.MethodGet, target, compatPartner))
+	assert.Equal(t, []map[string]string{nil}, rec.questions(), "asked, with no attributes")
 
 	assert.Equal(t, http.StatusOK, status(t, app, http.MethodGet, target, user))
-	assert.Equal(t, []map[string]string{nil}, rec.questions())
+	assert.Equal(t, []map[string]string{nil, nil}, rec.questions())
 
-	// Positive control: once New wires the manifest, the same partner request
-	// is asked and allowed.
+	// Once New wires the manifest, the same partner request is asked with its
+	// attributes: allowed, and the service's denial honoured.
 	newPublisherFor(t, product, auth, manifest)
 	assert.Equal(t, http.StatusOK, status(t, app, http.MethodGet, target, compatPartner))
+	assert.Equal(t, http.StatusForbidden, status(t, app, http.MethodGet, "/v1/organizations/org-1/ledgers/led-1/accounts/acc-denied", compatPartner))
+
+	assert.Equal(t, []map[string]string{
+		nil, nil,
+		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-1"},
+		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-denied"},
+	}, rec.questions())
 }
 
 // A minter that is not an AuthClient has no routes to scope: New takes it as

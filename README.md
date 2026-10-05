@@ -567,20 +567,18 @@ f.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts",
   nobody matches never denies — which is why a declaration whose product does not
   match the route's product is refused rather than forwarded.
 
-For a partner-bound credential, two refusals are deliberate and both answer
-**403**, before any call is made:
+A partner-bound request that names no dimension — a route whose declaration or
+manifest gives it none (a service whose manifest scope is not wired gives every
+route none), or one whose dimensions are all optional and all left out — is still
+asked, without the `attributes` member. The authorization service decides it by
+the partner's own scope for the product: a partner with no scope restriction on
+the product is allowed, and a partner restricted on a dimension the request does
+not name is denied. The middleware answers what the service answers.
 
-1. A request that names no dimension — a route whose declaration or manifest
-   gives it none (a service whose manifest scope is not wired gives every route
-   none), or one whose dimensions are all optional and all left out. Such a
-   credential is only ever allowed to reach *some* instances, and a request that
-   cannot say which instance it points at leaves the "where" with nothing to
-   decide on. The refusal is the same 403 a denial by the authorization service
-   answers.
-2. A required dimension the request carries no value for (header or query
-   parameter absent, empty path parameter). An identifier with no value cannot be
-   matched, and sending it absent would quietly ask a question the route did not
-   promise.
+One refusal is deliberate and answers **403** before any call is made: a
+required dimension the request carries no value for (header or query parameter
+absent, empty path parameter). An identifier with no value cannot be matched, and
+sending it absent would quietly ask a question the route did not promise.
 
 A partner-bound request that carries a dimension malformed — an empty value, an
 empty element of a list — or names different values for one dimension in two
@@ -647,8 +645,8 @@ Any other client takes it with `declaration.WireScope(auth, embeddedManifest)`.
   route registered before the publisher is built derives from the manifest as
   one registered after.
 * A service that never builds a publisher (its declaration switched off) has no
-  scope: every partner-bound request is refused 403, and nothing changes for any
-  other credential.
+  scope: every partner-bound request is asked without attributes, and nothing
+  changes for any other credential.
 * The scope is registered under the manifest's `service`, which must be the
   product the routes pass to `Authorize`. Routes of other products are untouched.
 * A `from: path` dimension applies to a route when one **whole** path segment is
@@ -660,7 +658,7 @@ Any other client takes it with `declaration.WireScope(auth, embeddedManifest)`.
   sent when the request carries it and left out when it does not. `param` is the
   query parameter or the header name.
 * A request that ends up naming none of the dimensions behaves as on a route that
-  declares nothing (a partner-bound credential is refused with 403).
+  declares nothing (a partner-bound credential is asked without attributes).
 * An explicit `RequireScope` still works and wins, but may only name dimensions
   the manifest declares; one that names another is refused on every request and
   logged at ERROR on the route's first request.

@@ -241,19 +241,19 @@ func TestAuthorize_ManifestScope_SharedHandlerDerivesPerRoute(t *testing.T) {
 }
 
 // A path with none of the manifest's parameters derives nothing and behaves as
-// an undeclared route: a partner credential is refused before the call, while a
+// an undeclared route: a partner credential is asked with no attributes, while a
 // non-partner caller sends the same bytes as before.
 func TestAuthorize_ManifestScope_PathWithoutParamsIsUndeclared(t *testing.T) {
 	t.Parallel()
 
-	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	rec := newScopedPartnerAuthServer(t)
 	auth := scopedClient(t, rec)
 
 	app := fiber.New()
 	app.Get("/v1/organization_id/settings", auth.Authorize("midaz", "settings", "get"), ok)
 
 	assert.Equal(t, http.StatusForbidden, doGet(t, app, "/v1/organization_id/settings", partnerToken("acme/p1")))
-	assert.Equal(t, int64(0), rec.hits.Load(), "an unscopeable partner request is refused before the call")
+	assert.Equal(t, []map[string]string{nil}, rec.attributeCalls(), "asked, with no attributes")
 
 	// Positive control: same route, non-partner caller.
 	assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/organization_id/settings", userToken()))
@@ -265,14 +265,14 @@ func TestAuthorize_ManifestScope_PathWithoutParamsIsUndeclared(t *testing.T) {
 func TestAuthorize_ManifestScope_OnlyForItsProduct(t *testing.T) {
 	t.Parallel()
 
-	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	rec := newScopedPartnerAuthServer(t)
 	auth := scopedClient(t, rec)
 
 	app := fiber.New()
 	app.Get("/v1/organizations/:organization_id/routes", auth.Authorize("routing", "routes", "get"), ok)
 
 	assert.Equal(t, http.StatusForbidden, doGet(t, app, "/v1/organizations/org-1/routes", partnerToken("acme/p1")))
-	assert.Equal(t, int64(0), rec.hits.Load())
+	assert.Equal(t, []map[string]string{nil}, rec.attributeCalls(), "asked, with no attributes")
 
 	assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/organizations/org-1/routes", userToken()))
 	assert.NotContains(t, rec.lastBody(t), "attributes")

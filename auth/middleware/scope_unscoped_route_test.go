@@ -13,11 +13,12 @@ import (
 // A partner on a route its manifest gives no scope, and wiring order
 // ---------------------------------------------------------------------------
 
-// A partner-bound credential on a route whose manifest declares no scope —
-// no catalog at all, or a catalog none of whose dimensions the route carries —
-// is refused before any call, with the same 403 a denied partner gets. A
-// credential that is not partner-bound is decided as always.
-func TestAuthorize_UnscopedRoute_DeniesOnlyThePartner(t *testing.T) {
+// A partner-bound credential on a route whose manifest declares no scope — no
+// catalog at all, or a catalog none of whose dimensions the route carries — is
+// asked of the authorization service like any other, with no attributes, and
+// its answer is the answer: allowed is served, denied is the same 403 a scoped
+// denial gets. A credential that is not partner-bound is decided as always.
+func TestAuthorize_UnscopedRoute_AsksForThePartner(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -32,7 +33,13 @@ func TestAuthorize_UnscopedRoute_DeniesOnlyThePartner(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			srv := newDecidingAuthServer(t, "org-denied")
+			srv := newFakeAuthServer(t, func(call authorizeCall) any {
+				if call.body.Resource == "limits" || call.body.Attributes["organizationId"] == "org-denied" {
+					return AuthResponse{Authorized: false}
+				}
+
+				return AuthResponse{Authorized: true}
+			})
 			auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
 
 			if tt.catalog != nil {
@@ -40,27 +47,41 @@ func TestAuthorize_UnscopedRoute_DeniesOnlyThePartner(t *testing.T) {
 			}
 
 			app := fiber.New()
-			app.Get("/v1/settings", auth.Authorize("midaz", "settings", "get"), ok)
+			app.Get("/v1/rules", auth.Authorize("midaz", "rules", "get"), ok)
+			app.Get("/v1/limits", auth.Authorize("midaz", "limits", "get"), ok)
 			app.Get("/v1/organizations/:organization_id", auth.Authorize("midaz", "organizations", "get"), ok)
 
-			unscoped := doCarrier(t, app, carrierRequest{method: http.MethodGet, target: "/v1/settings", token: partnerToken("acme/p1")})
-			assert.Equal(t, http.StatusForbidden, unscoped.status)
-			assert.Equal(t, int64(0), srv.hits.Load(), "refused before any call")
+			// Allowed by the service: served.
+			assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/rules", partnerToken("acme/p1")))
 
-			assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/settings", userToken()))
-			assert.Equal(t, []map[string]string{nil}, srv.attributeCalls(), "a credential that is not partner-bound is asked as always")
+			// Denied by the service: refused.
+			unscoped := doCarrier(t, app, carrierRequest{method: http.MethodGet, target: "/v1/limits", token: partnerToken("acme/p1")})
+			assert.Equal(t, http.StatusForbidden, unscoped.status)
+
+			calls := srv.received()
+			require.Len(t, calls, 2, "both partner requests are asked")
+
+			for _, call := range calls {
+				assert.Nil(t, call.body.Attributes)
+				assert.NotContains(t, call.raw, `"attributes"`, "no scope named, no attributes member sent")
+			}
+
+			assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/rules", userToken()))
+			assert.Len(t, srv.received(), 3, "a credential that is not partner-bound is asked as always")
 
 			if tt.catalog == nil {
 				return
 			}
 
-			// The refusal is the one a partner denied by the service gets.
+			// The refusal is the one a scoped partner denied by the service gets.
 			denied := doCarrier(t, app, carrierRequest{method: http.MethodGet, target: "/v1/organizations/org-denied", token: partnerToken("acme/p1")})
 			assert.Equal(t, http.StatusForbidden, denied.status)
 			assert.Equal(t, denied.body, unscoped.body, "uniform refusal")
 
-			// Positive control: a scoped route of the same catalog is allowed.
+			// Positive control: a scoped route of the same catalog is asked with
+			// its attributes and allowed.
 			assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/organizations/org-1", partnerToken("acme/p1")))
+			assert.Equal(t, map[string]string{"organizationId": "org-1"}, srv.attributeCalls()[4])
 		})
 	}
 }
@@ -100,11 +121,10 @@ func TestAuthorize_ManifestScope_WiredAfterTheFirstRequest(t *testing.T) {
 	app := fiber.New()
 	app.Get("/v1/organizations/:organization_id", auth.Authorize("midaz", "organizations", "get"), ok)
 
-	assert.Equal(t, http.StatusForbidden, doGet(t, app, "/v1/organizations/org-1", partnerToken("acme/p1")), "no catalog yet: unscopeable")
-	assert.Equal(t, int64(0), srv.hits.Load())
+	assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/organizations/org-1", partnerToken("acme/p1")), "no catalog yet: asked with no attributes")
 
 	require.NoError(t, auth.SetManifestScope("midaz", manifestDims()...))
 
 	assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/organizations/org-1", partnerToken("acme/p1")))
-	assert.Equal(t, []map[string]string{{"organizationId": "org-1"}}, srv.attributeCalls())
+	assert.Equal(t, []map[string]string{nil, {"organizationId": "org-1"}}, srv.attributeCalls())
 }

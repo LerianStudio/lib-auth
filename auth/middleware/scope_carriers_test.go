@@ -532,20 +532,20 @@ func TestAuthorize_CatalogHeaderAndQuery(t *testing.T) {
 }
 
 // A route of the product whose path carries no catalog parameter, on a request
-// that carries no catalog header or query, names nothing: a partner is refused
-// before the call, as on a route that declares nothing, and any other caller
+// that carries no catalog header or query, names nothing: a partner is asked
+// with no attributes, as on a route that declares nothing, and any other caller
 // sends the same bytes as before.
 func TestAuthorize_CatalogHeaderAndQuery_NothingNamed(t *testing.T) {
 	t.Parallel()
 
-	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	rec := newScopedPartnerAuthServer(t)
 	auth := headerCatalogClient(t, rec.URL)
 
 	app := fiber.New()
 	app.Get("/v1/settings", auth.Authorize("midaz", "settings", "get"), ok)
 
 	assert.Equal(t, http.StatusForbidden, doGet(t, app, "/v1/settings", partnerToken("acme/p1")))
-	assert.Equal(t, int64(0), rec.hits.Load())
+	assert.Equal(t, `{"action":"get","product":"midaz","resource":"settings","sub":"acme/app"}`, rec.lastBody(t))
 
 	assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/settings", userToken()))
 	assert.Equal(t, `{"action":"get","product":"midaz","resource":"settings","sub":"acme-org/user-1"}`, rec.lastBody(t))

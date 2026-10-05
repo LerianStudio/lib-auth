@@ -41,6 +41,8 @@ type authorizeCall struct {
 // authorizeRequestBody is the part of an authorize body a scripted answer
 // reads.
 type authorizeRequestBody struct {
+	Sub        string            `json:"sub"`
+	Resource   string            `json:"resource"`
 	Attributes map[string]string `json:"attributes"`
 }
 
@@ -120,6 +122,33 @@ func newDecidingAuthServer(t *testing.T, denied ...string) *fakeAuthServer {
 		}
 
 		return true
+	})
+}
+
+// newScopedPartnerAuthServer answers as newDecidingAuthServer, for a partner
+// whose scope restricts the product's dimensions: its question that names no
+// attribute is denied, as the authorization service denies a scoped dimension
+// the request leaves out. Questions of any other caller are not affected.
+func newScopedPartnerAuthServer(t *testing.T, denied ...string) *fakeAuthServer {
+	t.Helper()
+
+	refused := make(map[string]bool, len(denied))
+	for _, v := range denied {
+		refused[v] = true
+	}
+
+	return newFakeAuthServer(t, func(call authorizeCall) any {
+		if call.body.Sub == "acme/app" && len(call.body.Attributes) == 0 {
+			return AuthResponse{Authorized: false}
+		}
+
+		for _, v := range call.body.Attributes {
+			if refused[v] {
+				return AuthResponse{Authorized: false}
+			}
+		}
+
+		return AuthResponse{Authorized: true}
 	})
 }
 
