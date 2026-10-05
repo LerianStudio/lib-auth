@@ -818,7 +818,7 @@ scope:
   * an empty array (`[]`) names no value, with or without `optional`: the
     questions are asked without the dimension, and every other dimension the
     request names is still asked. A request left naming no dimension at all is
-    refused for a partner, as always;
+    asked without attributes, as on a route that declares nothing;
   * inside an array of objects (`targets[].ids[]`), each element's strings are
     asked with that element's other fields;
   * no other field may read inside its elements (`accountTarget.ids[].x`): the
