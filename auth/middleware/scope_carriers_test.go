@@ -192,6 +192,69 @@ func TestAuthorize_Query_Absent(t *testing.T) {
 	assert.Equal(t, []map[string]string{{"organizationId": "org-1"}}, srv.attributeCalls())
 }
 
+// Query keys are read without regard to letter case, as the handler's query
+// binding reads them: the key a handler may bind is a key the scope checks.
+func TestAuthorize_Query_KeyIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		query string
+		want  []map[string]string
+	}{
+		"other_case_alone": {"ORGANIZATIONID=org-1", []map[string]string{{"organizationId": "org-1"}}},
+		"same_value_twice": {"organizationId=org-1&ORGANIZATIONID=org-1", []map[string]string{{"organizationId": "org-1"}}},
+		"two_values": {"organizationId=org-1&ORGANIZATIONID=org-2", []map[string]string{
+			{"organizationId": "org-1"},
+			{"organizationId": "org-2"},
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := newDecidingAuthServer(t)
+			auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath,
+				Dim("organizationId", FromQuery).At("organizationId"))
+
+			app := fiber.New()
+			app.Post(directPath, auth.Authorize("midaz", "transactions", "post"), ok)
+
+			got := doCarrier(t, app, carrierRequest{target: directPath + "?" + tc.query, token: partnerToken("acme/p1")})
+
+			assert.Equal(t, http.StatusOK, got.status)
+			assert.Equal(t, tc.want, srv.attributeCalls())
+		})
+	}
+}
+
+// A value under another spelling of the key outside the scope refuses the
+// request, and a spelling that disagrees with another carrier is a divergence.
+func TestAuthorize_Query_KeyCaseVariantIsChecked(t *testing.T) {
+	t.Parallel()
+
+	srv := newDecidingAuthServer(t, "org-2")
+	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath,
+		Dim("organizationId", FromQuery).At("organizationId"))
+
+	probe := &handlerProbe{}
+	app := fiber.New()
+	app.Post(directPath, auth.Authorize("midaz", "transactions", "post"), probe.handle)
+
+	got := doCarrier(t, app, carrierRequest{target: directPath + "?organizationId=org-1&ORGANIZATIONID=org-2", token: partnerToken("acme/p1")})
+	assert.Equal(t, http.StatusForbidden, got.status)
+	assert.Equal(t, int64(0), probe.calls.Load())
+
+	srv = newDecidingAuthServer(t)
+	auth = queryLedgerClient(t, srv, Dim("organizationId", FromQuery).At("organizationId").Optional())
+	app = fiber.New()
+	app.Post(ledgersRoute, auth.Authorize("midaz", "ledgers", "post"), probe.handle)
+
+	got = doCarrier(t, app, carrierRequest{target: "/v1/organizations/org-1/ledgers?ORGANIZATIONID=org-2", token: partnerToken("acme/p1")})
+	assert.Equal(t, http.StatusBadRequest, got.status)
+	assert.Contains(t, got.body, `query parameter "organizationId"`)
+	assert.Equal(t, int64(0), srv.hits.Load())
+	assert.Equal(t, int64(0), probe.calls.Load())
+}
+
 // Header names are case-insensitive, both as declared and as sent.
 func TestAuthorize_Header_NameIsCaseInsensitive(t *testing.T) {
 	t.Parallel()
@@ -651,9 +714,10 @@ func TestResolveDeclaration_SameNameSeveralCarriers(t *testing.T) {
 	assert.Empty(t, declErr)
 
 	for name, dims := range map[string][]Dimension{
-		"same_path":   {Dim("organizationId", FromPath).At("organization_id"), Dim("organizationId", FromPath).At("organization_id")},
-		"same_query":  {Dim("organizationId", FromQuery).At("org"), Dim("organizationId", FromQuery).At("org")},
-		"same_header": {Dim("organizationId", FromHeader).At("X-Org"), Dim("organizationId", FromHeader).At("x-org")},
+		"same_path":             {Dim("organizationId", FromPath).At("organization_id"), Dim("organizationId", FromPath).At("organization_id")},
+		"same_query":            {Dim("organizationId", FromQuery).At("org"), Dim("organizationId", FromQuery).At("org")},
+		"same_query_other_case": {Dim("organizationId", FromQuery).At("org"), Dim("organizationId", FromQuery).At("ORG")},
+		"same_header":           {Dim("organizationId", FromHeader).At("X-Org"), Dim("organizationId", FromHeader).At("x-org")},
 	} {
 		_, declErr := resolveDeclaration("midaz", []ScopeDeclaration{RequireScope("midaz", dims...)})
 		assert.Contains(t, declErr, "organizationId", name)

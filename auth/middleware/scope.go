@@ -118,8 +118,13 @@ func (d Dimension) read(c fiber.Ctx) (values []string, present bool, problem str
 		return splitValues(raw)
 	case FromQuery:
 		var raw []string
-		for _, v := range c.Request().URI().QueryArgs().PeekMulti(d.key) {
-			raw = append(raw, string(v))
+
+		// Compared without regard to letter case, as the handler's query binding
+		// matches keys: the key the handler may bind is the key checked.
+		for k, v := range c.Request().URI().QueryArgs().All() {
+			if strings.EqualFold(string(k), d.key) {
+				raw = append(raw, string(v))
+			}
 		}
 
 		return splitValues(raw)
@@ -183,10 +188,11 @@ func (d Dimension) location() string {
 }
 
 // carrier identifies the place in the request a dimension is read from. Header
-// names are case-insensitive, so two spellings of one header are one carrier.
+// names and query keys are case-insensitive, so two spellings of one are one
+// carrier.
 func (d Dimension) carrier() string {
 	key := d.key
-	if d.source == FromHeader {
+	if d.source == FromHeader || d.source == FromQuery {
 		key = strings.ToLower(key)
 	}
 
