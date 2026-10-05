@@ -1,39 +1,23 @@
 ## [5.4.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.3.0...v5.4.0-beta.1) (2026-10-05)
 
 
-### ⚠ BREAKING CHANGES
-
-* **middleware:** a value the resolver cannot resolve is now answered 403, not 422. It carries the same message as a resolved value outside the credential's scope ("scope <location> is outside this credential's scope or does not exist"), still naming where the value was read. Products that map the 422 for this case must map the 403. A resolver failure stays 503 naming the resolver.
-
-X-Lerian-Ref: 0x1
-
 ### Features
 
 * **declaration:** accept tenant or a declared scope dimension as a permission level ([69ba0e1](https://github.com/LerianStudio/lib-auth/commit/69ba0e107b4d86f241da7c980916a6f3da30e149))
-* **middleware:** allow a resolved value when any of its resolved values is allowed with match any ([878d8b5](https://github.com/LerianStudio/lib-auth/commit/878d8b5960ba646aadd3fd956bb2021f917c56e0))
-* **middleware:** ask an optional resolved dimension without it when it resolves to nothing, and join resolved carriers ([c692d1d](https://github.com/LerianStudio/lib-auth/commit/c692d1d6e3a10414cca4a9b949f69df03a8d08c4))
 * **middleware:** ask every value of a dimension read from several body fields ([60c77cc](https://github.com/LerianStudio/lib-auth/commit/60c77cc96d54ff5baec25cc0e27241e570f6cd01))
 * **middleware:** ask the authorization service for a partner request that names no dimension ([df85577](https://github.com/LerianStudio/lib-auth/commit/df8557752ed8353647c84330bb8e6055a11ca231))
 * **declaration:** carry permission levels in the scope-only publication ([65207c5](https://github.com/LerianStudio/lib-auth/commit/65207c5e22c7607f02a87310ff18e40a32c3eec5))
 * **middleware:** decide partner scope from the request alone ([0c81308](https://github.com/LerianStudio/lib-auth/commit/0c8130847f472d316affbb9be87b49d5b0cb1634))
 * **declaration:** declare the hierarchy of the scope dimensions with parent ([c741855](https://github.com/LerianStudio/lib-auth/commit/c741855da7e0a721c46a967beba31e890d45c1db))
-* **middleware:** give a resolver the sibling values of each body element ([ffa2ea5](https://github.com/LerianStudio/lib-auth/commit/ffa2ea5dc36d9b6359b8e9146e37a9e2c7047352))
-* **middleware:** hand a resolver the validated principal under either M2M model ([d64bdc9](https://github.com/LerianStudio/lib-auth/commit/d64bdc9bc6b99bae546e1f1ac327fcd963adf768))
-* **middleware:** let a list route filter on the partner's allowed values ([f8d762d](https://github.com/LerianStudio/lib-auth/commit/f8d762d6d166c69ebbddc24f164757bbbb3dd8ad))
 * **declaration:** let a permission declare the level of its resource ([b2a9b93](https://github.com/LerianStudio/lib-auth/commit/b2a9b938dfb54714bd4a09c86e5cbf177b6db734))
 * **declaration:** let a product opt in to partner credentials ([982eac5](https://github.com/LerianStudio/lib-auth/commit/982eac552ff3c8fad656a763d78f8c43469ee626))
 * **middleware:** let a route dimension be optional ([a651dd7](https://github.com/LerianStudio/lib-auth/commit/a651dd738517888a2407e149e89e5c8e9b39d085))
 * **declaration:** let a scope dimension confine related collections ([cd7c5ff](https://github.com/LerianStudio/lib-auth/commit/cd7c5ff23270bbb11ac48220691fa8f49401b346))
-* **middleware:** name the dimensions about to be resolved on the first question ([ac4c607](https://github.com/LerianStudio/lib-auth/commit/ac4c6073ed9e4118094ec641602b6cc68aa32080))
-* **middleware:** name the partner when a suspended or expired partner refuses a valid token ([686d130](https://github.com/LerianStudio/lib-auth/commit/686d130c529126aacb49bf13a90a15a5900b623d))
+* **middleware:** name the partner when a suspended or expired partner refuses a valid token, with `AUT-1009` (suspended) and `AUT-1010` (expired) ([686d130](https://github.com/LerianStudio/lib-auth/commit/686d130c529126aacb49bf13a90a15a5900b623d))
 * **middleware:** read every string of a body array as a scope value ([bad3bbe](https://github.com/LerianStudio/lib-auth/commit/bad3bbe030ea459b9ef9e38e857c33872fc6af16))
 * **middleware:** read scope dimensions from a urlencoded form body ([3ae54ff](https://github.com/LerianStudio/lib-auth/commit/3ae54ffd3efa3813af7e5654a731699e018486dc))
 * **middleware:** read scope dimensions from the query and headers ([0b0a703](https://github.com/LerianStudio/lib-auth/commit/0b0a7035ecb5a1d86f482113f5c36df77f8d0143))
 * **declaration:** register the manifest scope for every client of the product ([8904c4f](https://github.com/LerianStudio/lib-auth/commit/8904c4feb0172d79af16741c07401de54746fca5))
-* **middleware:** resolve request values into scope dimensions ([7acc89d](https://github.com/LerianStudio/lib-auth/commit/7acc89d9308e7764c1b7de32c1e36aaa758c43ec))
-* **middleware:** resolve scope values only after the credential is accepted ([ccfe59d](https://github.com/LerianStudio/lib-auth/commit/ccfe59dc36b2834dbc6b6bd41768fe2f23c6fb55))
-* **middleware:** serve a filtered list confined on any one of its dimensions ([c59cb5c](https://github.com/LerianStudio/lib-auth/commit/c59cb5ca63b9f4c1614d375a9da57e440dff6523))
-* **middleware:** serve a filtered request naming no dimension when the grant says the partner is unrestricted ([782d2d1](https://github.com/LerianStudio/lib-auth/commit/782d2d1c47c3eadb62a83c55b03465994083cf99))
 
 
 ### Bug Fixes

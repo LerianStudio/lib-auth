@@ -50,8 +50,8 @@ import (
 // absent or null, the question is asked without it — and without every other
 // optional field below an absent array. A value that is there is still refused
 // unless it is a non-empty string, and an array that is there must still be a
-// non-empty array. A question that ends up naming no dimension at all is refused
-// for a partner, as a route that declares none is.
+// non-empty array. A question that ends up naming no dimension at all is asked
+// without attributes, as on a route that declares none.
 //
 // A field ending in "[]" reads an array of strings: every element is one value,
 // its own question, and an element that is not a non-empty string is refused
