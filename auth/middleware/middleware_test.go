@@ -1077,12 +1077,19 @@ func TestAuthorize_DoesNotTraceClientIP(t *testing.T) {
 	var capturedBody map[string]string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("mock authz server: failed to decode body: %v", err)
+			http.Error(w, `{"code":"undecodable_body"}`, http.StatusBadRequest)
+
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 
-		require.NoError(t, json.NewEncoder(w).Encode(AuthResponse{Authorized: true}))
+		if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: true}); err != nil {
+			t.Errorf("mock authz server: failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -1151,13 +1158,26 @@ func TestGetApplicationToken_DoesNotTraceClientSecret(t *testing.T) {
 	var capturedBody map[string]string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1/login/oauth/access_token", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		if r.URL.Path != "/v1/login/oauth/access_token" {
+			t.Errorf("mock token server: unexpected path %s, want /v1/login/oauth/access_token", r.URL.Path)
+			http.Error(w, `{"code":"unexpected_request"}`, http.StatusNotFound)
+
+			return
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("mock token server: failed to decode body: %v", err)
+			http.Error(w, `{"code":"undecodable_body"}`, http.StatusBadRequest)
+
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 
-		require.NoError(t, json.NewEncoder(w).Encode(oauth2Token{AccessToken: accessToken}))
+		if err := json.NewEncoder(w).Encode(oauth2Token{AccessToken: accessToken}); err != nil {
+			t.Errorf("mock token server: failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 

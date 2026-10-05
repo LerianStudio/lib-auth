@@ -146,8 +146,8 @@ func TestValidate_ScopeRoutes(t *testing.T) {
 		mutate  func(m *DeclarationManifest)
 		wantErr string
 	}{
-		{name: "from_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "" }, wantErr: `scope.routes[0].dimensions[0]: from must be "body"`},
-		{name: "from_unknown", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "query" }, wantErr: `got "query"`},
+		{name: "from_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "" }, wantErr: `scope.routes[0].dimensions[0]: from must be one of "body", "form", "query", "header", got ""`},
+		{name: "from_unknown", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "cookie" }, wantErr: `got "cookie"`},
 		{name: "from_path", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "path" }, wantErr: `got "path"`},
 		{name: "field_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[1].Dimensions[1].Field = " " }, wantErr: "scope.routes[1].dimensions[1]: field must not be empty"},
 		{name: "name_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].Name = "" }, wantErr: "scope.routes[0].dimensions[0]: name must not be empty"},
@@ -222,13 +222,61 @@ func TestWireScope_RouteErrorsFailTheBoot(t *testing.T) {
 
 	auth := &middleware.AuthClient{Logger: obs.Nop()}
 
-	unknownFrom := strings.Replace(routedYAML, "from: body\n          field: ledgerId", "from: header\n          field: ledgerId", 1)
+	unknownFrom := strings.Replace(routedYAML, "from: body\n          field: ledgerId", "from: cookie\n          field: ledgerId", 1)
 	require.NotEqual(t, routedYAML, unknownFrom)
-	require.ErrorContains(t, WireScope(auth, []byte(unknownFrom)), `got "header"`)
+	require.ErrorContains(t, WireScope(auth, []byte(unknownFrom)), `got "cookie"`)
 
-	badField := strings.Replace(routedYAML, `"items[].ledgerId"`, `"items[]"`, 1)
+	pathFrom := strings.Replace(routedYAML, "from: body\n          field: ledgerId", "from: path\n          field: ledger_id", 1)
+	require.NotEqual(t, routedYAML, pathFrom)
+	require.ErrorContains(t, WireScope(auth, []byte(pathFrom)), `got "path"`)
+
+	badField := strings.Replace(routedYAML, `"items[].ledgerId"`, `"items[]."`, 1)
 	require.NotEqual(t, routedYAML, badField)
-	require.ErrorContains(t, WireScope(auth, []byte(badField)), "items[]")
+	require.ErrorContains(t, WireScope(auth, []byte(badField)), `"items[]."`)
+
+	// A field ending in "[]" is an array of strings: wired.
+	stringArray := strings.Replace(routedYAML, `"items[].ledgerId"`, `"ledgerIds[]"`, 1)
+	require.NotEqual(t, routedYAML, stringArray)
+	require.NoError(t, WireScope(&middleware.AuthClient{Logger: obs.Nop()}, []byte(stringArray)))
 
 	require.NoError(t, WireScope(auth, []byte(routedYAML)), "positive control")
+}
+
+// A route may read one dimension from two distinct body fields — two
+// references, each asked. It wires, stays out of the wire and the hash, and
+// reading the SAME field twice still fails the boot.
+func TestWireScope_OneDimensionFromTwoBodyFields(t *testing.T) {
+	t.Parallel()
+
+	const twoFields = `
+        - name: ledgerId
+          from: body
+          field: "items[].ledgerId"
+        - name: ledgerId
+          from: body
+          field: "settlementLedger"
+`
+
+	union := strings.Replace(routedYAML, `
+        - name: ledgerId
+          from: body
+          field: "items[].ledgerId"
+`, twoFields, 1)
+	require.NotEqual(t, routedYAML, union)
+	require.NoError(t, WireScope(&middleware.AuthClient{Logger: obs.Nop()}, []byte(union)))
+
+	m, err := parseManifest([]byte(union))
+	require.NoError(t, err)
+
+	hash, err := m.CanonicalHash()
+	require.NoError(t, err)
+	assert.Equal(t, scopedYAMLHash, hash)
+
+	wire, err := m.wireJSON()
+	require.NoError(t, err)
+	assert.Equal(t, scopedYAMLWire, string(wire))
+
+	sameField := strings.Replace(union, `field: "settlementLedger"`, `field: "items[].LedgerId"`, 1)
+	require.NotEqual(t, union, sameField)
+	require.ErrorContains(t, WireScope(&middleware.AuthClient{Logger: obs.Nop()}, []byte(sameField)), "more than once")
 }

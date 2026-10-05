@@ -3,10 +3,8 @@ package middleware
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,54 +17,6 @@ import (
 // ---------------------------------------------------------------------------
 // Scope test helpers
 // ---------------------------------------------------------------------------
-
-// recordingAuthServer answers POST /v1/authorize with the supplied decision and
-// records every raw request body it received, in order. The RAW bytes are what
-// the payload-compatibility assertions compare, so an added member, a reordered
-// key or a changed encoding all show up.
-type recordingAuthServer struct {
-	*httptest.Server
-
-	bodies atomic.Value // []string
-	hits   atomic.Int64
-}
-
-func newRecordingAuthServer(t *testing.T, resp AuthResponse) *recordingAuthServer {
-	t.Helper()
-
-	rec := &recordingAuthServer{}
-	rec.bodies.Store([]string{})
-
-	rec.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("mock authz server: failed to read body: %v", err)
-		}
-
-		rec.bodies.Store(append(rec.bodies.Load().([]string), string(raw)))
-		rec.hits.Add(1)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			t.Errorf("mock authz server: failed to encode response: %v", err)
-		}
-	}))
-
-	t.Cleanup(rec.Server.Close)
-
-	return rec
-}
-
-func (rec *recordingAuthServer) lastBody(t *testing.T) string {
-	t.Helper()
-
-	bodies := rec.bodies.Load().([]string)
-	require.NotEmpty(t, bodies, "authz server was never called")
-
-	return bodies[len(bodies)-1]
-}
 
 // partnerToken is an application token carrying the "partner" claim the access
 // manager mints for a partner-bound credential.
@@ -355,13 +305,13 @@ func TestAuthorize_CachedDenialKeepsItsReason(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// (5) Fail-closed guard, both halves
+// (5) A partner on an undeclared route is asked, and the answer stands
 // ---------------------------------------------------------------------------
 
-func TestAuthorize_GuardDeniesPartnerTokenOnUndeclaredRoute(t *testing.T) {
+func TestAuthorize_PartnerOnUndeclaredRouteIsAsked(t *testing.T) {
 	t.Parallel()
 
-	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	rec := newScopedPartnerAuthServer(t)
 	auth := &AuthClient{Address: rec.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
 
 	app := fiber.New()
@@ -373,9 +323,9 @@ func TestAuthorize_GuardDeniesPartnerTokenOnUndeclaredRoute(t *testing.T) {
 
 	resp, err := app.Test(req)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
-	assert.Equal(t, int64(0), rec.hits.Load(),
-		"an undeclared route cannot be scoped, so the decision is taken here and never asked")
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "the service's denial stands")
+	assert.Equal(t, `{"action":"get","product":"midaz","resource":"accounts","sub":"acme/app"}`, rec.lastBody(t),
+		"asked like any partner question, with no attributes member")
 
 	// Positive control, same route and same rig: a token with no partner claim is
 	// authorized normally. Without this the 403 above could be an unrelated denial.
@@ -385,7 +335,7 @@ func TestAuthorize_GuardDeniesPartnerTokenOnUndeclaredRoute(t *testing.T) {
 	ctrlResp, err := app.Test(ctrl)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, ctrlResp.StatusCode)
-	assert.Equal(t, int64(1), rec.hits.Load())
+	assert.Equal(t, int64(2), rec.hits.Load())
 }
 
 func TestAuthorize_GuardDeniesEmptyDeclaredSource(t *testing.T) {
@@ -421,10 +371,10 @@ func TestAuthorize_GuardDeniesEmptyDeclaredSource(t *testing.T) {
 	assert.Equal(t, int64(1), rec.hits.Load())
 }
 
-// The empty-source guard is a property of the DECLARATION, not of the token: a
-// route that declares a dimension it cannot always read is misdeclared, and a
-// non-partner caller must not be the one to discover it in production.
-func TestAuthorize_EmptyDeclaredSourceDeniesNonPartnerToo(t *testing.T) {
+// A declared dimension the request does not carry refuses a partner-bound
+// credential before any call. Any other credential never has its scope read, so
+// it is decided exactly as on a route that declares nothing.
+func TestAuthorize_EmptyDeclaredSourceDeniesOnlyThePartner(t *testing.T) {
 	t.Parallel()
 
 	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
@@ -438,12 +388,21 @@ func TestAuthorize_EmptyDeclaredSourceDeniesNonPartnerToo(t *testing.T) {
 		func(c fiber.Ctx) error { return c.SendString("reached") })
 
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	req.Header.Set("Authorization", "Bearer "+userToken())
+	req.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
 
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	assert.Equal(t, int64(0), rec.hits.Load())
+
+	req = httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken())
+
+	resp, err = app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, int64(1), rec.hits.Load())
+	assert.NotContains(t, rec.lastBody(t), "attributes")
 }
 
 // A declaration whose product does not match the route's product describes a
@@ -724,17 +683,19 @@ func TestDecisionCache_SeparatorBytesInAValueDoNotForgeAnotherScopesKey(t *testi
 // Duplicate dimension names
 // ---------------------------------------------------------------------------
 
-// A repeated dimension name is a misdeclaration: resolveAttributes writes into a
-// map, so the second value overwrites the first and the request asks about ONE
-// dimension while the route declared two. It is refused at declaration time, and
-// the refusal names the repeated dimension so whoever wrote the route knows which.
+// A dimension read twice from the same carrier is a misdeclaration: it asks
+// nothing a single read does not, and hides a typo in the route. It is refused
+// at declaration time, and the refusal names the repeated dimension so whoever
+// wrote the route knows which. Header names are one carrier in any letter case.
+// The same name from DIFFERENT carriers is a declaration (see
+// TestResolveDeclaration_SameNameSeveralCarriers).
 func TestResolveDeclaration_RejectsDuplicateDimensionName(t *testing.T) {
 	t.Parallel()
 
 	_, declErr := resolveDeclaration("midaz", []ScopeDeclaration{
 		RequireScope("midaz",
-			Dim("organizationId", FromPath).At("organization_id"),
 			Dim("organizationId", FromHeader).At("X-Organization-Id"),
+			Dim("organizationId", FromHeader).At("x-organization-id"),
 		),
 	})
 
@@ -767,7 +728,7 @@ func TestAuthorize_MisdeclaredRouteIsRefusedWhileAuthIsDisabled(t *testing.T) {
 			app.Get("/dup/:organization_id",
 				tc.auth.Authorize("midaz", "accounts", "get",
 					RequireScope("midaz",
-						Dim("organizationId", FromPath).At("organization_id"),
+						Dim("organizationId", FromQuery).At("organizationId"),
 						Dim("organizationId", FromQuery).At("organizationId"),
 					),
 				),
@@ -812,7 +773,7 @@ func TestAuthorize_GuardDeniesDuplicateDimensionName(t *testing.T) {
 	app.Get("/dup/:organization_id",
 		auth.Authorize("midaz", "accounts", "get",
 			RequireScope("midaz",
-				Dim("organizationId", FromPath).At("organization_id"),
+				Dim("organizationId", FromQuery).At("organizationId"),
 				Dim("organizationId", FromQuery).At("organizationId"),
 			),
 		),

@@ -1,3 +1,39 @@
+## [5.4.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.4.0-beta.2...v5.4.0-beta.3) (2026-10-05)
+
+
+### Bug Fixes
+
+* **middleware:** compare query carriers with the reader's case-folding rule ([33c3530](https://github.com/LerianStudio/lib-auth/commit/33c35301304cbaf2e49a27f289ab3e07198eb5d5))
+* **middleware:** match query scope keys case-insensitively like fiber binding ([50ca4fe](https://github.com/LerianStudio/lib-auth/commit/50ca4fea4cae955d862d896bcbd182b0ef2fe603))
+
+## [5.4.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.4.0-beta.1...v5.4.0-beta.2) (2026-10-05)
+
+## [5.4.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.3.0...v5.4.0-beta.1) (2026-10-05)
+
+
+### Features
+
+* **declaration:** accept tenant or a declared scope dimension as a permission level ([69ba0e1](https://github.com/LerianStudio/lib-auth/commit/69ba0e107b4d86f241da7c980916a6f3da30e149))
+* **middleware:** ask every value of a dimension read from several body fields ([60c77cc](https://github.com/LerianStudio/lib-auth/commit/60c77cc96d54ff5baec25cc0e27241e570f6cd01))
+* **middleware:** ask the authorization service for a partner request that names no dimension ([df85577](https://github.com/LerianStudio/lib-auth/commit/df8557752ed8353647c84330bb8e6055a11ca231))
+* **declaration:** carry permission levels in the scope-only publication ([65207c5](https://github.com/LerianStudio/lib-auth/commit/65207c5e22c7607f02a87310ff18e40a32c3eec5))
+* **middleware:** decide partner scope from the request alone ([0c81308](https://github.com/LerianStudio/lib-auth/commit/0c8130847f472d316affbb9be87b49d5b0cb1634))
+* **declaration:** declare the hierarchy of the scope dimensions with parent ([c741855](https://github.com/LerianStudio/lib-auth/commit/c741855da7e0a721c46a967beba31e890d45c1db))
+* **declaration:** let a permission declare the level of its resource ([b2a9b93](https://github.com/LerianStudio/lib-auth/commit/b2a9b938dfb54714bd4a09c86e5cbf177b6db734))
+* **declaration:** let a product opt in to partner credentials ([982eac5](https://github.com/LerianStudio/lib-auth/commit/982eac552ff3c8fad656a763d78f8c43469ee626))
+* **middleware:** let a route dimension be optional ([a651dd7](https://github.com/LerianStudio/lib-auth/commit/a651dd738517888a2407e149e89e5c8e9b39d085))
+* **declaration:** let a scope dimension confine related collections ([cd7c5ff](https://github.com/LerianStudio/lib-auth/commit/cd7c5ff23270bbb11ac48220691fa8f49401b346))
+* **middleware:** name the partner when a suspended or expired partner refuses a valid token, with `AUT-1009` (suspended) and `AUT-1010` (expired) ([686d130](https://github.com/LerianStudio/lib-auth/commit/686d130c529126aacb49bf13a90a15a5900b623d))
+* **middleware:** read every string of a body array as a scope value ([bad3bbe](https://github.com/LerianStudio/lib-auth/commit/bad3bbe030ea459b9ef9e38e857c33872fc6af16))
+* **middleware:** read scope dimensions from a urlencoded form body ([3ae54ff](https://github.com/LerianStudio/lib-auth/commit/3ae54ffd3efa3813af7e5654a731699e018486dc))
+* **middleware:** read scope dimensions from the query and headers ([0b0a703](https://github.com/LerianStudio/lib-auth/commit/0b0a7035ecb5a1d86f482113f5c36df77f8d0143))
+* **declaration:** register the manifest scope for every client of the product ([8904c4f](https://github.com/LerianStudio/lib-auth/commit/8904c4feb0172d79af16741c07401de54746fca5))
+
+
+### Bug Fixes
+
+* **middleware:** import fiber v3 in scope_form.go ([3c1df67](https://github.com/LerianStudio/lib-auth/commit/3c1df676d06ea6c13a22597356e3dccb4e4866e3))
+
 ## [5.3.0](https://github.com/LerianStudio/lib-auth/compare/v5.2.0...v5.3.0) (2026-10-02)
 
 
