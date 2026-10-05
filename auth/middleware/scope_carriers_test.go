@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
@@ -718,10 +719,28 @@ func TestResolveDeclaration_SameNameSeveralCarriers(t *testing.T) {
 		"same_query":            {Dim("organizationId", FromQuery).At("org"), Dim("organizationId", FromQuery).At("org")},
 		"same_query_other_case": {Dim("organizationId", FromQuery).At("org"), Dim("organizationId", FromQuery).At("ORG")},
 		"same_header":           {Dim("organizationId", FromHeader).At("X-Org"), Dim("organizationId", FromHeader).At("x-org")},
+		// Σ and ς are one key to strings.EqualFold, which the readers match
+		// with, but lower-case to different runes.
+		"same_query_folded":  {Dim("organizationId", FromQuery).At("Σ"), Dim("organizationId", FromQuery).At("ς")},
+		"same_header_folded": {Dim("organizationId", FromHeader).At("Σ"), Dim("organizationId", FromHeader).At("ς")},
 	} {
 		_, declErr := resolveDeclaration("midaz", []ScopeDeclaration{RequireScope("midaz", dims...)})
 		assert.Contains(t, declErr, "organizationId", name)
 		assert.Contains(t, declErr, "more than once", name)
+	}
+}
+
+// foldKey is the identity the duplicate check keys carriers by, and
+// strings.EqualFold is how the readers match them: two keys share an identity
+// exactly when the readers would read both for one dimension.
+func TestFoldKey_AgreesWithEqualFold(t *testing.T) {
+	t.Parallel()
+
+	for r := rune(0); r < 0x3000; r++ {
+		for _, other := range []rune{unicode.SimpleFold(r), unicode.ToLower(r), unicode.ToUpper(r), unicode.ToTitle(r), r + 1} {
+			a, b := string(r), string(other)
+			require.Equal(t, strings.EqualFold(a, b), foldKey(a) == foldKey(b), "%q vs %q", a, b)
+		}
 	}
 }
 

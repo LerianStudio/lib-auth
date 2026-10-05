@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -193,10 +194,25 @@ func (d Dimension) location() string {
 func (d Dimension) carrier() string {
 	key := d.key
 	if d.source == FromHeader || d.source == FromQuery {
-		key = strings.ToLower(key)
+		key = foldKey(key)
 	}
 
 	return strconv.Itoa(int(d.source)) + ":" + key
+}
+
+// foldKey maps key to one spelling shared by every key strings.EqualFold, the
+// readers' match, holds equal to it: each rune becomes the least rune of its
+// simple case-folding orbit. strings.ToLower is not that rule — "Σ" and "ς" are
+// equal to EqualFold but lower-case to different runes.
+func foldKey(key string) string {
+	return strings.Map(func(r rune) rune {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			least = min(least, f)
+		}
+
+		return least
+	}, key)
 }
 
 // ScopeDeclaration is a route's statement of which product it belongs to and
