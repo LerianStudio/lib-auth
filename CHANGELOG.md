@@ -1,3 +1,11 @@
+## [5.4.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.4.0-beta.2...v5.4.0-beta.3) (2026-10-05)
+
+
+### Bug Fixes
+
+* **middleware:** compare query carriers with the reader's case-folding rule ([33c3530](https://github.com/LerianStudio/lib-auth/commit/33c35301304cbaf2e49a27f289ab3e07198eb5d5))
+* **middleware:** match query scope keys case-insensitively like fiber binding ([50ca4fe](https://github.com/LerianStudio/lib-auth/commit/50ca4fea4cae955d862d896bcbd182b0ef2fe603))
+
 ## [5.4.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.4.0-beta.1...v5.4.0-beta.2) (2026-10-05)
 
 ## [5.4.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.3.0...v5.4.0-beta.1) (2026-10-05)
