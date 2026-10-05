@@ -148,7 +148,6 @@ func TestValidate_ScopeRoutes(t *testing.T) {
 	}{
 		{name: "from_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "" }, wantErr: `scope.routes[0].dimensions[0]: from must be one of "body", "form", "query", "header", got ""`},
 		{name: "from_unknown", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "cookie" }, wantErr: `got "cookie"`},
-		{name: "from_unknown", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "cookie" }, wantErr: `got "cookie"`},
 		{name: "from_path", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "path" }, wantErr: `got "path"`},
 		{name: "field_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[1].Dimensions[1].Field = " " }, wantErr: "scope.routes[1].dimensions[1]: field must not be empty"},
 		{name: "name_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].Name = "" }, wantErr: "scope.routes[0].dimensions[0]: name must not be empty"},

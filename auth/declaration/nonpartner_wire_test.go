@@ -83,7 +83,12 @@ func nonPartnerAuthorizeBodies(t *testing.T, manifest string) []string {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
+		if err != nil {
+			t.Errorf("mock authz server: failed to read body: %v", err)
+			http.Error(w, `{"code":"unreadable_body"}`, http.StatusBadRequest)
+
+			return
+		}
 
 		mu.Lock()
 		bodies = append(bodies, r.Method+" "+r.URL.Path+" "+string(raw))

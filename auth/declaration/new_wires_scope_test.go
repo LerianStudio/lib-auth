@@ -32,12 +32,22 @@ func newScopeRecorder(t *testing.T, denied string) *scopeRecorder {
 	rec := &scopeRecorder{}
 	rec.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
+		if err != nil {
+			t.Errorf("scope recorder: failed to read body: %v", err)
+			http.Error(w, `{"code":"unreadable_body"}`, http.StatusBadRequest)
+
+			return
+		}
 
 		var body struct {
 			Attributes map[string]string `json:"attributes"`
 		}
-		require.NoError(t, json.Unmarshal(raw, &body))
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Errorf("scope recorder: failed to decode body: %v", err)
+			http.Error(w, `{"code":"undecodable_body"}`, http.StatusBadRequest)
+
+			return
+		}
 
 		rec.mu.Lock()
 		rec.asked = append(rec.asked, body.Attributes)
