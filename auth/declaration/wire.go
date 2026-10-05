@@ -121,11 +121,11 @@ type WireInput struct {
 	Logger obs.Logger
 }
 
-// wireScopeOnly publishes the manifest's scope section alone, for a deployment
-// whose permission declaration is off. It runs only when PLUGIN_AUTH_ENABLED is
-// true and the manifest declares a scope; otherwise it reads and validates
-// nothing else, which keeps the declaration-off boot exactly as it was for every
-// manifest without a scope.
+// wireScopeOnly publishes the manifest's scope section and partner opt-in alone,
+// for a deployment whose permission declaration is off. It runs only when
+// PLUGIN_AUTH_ENABLED is true and the manifest declares a scope or opts in to
+// partners; otherwise it reads and validates nothing else, which keeps the
+// declaration-off boot exactly as it was for every manifest with neither.
 //
 // It never fails the boot. The scope is a catalog the identity provider uses to
 // validate partner writes; a deployment that cannot publish it keeps serving,
@@ -152,7 +152,7 @@ func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 		return noop, nil
 	}
 
-	if manifest.Scope == nil {
+	if !manifest.hasScopeCatalog() {
 		return noop, nil
 	}
 
@@ -216,11 +216,12 @@ func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 // each also accepts its legacy (pre-#4232) name as a DEPRECATED alias for one
 // release, and canonical always wins. New deployments must set the IDP_* names):
 //   - IDP_DECLARATION_ENABLED != "true"  => the permission sections are not
-//     published. When PLUGIN_AUTH_ENABLED=true AND the manifest declares a scope,
-//     the scope section alone is published (see wireScopeOnly; it never fails the
-//     boot). Otherwise it is a no-op: returns a non-nil func(){} and a nil error
-//     WITHOUT reading or validating any other env, so a manifest without a scope
-//     keeps the plugin boot unchanged when the flag is off.
+//     published. When PLUGIN_AUTH_ENABLED=true AND the manifest declares a scope
+//     or partners: true, the scope section and the opt-in alone are published
+//     (see wireScopeOnly; it never fails the boot). Otherwise it is a no-op:
+//     returns a non-nil func(){} and a nil error WITHOUT reading or validating
+//     any other env, so a manifest with neither keeps the plugin boot unchanged
+//     when the flag is off.
 //   - enabled => IDP_HOST, IDP_M2M_CLIENT_ID, IDP_M2M_CLIENT_SECRET, the auth
 //     host (PLUGIN_AUTH_HOST, or its alias PLUGIN_AUTH_ADDRESS) and
 //     PLUGIN_AUTH_ENABLED=true are required; each yields a clear, named error
@@ -307,21 +308,54 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 	return stop, nil
 }
 
-// routeDimensionSources maps a scope.routes dimension's `from` to the source the
-// middleware reads it from. Validate accepts exactly these keys; a new source is
-// one entry here and one in the middleware.
-var routeDimensionSources = map[string]middleware.Source{
-	scopeFromBody: middleware.FromBody,
+// catalogDimensionSources and routeDimensionSources map a scope dimension's
+// `from` to the source the middleware reads it from, for the catalog and for
+// scope.routes. Validate accepts exactly these keys; a new source is one entry
+// here and one in the middleware.
+var (
+	catalogDimensionSources = map[string]middleware.Source{
+		scopeFromPath:   middleware.FromPath,
+		scopeFromQuery:  middleware.FromQuery,
+		scopeFromHeader: middleware.FromHeader,
+	}
+	routeDimensionSources = map[string]middleware.Source{
+		scopeFromBody:   middleware.FromBody,
+		scopeFromForm:   middleware.FromForm,
+		scopeFromQuery:  middleware.FromQuery,
+		scopeFromHeader: middleware.FromHeader,
+	}
+)
+
+// routeDimensions builds the middleware dimensions one scope.routes entry
+// declares.
+func routeDimensions(r DeclarationScopeRoute) []middleware.Dimension {
+	dims := make([]middleware.Dimension, 0, len(r.Dimensions))
+
+	for _, d := range r.Dimensions {
+		dim := middleware.Dim(d.Name, routeDimensionSources[d.From]).At(d.Field)
+		if d.Optional {
+			dim = dim.Optional()
+		}
+
+		dims = append(dims, dim)
+	}
+
+	return dims
 }
 
 // WireScope wires the manifest's scope section into the authorization client, so
-// auth.Authorize derives each route's scope dimensions from the route path (see
-// middleware.AuthClient.SetManifestScope). It parses and validates the manifest
-// — the same embedded bytes the product publishes — and registers its scope
-// under manifest.service, which must be the product name the routes pass to
-// Authorize.
+// auth.Authorize derives each route's scope dimensions from the route path, the
+// query and headers (see middleware.AuthClient.SetManifestScope). It parses and
+// validates the manifest — the same embedded bytes the product publishes — and
+// registers its scope under manifest.service, which must be the product name the
+// routes pass to Authorize.
 //
-// Call it at boot, after building the client and BEFORE registering routes:
+// New does this for the client it is given as Config.Auth, and registers the
+// scope process-wide for every client with no catalog of its own for the
+// product, so a product that builds a publisher needs no call of its own.
+// WireScope is for a client whose routes must follow a manifest no publisher
+// is built from. It may be called before or after the
+// routes are registered: each route works out its scope on its first request.
 //
 //	auth := middleware.NewAuthClient(authHost, authEnabled, logger)
 //	if err := declaration.WireScope(auth, embeddedManifest); err != nil {
@@ -331,10 +365,11 @@ var routeDimensionSources = map[string]middleware.Source{
 //		auth.Authorize("midaz", "ledgers", "get"), handler)
 //
 // The routes of scope.routes read the dimensions they declare from their JSON
-// request body (see middleware.AuthClient.SetManifestRouteScope); a route that
-// cannot be honoured fails here, at boot.
+// request body, a urlencoded form body, the query or headers (see
+// middleware.AuthClient.SetManifestRouteScope); a route that cannot be honoured
+// fails here, at boot.
 //
-// A manifest without a scope section leaves the client exactly as it was.
+// A manifest without a scope section leaves the service with no catalog.
 func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 	if auth == nil {
 		return errors.New("wire scope: auth client is required")
@@ -349,17 +384,39 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 		return fmt.Errorf("wire scope: %w", err)
 	}
 
-	var dims []middleware.Dimension
-
-	if m.Scope != nil {
-		dims = make([]middleware.Dimension, 0, len(m.Scope.Dimensions))
-		for _, d := range m.Scope.Dimensions {
-			dims = append(dims, middleware.Dim(d.Name, middleware.FromPath).At(d.Param))
-		}
+	if err := wireManifestScope(auth, m); err != nil {
+		return fmt.Errorf("wire scope: %w", err)
 	}
 
-	if err := auth.SetManifestScope(m.Service, dims...); err != nil {
-		return fmt.Errorf("wire scope: %w", err)
+	return nil
+}
+
+// scopeTarget is where a manifest's scope section is wired: one authorization
+// client, or the process-wide registry every client without a catalog of its
+// own falls back to.
+type scopeTarget interface {
+	SetManifestScope(product string, dims ...middleware.Dimension) error
+	SetManifestRouteScope(product, method, path string, dims ...middleware.Dimension) error
+}
+
+// productScopes is the process-wide registry as a scopeTarget.
+type productScopes struct{}
+
+func (productScopes) SetManifestScope(product string, dims ...middleware.Dimension) error {
+	return middleware.SetProductManifestScope(product, dims...)
+}
+
+func (productScopes) SetManifestRouteScope(product, method, path string, dims ...middleware.Dimension) error {
+	return middleware.SetProductManifestRouteScope(product, method, path, dims...)
+}
+
+// wireManifestScope registers a validated manifest's scope section under its
+// service: the catalog, then the dimensions of every scope.routes entry. A
+// manifest without a scope section removes the service's catalog, leaving the
+// target as if none had been wired.
+func wireManifestScope(auth scopeTarget, m *DeclarationManifest) error {
+	if err := auth.SetManifestScope(m.Service, catalogDimensions(m.Scope)...); err != nil {
+		return err
 	}
 
 	if m.Scope == nil {
@@ -367,15 +424,25 @@ func WireScope(auth *middleware.AuthClient, manifest []byte) error {
 	}
 
 	for _, r := range m.Scope.Routes {
-		routeDims := make([]middleware.Dimension, 0, len(r.Dimensions))
-		for _, d := range r.Dimensions {
-			routeDims = append(routeDims, middleware.Dim(d.Name, routeDimensionSources[d.From]).At(d.Field))
-		}
-
-		if err := auth.SetManifestRouteScope(m.Service, r.Method, r.Path, routeDims...); err != nil {
-			return fmt.Errorf("wire scope: %w", err)
+		if err := auth.SetManifestRouteScope(m.Service, r.Method, r.Path, routeDimensions(r)...); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+// catalogDimensions builds the middleware dimensions of the scope catalog, in
+// catalog order; none for a manifest without a scope section.
+func catalogDimensions(scope *DeclarationScope) []middleware.Dimension {
+	if scope == nil {
+		return nil
+	}
+
+	dims := make([]middleware.Dimension, 0, len(scope.Dimensions))
+	for _, d := range scope.Dimensions {
+		dims = append(dims, middleware.Dim(d.Name, catalogDimensionSources[d.From]).At(d.Param))
+	}
+
+	return dims
 }

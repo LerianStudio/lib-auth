@@ -20,9 +20,9 @@ import (
 // The body is read for partner-bound credentials only
 // ---------------------------------------------------------------------------
 
-// A credential that is not partner-bound is decided exactly as before the body
-// dimensions existed: one call carrying only the dimensions read from the path,
-// and the body left to the handler, however it is shaped.
+// A credential that is not partner-bound is decided exactly as on a route with
+// no scope: one call without attributes, and the body left to the handler,
+// however it is shaped.
 func TestAuthorize_BodyScope_NonPartnerIsDecidedWithoutTheBody(t *testing.T) {
 	t.Parallel()
 
@@ -44,7 +44,7 @@ func TestAuthorize_BodyScope_NonPartnerIsDecidedWithoutTheBody(t *testing.T) {
 		got := doPost(t, app, "/v1/organizations/org-1/transactions", userToken(), body)
 
 		assert.Equal(t, http.StatusOK, got.status, body)
-		assert.Equal(t, []map[string]string{{"organizationId": "org-1"}}, srv.attributeCalls(), body)
+		assert.Equal(t, []map[string]string{nil}, srv.attributeCalls(), body)
 		assert.Equal(t, int64(1), probe.calls.Load(), body)
 
 		probe.mu.Lock()

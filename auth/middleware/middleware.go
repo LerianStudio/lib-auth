@@ -37,17 +37,11 @@ type AuthClient struct {
 	Enabled bool
 	Logger  obs.Logger
 
-	// manifestScopes holds each product's scope catalog, set by
-	// SetManifestScope and read when a route is registered.
-	manifestScopes  map[string][]Dimension
-	manifestScopeMu sync.RWMutex
-	// manifestRouteScopes holds, per product, the dimensions single routes
-	// read from their request body, set by SetManifestRouteScope and keyed by
-	// method and path. Guarded by manifestScopeMu.
-	manifestRouteScopes map[string]map[string]routeBodyScope
-	// manifestGen counts manifest scope changes; routes compare it to what they
-	// derived from. Guarded by manifestScopeMu.
-	manifestGen uint64
+	// manifestScope holds each product's scope catalog and route scopes, set by
+	// SetManifestScope and SetManifestRouteScope and read by each route on its
+	// first request. A product it has no catalog for falls back to the
+	// process-wide one (see SetProductManifestScope).
+	manifestScope manifestScopeStore
 
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
@@ -194,25 +188,6 @@ type AuthResponse struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// Denial reasons the authorization service publishes. Only the two that mean
-// "this credential is finished" change the status this layer returns.
-const (
-	reasonSuspended = "suspended"
-	reasonExpired   = "expired"
-)
-
-// denialStatus maps a denial reason to the status the caller is answered with.
-// Unknown and absent reasons keep the 403 every denial returned before reasons
-// existed, so a reason this version does not know never widens or narrows access.
-func denialStatus(reason string) int {
-	switch reason {
-	case reasonSuspended, reasonExpired:
-		return http.StatusUnauthorized
-	default:
-		return http.StatusForbidden
-	}
-}
-
 // authzParams are the inputs of one authorization decision.
 type authzParams struct {
 	product     string
@@ -220,13 +195,11 @@ type authzParams struct {
 	action      string
 	accessToken string
 	clientIP    string
-	// attributes are the instance identifiers the route declared and this request
-	// carried. Nil for a route that declares none, which is every route today.
+	// attributes are the instance identifiers one question of a partner-bound
+	// request names. Nil for every other credential, and for a partner-bound
+	// request that names none — which is still asked: the authorization service
+	// decides it by the partner's own scope for the product.
 	attributes map[string]string
-	// declared reports whether the route declared any dimension at all. It is the
-	// distinction the partner guard turns on: a partner-bound credential reaching
-	// a route that cannot say WHERE it is pointing is unscopeable, not unscoped.
-	declared bool
 }
 
 type oauth2Token struct {
@@ -560,18 +533,24 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // application's ErrorHandler owns the response envelope and must preserve the
 // status carried by the error.
 //
-// scopes is optional and additive: pass a RequireScope declaration when the route
-// addresses instances (an organization, a ledger) whose identifiers the
-// authorization service must see to honour a partner-scoped credential. A route
-// that passes none behaves exactly as before, down to the bytes on the wire.
+// scopes is optional: pass a RequireScope declaration when the route addresses
+// instances (an organization, a ledger) whose identifiers the authorization
+// service must see to honour a partner-scoped credential. A route that passes
+// none takes its scope from its product's manifest scope, when one is wired
+// (see SetManifestScope), on its first request. The scope is read only for a
+// partner-bound credential: any other credential is decided exactly as on a
+// route with no scope, down to the bytes on the wire. A partner-bound
+// credential on a request that names no scope dimension is asked without
+// attributes, and the authorization service decides it.
 func (auth *AuthClient) Authorize(product, resource, action string, scopes ...ScopeDeclaration) fiber.Handler {
 	auth.warnMissingTrustedProxies()
 
-	// The declaration is validated ONCE, at route-registration time, not per
-	// request: a misdeclared route is a programming error and every one of its
-	// requests is refused, which is what makes it visible on the first call
-	// instead of on the first partner.
-	scope, derived, declErr := auth.registerRouteScope(product, scopes)
+	// The declaration is validated on its own ONCE, at route-registration time,
+	// and against its product's catalog on the route's first request: a
+	// misdeclared route is a programming error and every one of its requests is
+	// refused, which is what makes it visible on the first call instead of on
+	// the first partner.
+	route, declErr := auth.registerRouteScope(product, scopes)
 
 	return func(c fiber.Ctx) error {
 		// Inherit the ambient request context instead of extracting inbound trace
@@ -604,12 +583,9 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		// route would otherwise serve the very requests the contract says it
 		// refuses, and the error would surface only on the first deployment that
 		// turns auth on.
-		if declErr != "" {
-			if auth != nil {
-				logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", declErr)
-			}
-
-			return auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
+		scope, misdeclared := auth.routeScopeOf(ctx, c, route, declErr)
+		if misdeclared != nil {
+			return misdeclared
 		}
 
 		if !auth.canAuthorize() {
@@ -659,32 +635,13 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		// would forward the ingress address and could produce a false ALLOW.
 		clientIP := auth.resolveClientIP(c)
 
-		// Read the declared identifiers out of THIS request. A declared dimension
-		// the request does not carry is refused here, before the round-trip: an
-		// identifier with no value cannot be matched against a partner's scope, and
-		// sending it absent would quietly ask a question the route did not promise.
-		scope := scope
-		if derived != nil {
-			scope = derived.forRoute(c.Route().Method, c.Route().Path)
-		}
-
-		attributes, missing := resolveAttributes(c, scope.dims)
-		if missing != "" {
-			logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
-
-			span.End()
-
-			return auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
-		}
-
 		resolution, principal, questions, refusal := auth.authorizeRequest(ctx, c, authzParams{
 			product:     product,
 			resource:    resource,
 			action:      action,
 			accessToken: accessToken,
 			clientIP:    clientIP,
-			declared:    scope.declared(),
-		}, scope, attributes)
+		}, scope)
 		if refusal != nil {
 			span.End()
 
@@ -692,19 +649,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		}
 
 		publishPrincipal(c, span, principal)
-
-		// Record what the request was authorized AS, for the handler and the
-		// service's request log. Only for a partner-bound credential: leaving it
-		// absent otherwise is what stops a handler reading "no scope" as "a partner
-		// with no restriction".
-		if resolution.partner != "" {
-			c.Locals(PartnerLocalsKey, resolution.partner)
-			c.SetContext(context.WithValue(c.Context(), requestScopeContextKey{}, RequestScope{
-				Partner:    resolution.partner,
-				Attributes: sharedAttributes(questions),
-				Sets:       questions,
-			}))
-		}
+		recordPartnerScope(c, resolution.partner, questions)
 
 		span.End()
 
@@ -712,21 +657,58 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 	}
 }
 
+// routeScopeOf returns the scope of the route serving c, or the 403 refusal of
+// a route misdeclared — on its own (declErr) or against its product's catalog.
+func (auth *AuthClient) routeScopeOf(ctx context.Context, c fiber.Ctx, route *routeScope, declErr string) (ScopeDeclaration, error) {
+	var scope ScopeDeclaration
+
+	problem := declErr
+	if route != nil {
+		scope, problem = route.forRoute(c.Route().Method, c.Route().Path)
+	}
+
+	if problem == "" {
+		return scope, nil
+	}
+
+	if auth != nil {
+		logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", problem)
+	}
+
+	return ScopeDeclaration{}, auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
+}
+
+// recordPartnerScope records what the request was authorized AS, for the
+// handler and the service's request log. Only for a partner-bound credential:
+// leaving it absent otherwise is what stops a handler reading "no scope" as "a
+// partner with no restriction".
+func recordPartnerScope(c fiber.Ctx, partner string, questions []map[string]string) {
+	if partner == "" {
+		return
+	}
+
+	c.Locals(PartnerLocalsKey, partner)
+	c.SetContext(context.WithValue(c.Context(), requestScopeContextKey{}, RequestScope{
+		Partner:    partner,
+		Attributes: sharedAttributes(questions),
+		Sets:       questions,
+	}))
+}
+
 // authorizeRequest decides one request: it derives the caller once, works out
 // the questions the request makes, and asks them in order under ONE deadline for
 // the whole request, stopping at the first that is not allowed. It returns the
 // last resolution and the questions asked, or the refusal.
 //
-// The body is read only for a partner-bound credential. The authorization
-// service consumes attributes only to decide for a partner; for every other
-// credential it ignores them. So any other caller is decided exactly as before
-// body dimensions existed: one question, carrying only the dimensions read from
-// the path, headers or query, and a body this layer never parses.
+// The scope is read only for a partner-bound credential. The authorization
+// service consumes attributes only to decide for a partner; every other
+// credential is asked one question, without attributes, exactly as on a route
+// that declares no scope, and its request is never read for one.
 //
 // The questions are asked one after another, not concurrently: they are few
 // (distinct sets, capped), the decision cache answers repeats without a call,
 // the first denial ends the request, and the single deadline bounds the total.
-func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, params authzParams, scope ScopeDeclaration, attributes map[string]string) (authzResolution, Principal, []map[string]string, error) {
+func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, params authzParams, scope ScopeDeclaration) (authzResolution, Principal, []map[string]string, error) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -743,13 +725,9 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 		return authzResolution{}, Principal{}, nil, auth.refusalFor(c, *failure)
 	}
 
-	// A route that reads dimensions from its body asks one question per
-	// distinct set of identifiers the body names, and every one must be
-	// allowed. A body that cannot be read for them is the caller's to fix:
-	// refused before any call, naming the field, and never let through.
-	questions, badBody := scope.questions(c, attributes, caller.partner != "")
-	if badBody != nil {
-		return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, http.StatusBadRequest, badBody.Error())
+	questions, refusal := auth.scopeQuestions(ctx, c, scope, caller)
+	if refusal != nil {
+		return authzResolution{}, Principal{}, nil, refusal
 	}
 
 	asked := questions
@@ -767,96 +745,39 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 
 		resolution, principal = auth.decide(ctx, span, params, caller)
 
-		if refusal := auth.refusalFor(c, resolution); refusal != nil {
-			return authzResolution{}, Principal{}, nil, refusal
+		if denied := auth.refusalFor(c, resolution); denied != nil {
+			return authzResolution{}, Principal{}, nil, denied
 		}
 	}
 
 	return resolution, principal, questions, nil
 }
 
-// refusalFor is the error a resolution refuses the request with, or nil when it
-// allows it.
-func (auth *AuthClient) refusalFor(c fiber.Ctx, resolution authzResolution) error {
-	// checkResult, not legacyResult: an Access Manager that never produced an
-	// answer must be refused as 503, not rendered as a 403 the caller reads as
-	// "you are Forbidden" or a 500 that names the wrong subsystem. Fail-closed
-	// is unchanged — the request is still refused — only the word is corrected,
-	// which is what puts the outage in the rail's 5xx alarms.
-	authorized, statusCode, err := resolution.checkResult()
-	if err != nil {
-		var commonsErr commons.Response
-		if errors.As(err, &commonsErr) {
-			return auth.authorizeCommonsRefusal(c, statusCode, commonsErr)
-		}
-
-		return auth.authorizeRefusal(c, statusCode, http.StatusText(statusCode))
+// scopeQuestions reads, for a partner-bound caller, the questions the request
+// makes on the route's scope. Any other caller makes none. A declared dimension
+// the request does not carry is refused 403 here, before the round-trip: an
+// identifier with no value cannot be matched against a partner's scope, and
+// sending it absent would quietly ask a question the route did not promise. A
+// request whose scope cannot be read for the declared dimensions is the caller's
+// to fix: refused before any call, naming the field, and never let through.
+func (auth *AuthClient) scopeQuestions(ctx context.Context, c fiber.Ctx, scope ScopeDeclaration, caller authzCaller) ([]map[string]string, error) {
+	if caller.partner == "" {
+		return nil, nil
 	}
 
-	if !authorized {
-		// The denial reason, not the transport status, picks the word: a
-		// credential the authorization service called finished is answered 401
-		// so its holder re-issues it, while every other denial stays the 403 it
-		// has always been.
-		status := denialStatus(resolution.reason)
+	readings, missing := resolveAttributes(c, scope.dims)
+	if missing != "" {
+		logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
 
-		return auth.authorizeRefusal(c, status, http.StatusText(status))
+		return nil, auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
 	}
 
-	return nil
-}
-
-func (auth *AuthClient) authorizeRefusal(_ fiber.Ctx, status int, message string) error {
-	return fiber.NewError(status, message)
-}
-
-func (auth *AuthClient) authorizeCommonsRefusal(_ fiber.Ctx, status int, response commons.Response) error {
-	return accessManagerRefusal{
-		fiberErr: fiber.NewError(status, refusalMessage(response, status)),
-		response: response,
-	}
-}
-
-type accessManagerRefusal struct {
-	fiberErr *fiber.Error
-	response commons.Response
-}
-
-func (e accessManagerRefusal) Error() string { return e.fiberErr.Error() }
-
-func (e accessManagerRefusal) Unwrap() []error { return []error{e.fiberErr, e.response} }
-
-// refusalMessage is the text a decoded Access Manager error renders as: its
-// business message, else its title, else the status text. A body carrying only a
-// code has an empty Message, and falling through to the status text keeps such a
-// refusal from rendering an empty response.
-func refusalMessage(response commons.Response, statusCode int) string {
-	if response.Message != "" {
-		return response.Message
+	questions, badScope := scope.questions(c, readings)
+	if badScope != nil {
+		return nil, auth.authorizeRefusal(c, badScope.statusCode(), badScope.Error())
 	}
 
-	if response.Title != "" {
-		return response.Title
-	}
-
-	return http.StatusText(statusCode)
-}
-
-// accessManagerRefusalFrom builds the error a non-2xx Access Manager answer
-// surfaces as. The STATUS is what makes the answer a refusal; the body only
-// supplies the reason, so a body that is empty, carries no domain code, or is not
-// JSON at all costs the caller the reason text and never the refusal itself. The
-// message is always non-empty, so a caller that logs the error never logs a blank
-// line.
-func accessManagerRefusalFrom(statusCode int, body []byte) commons.Response {
-	response, err := unmarshalErrorResponse(body)
-	if err != nil {
-		response = commons.Response{}
-	}
-
-	response.Message = refusalMessage(response, statusCode)
-
-	return response
+	return questions, nil
 }
 
 // errAuthorizationUnavailable is the error Check reports alongside 503 when
@@ -1170,18 +1091,6 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 	principal, partner := caller.principal, caller.partner
 	userType, sub := principal.Type, principal.Subject
 
-	// Fail closed on an unscopeable partner. A credential bound to a partner is
-	// only ever allowed to reach SOME instances; a route that declares no
-	// dimension cannot say which instance this request points at, so the
-	// authorization service would have to decide the "where" with nothing to
-	// decide it on. Refusing here — before the call — is the only answer that
-	// cannot accidentally widen the credential.
-	if partner != "" && !p.declared {
-		logErrorf(ctx, auth.Logger, "Partner-bound credential on a route that declares no scope dimension; denying (fail closed)")
-
-		return authzResolution{statusCode: http.StatusForbidden, partner: partner}, principal
-	}
-
 	requestBody := map[string]string{
 		"sub":      sub,
 		"resource": p.resource,
@@ -1229,9 +1138,10 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 	}
 
 	// attributes is the ONLY member this version can add, and it is added only
-	// when the route declared dimensions. With none declared the payload is the
-	// same set of string members in the same encoder as before, so a deployed
-	// caller's bytes on the wire do not move.
+	// for a partner-bound question, which always names dimensions. For every
+	// other credential the payload is the same set of string members in the
+	// same encoder as before, so a deployed caller's bytes on the wire do not
+	// move.
 	payload := make(map[string]any, len(requestBody)+1)
 	for k, v := range requestBody {
 		payload[k] = v

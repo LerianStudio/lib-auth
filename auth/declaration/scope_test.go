@@ -184,14 +184,14 @@ func TestValidate_Scope(t *testing.T) {
 			wantErr: "scope.dimensions[0]: name must not be empty",
 		},
 		{
-			name:    "from_not_path",
-			dims:    []DeclarationDimension{func() DeclarationDimension { d := valid(); d.From = "header"; return d }()},
-			wantErr: `scope.dimensions[0]: from must be "path"`,
+			name:    "from_body",
+			dims:    []DeclarationDimension{func() DeclarationDimension { d := valid(); d.From = "body"; return d }()},
+			wantErr: `scope.dimensions[0]: from must be one of "path", "query", "header", got "body"`,
 		},
 		{
 			name:    "from_missing",
 			dims:    []DeclarationDimension{func() DeclarationDimension { d := valid(); d.From = ""; return d }()},
-			wantErr: `scope.dimensions[0]: from must be "path"`,
+			wantErr: `scope.dimensions[0]: from must be one of "path", "query", "header", got ""`,
 		},
 		{
 			name:    "empty_param",
@@ -260,7 +260,7 @@ func TestValidate_Scope(t *testing.T) {
 func TestNew_RejectsInvalidScope(t *testing.T) {
 	t.Parallel()
 
-	raw := strings.Replace(scopedYAML, "from: path\n      param: ledger_id", "from: query\n      param: ledger_id", 1)
+	raw := strings.Replace(scopedYAML, "from: path\n      param: ledger_id", "from: body\n      param: ledger_id", 1)
 	require.NotEqual(t, scopedYAML, raw)
 
 	cfg := testConfig(t, "http://127.0.0.1:1", "http://127.0.0.1:1")
@@ -268,7 +268,7 @@ func TestNew_RejectsInvalidScope(t *testing.T) {
 
 	_, err := New(cfg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `scope.dimensions[1]: from must be "path"`)
+	assert.Contains(t, err.Error(), `scope.dimensions[1]: from must be one of "path", "query", "header", got "body"`)
 }
 
 func sha256Hex(b []byte) string {
