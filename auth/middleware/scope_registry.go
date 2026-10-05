@@ -137,34 +137,17 @@ func routeScopeKey(method, path string) string {
 // A route that passes RequireScope keeps its own declaration and ignores this.
 // SetManifestScope drops every route declared for the product.
 func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims ...Dimension) error {
-	if auth == nil {
-		return errors.New("manifest route scope: nil auth client")
-	}
-
-	method = strings.ToUpper(strings.TrimSpace(method))
-
-	switch {
-	case strings.TrimSpace(product) == "":
-		return errors.New("manifest route scope: product must not be empty")
-	case method == "":
-		return errors.New("manifest route scope: method must not be empty")
-	case !strings.HasPrefix(path, "/"):
-		return errors.New("manifest route scope: path " + strconv.Quote(path) + " must start with '/'")
-	case len(dims) == 0:
-		return errors.New("manifest route scope: " + method + " " + path + " declares no dimension")
+	method, err := auth.routeTarget("manifest route scope", product, method, path, len(dims), "declares no dimension")
+	if err != nil {
+		return err
 	}
 
 	auth.manifestScopeMu.Lock()
 	defer auth.manifestScopeMu.Unlock()
 
-	catalog := auth.manifestScopes[product]
-	if len(catalog) == 0 {
-		return errors.New("manifest route scope: product " + product + " has no manifest scope; call SetManifestScope first")
-	}
-
-	known := make(map[string]struct{}, len(catalog))
-	for _, dim := range catalog {
-		known[dim.name] = struct{}{}
+	catalog, known, err := auth.routeCatalog("manifest route scope", product)
+	if err != nil {
+		return err
 	}
 
 	for _, dim := range dims {
@@ -180,6 +163,61 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 		return errors.New("manifest route scope: " + method + " " + path + ": " + problem)
 	}
 
+	key := routeScopeKey(method, path)
+
+	auth.storeRouteScope(product, key, routeBodyScope{
+		dims:   routeDims,
+		plan:   plan,
+		filter: auth.manifestRouteScopes[product][key].filter,
+	})
+
+	return nil
+}
+
+// routeTarget checks the route a manifest route setter addresses, and returns
+// its method normalized. op prefixes every error, and nothing is how the route
+// is described when it names no dimension (count is 0).
+func (auth *AuthClient) routeTarget(op, product, method, path string, count int, nothing string) (string, error) {
+	if auth == nil {
+		return "", errors.New(op + ": nil auth client")
+	}
+
+	method = strings.ToUpper(strings.TrimSpace(method))
+
+	switch {
+	case strings.TrimSpace(product) == "":
+		return "", errors.New(op + ": product must not be empty")
+	case method == "":
+		return "", errors.New(op + ": method must not be empty")
+	case !strings.HasPrefix(path, "/"):
+		return "", errors.New(op + ": path " + strconv.Quote(path) + " must start with '/'")
+	case count == 0:
+		return "", errors.New(op + ": " + method + " " + path + " " + nothing)
+	}
+
+	return method, nil
+}
+
+// routeCatalog returns the product's catalog and the names it declares, or the
+// error for a product with none. The caller holds manifestScopeMu.
+func (auth *AuthClient) routeCatalog(op, product string) ([]Dimension, map[string]struct{}, error) {
+	catalog := auth.manifestScopes[product]
+	if len(catalog) == 0 {
+		return nil, nil, errors.New(op + ": product " + product + " has no manifest scope; call SetManifestScope first")
+	}
+
+	known := make(map[string]struct{}, len(catalog))
+	for _, dim := range catalog {
+		known[dim.name] = struct{}{}
+	}
+
+	return catalog, known, nil
+}
+
+// storeRouteScope records the scope of one route of the product and tells the
+// routes already registered that the manifest scope changed. The caller holds
+// manifestScopeMu.
+func (auth *AuthClient) storeRouteScope(product, key string, route routeBodyScope) {
 	if auth.manifestRouteScopes == nil {
 		auth.manifestRouteScopes = make(map[string]map[string]routeBodyScope)
 	}
@@ -188,16 +226,8 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 		auth.manifestRouteScopes[product] = make(map[string]routeBodyScope)
 	}
 
-	key := routeScopeKey(method, path)
-
-	auth.manifestRouteScopes[product][key] = routeBodyScope{
-		dims:   routeDims,
-		plan:   plan,
-		filter: auth.manifestRouteScopes[product][key].filter,
-	}
+	auth.manifestRouteScopes[product][key] = route
 	auth.manifestGen++
-
-	return nil
 }
 
 // checkRouteDimension describes what is wrong with dim as a dimension declared

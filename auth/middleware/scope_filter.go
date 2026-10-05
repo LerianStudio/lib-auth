@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 )
 
@@ -54,21 +53,9 @@ func filterProblem(filter []string) string {
 // declaration.WireScope rather than this directly, at boot, BEFORE registering
 // routes. SetManifestScope drops it, with every route declared for the product.
 func (auth *AuthClient) SetManifestRouteFilter(product, method, path string, dimensions ...string) error {
-	if auth == nil {
-		return errors.New("manifest route filter: nil auth client")
-	}
-
-	method = strings.ToUpper(strings.TrimSpace(method))
-
-	switch {
-	case strings.TrimSpace(product) == "":
-		return errors.New("manifest route filter: product must not be empty")
-	case method == "":
-		return errors.New("manifest route filter: method must not be empty")
-	case !strings.HasPrefix(path, "/"):
-		return errors.New("manifest route filter: path " + strconv.Quote(path) + " must start with '/'")
-	case len(dimensions) == 0:
-		return errors.New("manifest route filter: " + method + " " + path + " filters on no dimension")
+	method, err := auth.routeTarget("manifest route filter", product, method, path, len(dimensions), "filters on no dimension")
+	if err != nil {
+		return err
 	}
 
 	if problem := filterProblem(dimensions); problem != "" {
@@ -78,14 +65,9 @@ func (auth *AuthClient) SetManifestRouteFilter(product, method, path string, dim
 	auth.manifestScopeMu.Lock()
 	defer auth.manifestScopeMu.Unlock()
 
-	catalog := auth.manifestScopes[product]
-	if len(catalog) == 0 {
-		return errors.New("manifest route filter: product " + product + " has no manifest scope; call SetManifestScope first")
-	}
-
-	known := make(map[string]struct{}, len(catalog))
-	for _, dim := range catalog {
-		known[dim.name] = struct{}{}
+	catalog, known, err := auth.routeCatalog("manifest route filter", product)
+	if err != nil {
+		return err
 	}
 
 	for _, name := range dimensions {
@@ -104,16 +86,7 @@ func (auth *AuthClient) SetManifestRouteFilter(product, method, path string, dim
 
 	route.filter = append([]string(nil), dimensions...)
 
-	if auth.manifestRouteScopes == nil {
-		auth.manifestRouteScopes = make(map[string]map[string]routeBodyScope)
-	}
-
-	if auth.manifestRouteScopes[product] == nil {
-		auth.manifestRouteScopes[product] = make(map[string]routeBodyScope)
-	}
-
-	auth.manifestRouteScopes[product][key] = route
-	auth.manifestGen++
+	auth.storeRouteScope(product, key, route)
 
 	return nil
 }
