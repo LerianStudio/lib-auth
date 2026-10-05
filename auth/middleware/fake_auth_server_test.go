@@ -15,7 +15,9 @@ import (
 // fakeAuthServer is the authorization service the scope tests talk to. It
 // records every POST /v1/authorize it receives, raw and decoded, in order, and
 // answers each with what answer returns for it: a string is written as the
-// body as is, any other value is encoded as JSON.
+// body as is, any other value is encoded as JSON. Any other method or path
+// fails the test and is answered 404, so a client that stops building the
+// authorize request correctly cannot pass by being answered anyway.
 type fakeAuthServer struct {
 	*httptest.Server
 
@@ -61,6 +63,13 @@ func newFakeAuthServer(t *testing.T, answer func(authorizeCall) any) *fakeAuthSe
 	srv := &fakeAuthServer{answer: answer}
 
 	srv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/authorize" {
+			t.Errorf("mock authz server: unexpected request %s %s, want POST /v1/authorize", r.Method, r.URL.Path)
+			http.Error(w, `{"code":"unexpected_request"}`, http.StatusNotFound)
+
+			return
+		}
+
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("mock authz server: failed to read body: %v", err)
