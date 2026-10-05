@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -593,105 +592,6 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 	}
 
 	return compileBodyPlan(dims)
-}
-
-// SetManifestScope wires the product's scope catalog — the scope section of its
-// declaration manifest — into the client, so Authorize can derive each route's
-// dimensions from the route path instead of every route declaring them.
-//
-// dims are the catalog in tree order, each read from a path parameter
-// (Dim(name, FromPath).At(param)), a query parameter (FromQuery) or a header
-// (FromHeader); no two read the same place. The declaration package builds them from the
-// embedded manifest: call declaration.WireScope(auth, manifest) rather than this
-// directly. Call it at boot, BEFORE registering routes: a route registered
-// while its product has no catalog never derives one. A later call reaches the
-// routes already registered on a catalog: they derive from the new one.
-//
-// Once a product has a catalog, every route of that product that passes no
-// RequireScope sends, as attributes, the catalog dimensions whose parameter is a
-// WHOLE segment of the route path (":organization_id"), in catalog order — the
-// same attributes an explicit declaration sends — plus every catalog dimension
-// read from the query or a header that the request carries. A request that
-// carries none of them behaves as on a route that declares nothing. A route that passes
-// RequireScope keeps its declaration, which must then name only catalog
-// dimensions.
-//
-// Calling it with no dims removes the product's catalog, leaving the client
-// exactly as if it had never been called.
-func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) error {
-	if auth == nil {
-		return errors.New("manifest scope: nil auth client")
-	}
-
-	if strings.TrimSpace(product) == "" {
-		return errors.New("manifest scope: product must not be empty")
-	}
-
-	names := make(map[string]struct{}, len(dims))
-	keys := make(map[string]struct{}, len(dims))
-
-	for _, dim := range dims {
-		switch {
-		case dim.name == "":
-			return errors.New("manifest scope: a dimension has no name")
-		case dim.source != FromPath && dim.source != FromQuery && dim.source != FromHeader:
-			return errors.New("manifest scope: dimension " + dim.name + " must be read from the path, the query or a header")
-		case dim.key == "":
-			return errors.New("manifest scope: dimension " + dim.name + " declares an empty request key")
-		case dim.matchProblem() != "":
-			return errors.New("manifest scope: " + dim.matchProblem())
-		}
-
-		if _, dup := names[dim.name]; dup {
-			return errors.New("manifest scope: dimension " + dim.name + " is declared more than once")
-		}
-
-		if _, dup := keys[dim.carrier()]; dup {
-			return errors.New("manifest scope: " + dim.location() + " is declared more than once")
-		}
-
-		if problem := auth.unregisteredResolver([]Dimension{dim}); problem != "" {
-			return errors.New("manifest scope: " + problem)
-		}
-
-		names[dim.name] = struct{}{}
-		keys[dim.carrier()] = struct{}{}
-	}
-
-	auth.manifestScopeMu.Lock()
-	defer auth.manifestScopeMu.Unlock()
-
-	// Route body scopes were checked against the catalog being replaced, and
-	// routes already registered must stop using what they derived from it.
-	delete(auth.manifestRouteScopes, product)
-	auth.manifestGen++
-
-	if len(dims) == 0 {
-		delete(auth.manifestScopes, product)
-
-		return nil
-	}
-
-	if auth.manifestScopes == nil {
-		auth.manifestScopes = make(map[string][]Dimension)
-	}
-
-	auth.manifestScopes[product] = append([]Dimension(nil), dims...)
-
-	return nil
-}
-
-// manifestScopeFor returns the product's catalog, or nil when it has none. A nil
-// receiver has none.
-func (auth *AuthClient) manifestScopeFor(product string) []Dimension {
-	if auth == nil {
-		return nil
-	}
-
-	auth.manifestScopeMu.RLock()
-	defer auth.manifestScopeMu.RUnlock()
-
-	return auth.manifestScopes[product]
 }
 
 // checkAgainstCatalog reports the first dimension of an explicit declaration the
