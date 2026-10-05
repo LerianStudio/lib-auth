@@ -239,14 +239,6 @@ func (m *DeclarationManifest) validateScope() []string {
 		}
 
 		violations = append(violations, validateCovers(prefix, d)...)
-
-		if problem := resolveProblem(prefix, d.Resolve); problem != "" {
-			violations = append(violations, problem)
-		}
-
-		if problem := matchProblem(prefix, d.Match, d.Resolve); problem != "" {
-			violations = append(violations, problem)
-		}
 	}
 
 	violations = append(violations, m.validateParents(seenNames)...)
@@ -364,10 +356,11 @@ func validateCovers(prefix string, d DeclarationDimension) []string {
 // validateScopeRoutes validates scope.routes against the catalog: every route
 // names its method and an absolute path, appears once, and declares at least one
 // dimension, reading its body at most one way; every dimension names a catalog
-// dimension, reads from the body, a form, the query or a header, and names its
-// field there. Whether the fields fit together on the route — a well-formed
-// path, every dimension read for each array element, no field read twice — is
-// checked by the middleware when WireScope registers the route.
+// dimension, reads from the body, a form, the query, a header or the path, and
+// names its field there. Whether the fields fit together on the route — a
+// well-formed body path, a path parameter the route carries, every dimension
+// read for each array element, no field read twice — is checked by the
+// middleware when the route is wired.
 func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) []string {
 	var violations []string
 
@@ -392,11 +385,9 @@ func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) [
 
 		seenRoutes[key] = struct{}{}
 
-		if len(r.Dimensions) == 0 && len(r.Filter) == 0 {
-			violations = append(violations, prefix+": must declare at least one dimension or a filter")
+		if len(r.Dimensions) == 0 {
+			violations = append(violations, prefix+": must declare at least one dimension")
 		}
-
-		violations = append(violations, validateRouteFilter(prefix, r.Filter, catalog)...)
 
 		bodyAs := make(map[string]struct{}, len(r.Dimensions))
 
@@ -416,39 +407,9 @@ func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) [
 	return violations
 }
 
-// validateRouteFilter validates a route's filter: every entry names a catalog
-// dimension, once.
-func validateRouteFilter(prefix string, filter []string, catalog map[string]struct{}) []string {
-	var violations []string
-
-	seen := make(map[string]struct{}, len(filter))
-
-	for i, name := range filter {
-		entry := fmt.Sprintf("%s.filter[%d]", prefix, i)
-
-		if _, dup := seen[name]; dup {
-			violations = append(violations, fmt.Sprintf("%s: duplicate dimension %q", entry, name))
-
-			continue
-		}
-
-		seen[name] = struct{}{}
-
-		switch _, known := catalog[name]; {
-		case strings.TrimSpace(name) == "":
-			violations = append(violations, entry+": must not be empty")
-		case !known:
-			violations = append(violations, fmt.Sprintf("%s: %q is not a scope dimension of the catalog", entry, name))
-		}
-	}
-
-	return violations
-}
-
 // validateRouteDimension validates one dimension of a scope.routes entry: it
 // names a catalog dimension, reads from a known carrier, and names its field
-// there. A path parameter is derived from the catalog; a route declares one only
-// to resolve its value into the dimension.
+// there.
 func validateRouteDimension(prefix string, d DeclarationRouteDimension, catalog map[string]struct{}) []string {
 	var violations []string
 
@@ -458,17 +419,9 @@ func validateRouteDimension(prefix string, d DeclarationRouteDimension, catalog 
 		violations = append(violations, fmt.Sprintf("%s: %q is not a scope dimension of the catalog", prefix, d.Name))
 	}
 
-	if _, known := routeDimensionSources[d.From]; !known && (d.From != scopeFromPath || d.Resolve == "") {
+	if _, known := routeDimensionSources[d.From]; !known {
 		violations = append(violations, fmt.Sprintf(
-			`%s: from must be one of "body", "form", "query", "header", got %q (from "path" requires resolve)`, prefix, d.From))
-	}
-
-	if problem := resolveProblem(prefix, d.Resolve); problem != "" {
-		violations = append(violations, problem)
-	}
-
-	if problem := matchProblem(prefix, d.Match, d.Resolve); problem != "" {
-		violations = append(violations, problem)
+			`%s: from must be one of "body", "form", "query", "header", "path", got %q`, prefix, d.From))
 	}
 
 	switch problem := requestKeyProblem(d.From, d.Field); {

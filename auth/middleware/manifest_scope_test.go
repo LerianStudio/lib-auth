@@ -296,7 +296,8 @@ func TestAuthorize_ManifestScope_ExplicitDeclarationStillWorks(t *testing.T) {
 }
 
 // An explicit declaration naming a dimension the manifest scope does not
-// declare is refused, and said so at registration — the startup log.
+// declare refuses every request, and says so in the log on the route's first
+// request — whichever of the catalog and the route was wired first.
 func TestAuthorize_ManifestScope_ExplicitDimensionOutsideTheCatalogIsRefused(t *testing.T) {
 	t.Parallel()
 
@@ -309,14 +310,12 @@ func TestAuthorize_ManifestScope_ExplicitDimensionOutsideTheCatalogIsRefused(t *
 	handler := auth.Authorize("midaz", "accounts", "get",
 		RequireScope("midaz", Dim("portfolioId", FromPath).At("portfolio_id")))
 
-	assert.Contains(t, logger.all(), "portfolioId",
-		"the misdeclaration is logged when the route is registered, before any request")
-
 	app := fiber.New()
 	app.Get("/v1/portfolios/:portfolio_id", handler, ok)
 
 	assert.Equal(t, http.StatusForbidden, doGet(t, app, "/v1/portfolios/pf-1", userToken()))
 	assert.Equal(t, int64(0), rec.hits.Load())
+	assert.Contains(t, logger.all(), "portfolioId", "the misdeclaration is logged")
 
 	// Positive control: a declared dimension on the same client is honoured.
 	app.Get("/v1/organizations/:organization_id",

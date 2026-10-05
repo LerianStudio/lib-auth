@@ -53,34 +53,6 @@ func partnerDenial(reason string) (response commons.Response, ok bool) {
 	}
 }
 
-// refusalOfResolved is refusalFor for a question carrying a value resolved at
-// resolvedAt ("" for none): a resolved value outside the scope answers exactly
-// as a value that does not resolve, naming where it was read and never telling
-// the two apart.
-func (auth *AuthClient) refusalOfResolved(c fiber.Ctx, decision authzResolution, resolvedAt string) error {
-	refusal := auth.refusalFor(c, decision)
-	if refusal != nil && resolvedAt != "" && deniedStatus(decision) == http.StatusForbidden {
-		return auth.authorizeRefusal(c, http.StatusForbidden, outsideScope(resolvedAt))
-	}
-
-	return refusal
-}
-
-// deniedStatus is the status a refused decision answers with, or 0 when the
-// authorization service could not be reached.
-func deniedStatus(decision authzResolution) int {
-	if decision.unavailableErr != nil {
-		return 0
-	}
-
-	_, status, err := decision.checkResult()
-	if err == nil {
-		return denialStatus(decision.reason)
-	}
-
-	return status
-}
-
 // refusalFor is the error a resolution refuses the request with, or nil when it
 // allows it.
 func (auth *AuthClient) refusalFor(c fiber.Ctx, resolution authzResolution) error {

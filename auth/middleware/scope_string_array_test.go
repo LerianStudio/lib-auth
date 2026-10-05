@@ -20,7 +20,7 @@ import (
 func stringArrayClient(t *testing.T, url string, dims ...Dimension) *AuthClient {
 	t.Helper()
 
-	return bodyScopedClientWith(t, scopedClientSetup{url: url, catalog: resolveCatalog()}, http.MethodPost, legsRoute, dims...)
+	return bodyScopedClientWith(t, scopedClientSetup{url: url, catalog: accountCatalog()}, http.MethodPost, legsRoute, dims...)
 }
 
 func stringArrayApp(auth *AuthClient, probe *handlerProbe) *fiber.App {
@@ -189,7 +189,7 @@ func TestAuthorize_StringArray_NestedKeepsItsElement(t *testing.T) {
 
 	srv := newDecidingAuthServer(t)
 	auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
-	require.NoError(t, auth.SetManifestScope("midaz", resolveCatalog()...))
+	require.NoError(t, auth.SetManifestScope("midaz", accountCatalog()...))
 	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, route,
 		Dim("ledgerId", FromBody).At("targets[].ledgerId"),
 		Dim("accountId", FromBody).At("targets[].ids[]")))
@@ -250,37 +250,7 @@ func TestAuthorize_StringArray_NonPartnerNeverReadsTheBody(t *testing.T) {
 	got := doRequest(t, app, http.MethodPost, legsPath, userToken(), `{"accountTarget":{"ids":[7]}}`)
 
 	assert.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, []map[string]string{{"organizationId": "org-1", "ledgerId": "led-1"}}, srv.attributeCalls())
-}
-
-// The strings of the array are resolved like any body value: one batch, and
-// each resolved value asked.
-func TestAuthorize_StringArray_Resolved(t *testing.T) {
-	t.Parallel()
-
-	srv := newDecidingAuthServer(t)
-	resolver := &fakeResolver{table: map[string][]string{"@a": {"acc-a"}, "@b": {"acc-b"}}}
-	auth := resolvingClient(t, srv.URL, "alias", resolver, http.MethodPost, legsRoute,
-		Dim("accountId", FromBody).At("accountTarget.aliases[]").Resolve("alias"))
-
-	app := fiber.New()
-	app.Post(legsRoute, auth.Authorize("midaz", "transactions", "post"), ok)
-
-	got := doRequest(t, app, http.MethodPost, legsPath, partnerToken("acme/p1"),
-		`{"accountTarget":{"aliases":["@a","@b","@a"]}}`)
-	require.Equal(t, http.StatusOK, got.status, got.body)
-
-	assert.Equal(t, []map[string]string{
-		{"organizationId": "org-1", "ledgerId": "led-1"},
-		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-a"},
-		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-b"},
-	}, srv.attributeCalls())
-	require.Len(t, resolver.inputs(), 1, "one call for the whole body")
-
-	got = doRequest(t, app, http.MethodPost, legsPath, partnerToken("acme/p1"),
-		`{"accountTarget":{"aliases":["@a","@zz"]}}`)
-	assert.Equal(t, http.StatusForbidden, got.status)
-	assert.Contains(t, got.body, `body field "accountTarget.aliases[1]" is outside this credential's scope or does not exist`)
+	assert.Equal(t, []map[string]string{nil}, srv.attributeCalls())
 }
 
 // The elements of an array are read either as strings or as objects, never
@@ -289,7 +259,7 @@ func TestSetManifestRouteScope_StringArrayReadAsObjectsIsRefused(t *testing.T) {
 	t.Parallel()
 
 	auth := &AuthClient{Logger: &testLogger{}}
-	require.NoError(t, auth.SetManifestScope("midaz", resolveCatalog()...))
+	require.NoError(t, auth.SetManifestScope("midaz", accountCatalog()...))
 
 	for name, dims := range map[string][]Dimension{
 		"key_of_element": {Dim("accountId", FromBody).At("x.ids[]"), Dim("ledgerId", FromBody).At("x.ids[].ledgerId")},

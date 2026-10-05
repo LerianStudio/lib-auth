@@ -39,6 +39,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LerianStudio/lib-auth/v5/auth/middleware"
 	"github.com/LerianStudio/lib-auth/v5/auth/obs"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/LerianStudio/lib-observability/v4/runtime"
@@ -103,6 +104,11 @@ type Config struct {
 	// Auth is any TokenMinter — typically the plugin's existing *middleware.AuthClient
 	// (v2 or v3). Its GetApplicationToken mints the M2M token (client_credentials);
 	// the concrete AuthClient also carries the AUTH address. Required.
+	//
+	// When it is a *middleware.AuthClient, New also wires the manifest's scope
+	// section into it (see WireScope): the routes that client authorizes derive
+	// their partner scope from this manifest, whatever the order the routes and
+	// the publisher are built in.
 	Auth TokenMinter
 	// ClientID / ClientSecret are the plugin's M2M credentials (from manual
 	// provisioning). Required. ClientSecret is NEVER logged.
@@ -237,6 +243,16 @@ func New(cfg Config) (*Publisher, error) {
 
 	if manifest.Service != cfg.Slug {
 		return nil, fmt.Errorf("slug %q must equal manifest.service %q (BOLA: DisplayName==slug==service)", cfg.Slug, manifest.Service)
+	}
+
+	// The client that mints the publisher's token is, in a product, the client
+	// its routes authorize with: the manifest's scope goes to it here, so the
+	// routes derive their scope from the same bytes the product publishes,
+	// without a wiring call of their own.
+	if auth, ok := cfg.Auth.(*middleware.AuthClient); ok && auth != nil {
+		if err := wireManifestScope(auth, manifest); err != nil {
+			return nil, fmt.Errorf("wire manifest scope: %w", err)
+		}
 	}
 
 	var published publication = manifest

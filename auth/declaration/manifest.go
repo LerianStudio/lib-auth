@@ -67,7 +67,8 @@ type DeclarationManifest struct {
 
 // The places a request carries a dimension's value. A catalog dimension is read
 // from the path, the query or a header; a scope.routes dimension from the JSON
-// body, a urlencoded form body, the query or a header.
+// body, a urlencoded form body, the query, a header or a path parameter of the
+// route.
 const (
 	scopeFromPath   = "path"
 	scopeFromQuery  = "query"
@@ -83,31 +84,27 @@ type DeclarationScope struct {
 	// it). The order is content — it is hashed and it is the order a route's
 	// identifiers are resolved in.
 	Dimensions []DeclarationDimension `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
-	// Routes declares, per route, the catalog dimensions that route reads from
-	// its JSON request body instead of its path. They are this library's to
-	// read: the identity service never receives them, and they are left out of
-	// the wire body and of CanonicalHash (see serverProjection), so declaring
-	// them changes nothing that is published.
+	// Routes declares, per route, the catalog dimensions that route reads
+	// somewhere the catalog does not say: its request body, a query parameter, a
+	// header, or a path parameter the catalog knows by another name. They are
+	// this library's to read: the identity service never receives them, and they
+	// are left out of the wire body and of CanonicalHash (see serverProjection),
+	// so declaring them changes nothing that is published.
 	Routes []DeclarationScopeRoute `json:"routes,omitempty" yaml:"routes,omitempty"`
 }
 
-// DeclarationScopeRoute names one route and the dimensions it reads from its
-// request body.
+// DeclarationScopeRoute names one route and the dimensions it reads where the
+// catalog does not say.
 type DeclarationScopeRoute struct {
 	// Method is the route's HTTP method, in any letter case.
 	Method string `json:"method,omitempty" yaml:"method,omitempty"`
 	// Path is the route's full path exactly as it is registered, group prefixes
 	// included, with its ':' parameters (e.g. "/v2/transactions/direct").
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
-	// Dimensions are the catalog dimensions the route reads from somewhere other
-	// than its path. The dimensions its path carries are still derived from the
-	// path; one read from both must name the same values in each.
+	// Dimensions are the catalog dimensions the route reads where the catalog
+	// does not say. The other dimensions its path carries are still derived from
+	// the path; one read from two carriers must name the same values in each.
 	Dimensions []DeclarationRouteDimension `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
-	// Filter names catalog dimensions the route filters its list on: when a
-	// partner request leaves one out, the authorization service is asked for
-	// the values of it the partner may see instead of refusing, and the handler
-	// confines its list to them (see middleware.RequestScope.Allowed).
-	Filter []string `json:"filter,omitempty" yaml:"filter,omitempty"`
 }
 
 // DeclarationRouteDimension declares where in a route's request ONE catalog
@@ -115,8 +112,8 @@ type DeclarationScopeRoute struct {
 type DeclarationRouteDimension struct {
 	// Name is a dimension of the catalog (scope.dimensions[].name).
 	Name string `json:"name,omitempty" yaml:"name,omitempty"`
-	// From is where the request carries the value: "body", "form", "query" or
-	// "header". A route reads its body either as JSON (body) or as an
+	// From is where the request carries the value: "body", "form", "query",
+	// "header" or "path". A route reads its body either as JSON (body) or as an
 	// application/x-www-form-urlencoded form (form), never both.
 	From string `json:"from,omitempty" yaml:"from,omitempty"`
 	// Field is where under From the value is. For "body", its path in the JSON
@@ -127,7 +124,11 @@ type DeclarationRouteDimension struct {
 	// For "form", the form field name; for "query", the parameter name; for
 	// "header", the header name, in any letter case. A form field, query
 	// parameter or header may list several values; see middleware.FromQuery and
-	// middleware.FromForm.
+	// middleware.FromForm. For "path", the name of a parameter of the route path
+	// without the ':' marker ("id" for a segment ":id"): the route's own name for
+	// the dimension, which replaces, on that route only, what the catalog would
+	// derive from the path for the same dimension and the same parameter; see
+	// middleware.AuthClient.SetManifestRouteScope.
 	Field string `json:"field,omitempty" yaml:"field,omitempty"`
 	// Optional means a request may leave the value out: when the request does
 	// not carry it (a body key on its path absent or null, a form field, query
@@ -135,18 +136,6 @@ type DeclarationRouteDimension struct {
 	// A value that is there must still be a non-empty string. See
 	// middleware.Dimension.Optional.
 	Optional bool `json:"optional,omitempty" yaml:"optional,omitempty"`
-	// Resolve optionally names the resolver (middleware.AuthClient.
-	// RegisterScopeResolver) that translates the value read at Field into the
-	// dimension's values: an account alias into the account id, a transaction
-	// id into the account ids of its legs. With it, From may also be "path",
-	// Field then naming a parameter of the route path.
-	Resolve string `json:"resolve,omitempty" yaml:"resolve,omitempty"`
-	// Match optionally says, for a dimension that declares Resolve, how the
-	// values one request value resolves to are judged: "all" (the default)
-	// allows the request only when every one is allowed, "any" when at least
-	// one is. See middleware.Dimension.MatchAny. Read by this library only, like
-	// the rest of scope.routes.
-	Match string `json:"match,omitempty" yaml:"match,omitempty"`
 }
 
 // DeclarationDimension declares ONE instance dimension of the product.
@@ -185,17 +174,6 @@ type DeclarationDimension struct {
 	Covers []string `json:"covers,omitempty" yaml:"covers,omitempty"`
 	// Label is an optional human-readable name for consoles.
 	Label string `json:"label,omitempty" yaml:"label,omitempty"`
-	// Resolve optionally names the resolver (middleware.AuthClient.
-	// RegisterScopeResolver) that translates the value read at Param into the
-	// dimension's values. It is read by this library only: it is never
-	// published and is not part of CanonicalHash.
-	Resolve string `json:"resolve,omitempty" yaml:"resolve,omitempty"`
-	// Match optionally says, for a dimension that declares Resolve, how the
-	// values one request value resolves to are judged: "all" (the default)
-	// allows the request only when every one is allowed, "any" when at least
-	// one is. See middleware.Dimension.MatchAny. Like Resolve, it is read by
-	// this library only: never published and not part of CanonicalHash.
-	Match string `json:"match,omitempty" yaml:"match,omitempty"`
 	// Parent optionally names the dimension whose instances hold this one's
 	// (e.g. a ledgerId dimension's parent is "organizationId"), declaring the
 	// hierarchy of the catalog. It names another declared dimension, and
@@ -347,8 +325,8 @@ func (m *DeclarationManifest) wireJSON() ([]byte, error) {
 }
 
 // scopeOnly is the projection a scope-only publication sends (see
-// scopeOnlyManifest). The scope is the server projection's: scope.routes and the
-// dimensions' resolve stay with this library.
+// scopeOnlyManifest). The scope is the server projection's: scope.routes stays
+// with this library.
 func (m *DeclarationManifest) scopeOnly() *scopeOnlyManifest {
 	published := (&DeclarationManifest{Service: m.Service, Scope: m.Scope}).serverProjection()
 
@@ -398,74 +376,18 @@ func (m *DeclarationManifest) hasScopeCatalog() bool {
 }
 
 // serverProjection is the manifest the identity service knows: everything but
-// scope.routes and the dimensions' resolve and match, which only this library
-// reads. Both
-// the wire body and CanonicalHash are taken from it, so neither ever changes
-// what is published nor the hash the service compares. The receiver is not
-// modified.
+// scope.routes, which only this library reads. Both the wire body and
+// CanonicalHash are taken from it, so neither ever changes what is published
+// nor the hash the service compares. The receiver is not modified.
 func (m *DeclarationManifest) serverProjection() *DeclarationManifest {
-	if m.Scope == nil || (len(m.Scope.Routes) == 0 && !m.Scope.resolves()) {
+	if m.Scope == nil || len(m.Scope.Routes) == 0 {
 		return m
 	}
 
-	dims := m.Scope.Dimensions
-	if m.Scope.resolves() {
-		dims = make([]DeclarationDimension, len(m.Scope.Dimensions))
-		for i, d := range m.Scope.Dimensions {
-			d.Resolve = ""
-			d.Match = ""
-			dims[i] = d
-		}
-	}
-
 	projected := *m
-	projected.Scope = &DeclarationScope{Dimensions: dims}
+	projected.Scope = &DeclarationScope{Dimensions: m.Scope.Dimensions}
 
 	return &projected
-}
-
-// resolves reports whether a catalog dimension names a resolver or how its
-// resolved values match.
-func (s *DeclarationScope) resolves() bool {
-	for _, d := range s.Dimensions {
-		if d.Resolve != "" || d.Match != "" {
-			return true
-		}
-	}
-
-	return false
-}
-
-// resolveProblem describes what is wrong with resolve as a resolver name, or
-// returns "" when it is absent or valid.
-func resolveProblem(prefix, resolve string) string {
-	if resolve == "" || (strings.TrimSpace(resolve) == resolve) {
-		return ""
-	}
-
-	return fmt.Sprintf("%s: resolve %q must be a resolver name with no surrounding whitespace", prefix, resolve)
-}
-
-// matchAny is the match that allows a resolved request value when any of its
-// values is allowed; matchAll, the default, when every one is.
-const (
-	matchAll = "all"
-	matchAny = "any"
-)
-
-// matchProblem describes what is wrong with match on a dimension resolved by
-// resolve, or returns "" when it is absent or valid.
-func matchProblem(prefix, match, resolve string) string {
-	switch {
-	case match == "":
-		return ""
-	case match != matchAll && match != matchAny:
-		return fmt.Sprintf(`%s: match must be "all" or "any", got %q`, prefix, match)
-	case resolve == "":
-		return prefix + ": match requires resolve"
-	default:
-		return ""
-	}
 }
 
 // CanonicalHash returns a stable hex-encoded SHA-256 over a deterministic

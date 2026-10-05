@@ -45,14 +45,8 @@ type authzOutcome struct {
 	statusCode int
 	// reason is the denial reason published by the authorization service, empty
 	// when it published none (which is every decision that predates the field).
-	reason string
-	// allowed are the allowed values a grant carried, by dimension; nil when it
-	// carried none.
-	allowed map[string][]string
-	// unrestricted is set when a grant said the partner is not confined on
-	// the product (see AuthResponse.Unrestricted); never on a denial.
-	unrestricted bool
-	authErr      error
+	reason  string
+	authErr error
 
 	// transientErr is non-nil when the authorization service did not produce an
 	// authoritative answer — a network failure, a context timeout, or a 5xx. It is
@@ -79,14 +73,6 @@ type authzResolution struct {
 	// reason is the authorization service's denial reason, empty when authorized
 	// or when the service published none.
 	reason string
-
-	// allowed are the allowed values the service returned with a grant, by
-	// dimension; nil when it returned none.
-	allowed map[string][]string
-
-	// unrestricted is set when the grant said the partner is not confined on
-	// the product (see AuthResponse.Unrestricted).
-	unrestricted bool
 
 	// partner is the token's "partner" claim, empty for every credential that is
 	// not partner-bound.
@@ -153,13 +139,10 @@ func (auth *AuthClient) resolveAuthz(ctx context.Context, span trace.Span, acces
 	}
 
 	if auth.cache != nil {
-		auth.cache.set(key, outcome.authorized, outcome.reason, outcome.allowed, outcome.unrestricted)
+		auth.cache.set(key, outcome.authorized, outcome.reason)
 	}
 
-	return authzResolution{
-		authorized: outcome.authorized, statusCode: outcome.statusCode, reason: outcome.reason,
-		allowed: outcome.allowed, unrestricted: outcome.unrestricted,
-	}
+	return authzResolution{authorized: outcome.authorized, statusCode: outcome.statusCode, reason: outcome.reason}
 }
 
 // invokeAuthz runs the authorization call under the resilience layers. Composition
@@ -307,10 +290,6 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 		// pointer-decoded read of the decision (see AuthResponse.Reason for what
 		// each value means and which status it maps to).
 		Reason string `json:"reason"`
-		// Allowed is read off the same decode too (see AuthResponse.Allowed).
-		Allowed map[string][]string `json:"allowed"`
-		// Unrestricted too (see AuthResponse.Unrestricted).
-		Unrestricted bool `json:"unrestricted"`
 	}
 
 	if err := json.Unmarshal(body, &decoded); err != nil {
@@ -344,43 +323,7 @@ func (auth *AuthClient) classifyResponse(ctx context.Context, span trace.Span, s
 		return authzOutcome{statusCode: http.StatusServiceUnavailable, authErr: unavailable, transientErr: unavailable}
 	}
 
-	allowed, problem := normalizeAllowed(*decoded.Authorized, decoded.Allowed)
-	if problem != nil {
-		logErrorf(ctx, auth.Logger, "Authorization unavailable: %v", problem)
-		tracing.HandleSpanError(span, "Authorization unavailable", problem)
-
-		return authzOutcome{statusCode: http.StatusServiceUnavailable, authErr: problem, transientErr: problem}
-	}
-
-	return authzOutcome{
-		authorized: *decoded.Authorized, statusCode: statusCode, reason: decoded.Reason, allowed: allowed,
-		unrestricted: *decoded.Authorized && decoded.Unrestricted,
-	}
-}
-
-// normalizeAllowed validates the allowed values of a decision. They count only
-// on a grant. A dimension present with null is an empty list — the partner may
-// see none of it — never "no confinement". An empty value is not an identifier:
-// the service answered something that is not a decision, which is reported as
-// the service failing to answer.
-func normalizeAllowed(authorized bool, allowed map[string][]string) (map[string][]string, error) {
-	if !authorized || len(allowed) == 0 {
-		return nil, nil
-	}
-
-	normalized := make(map[string][]string, len(allowed))
-
-	for name, values := range allowed {
-		for _, v := range values {
-			if v == "" {
-				return nil, fmt.Errorf("authorization service returned an empty allowed value for %q", name)
-			}
-		}
-
-		normalized[name] = append([]string{}, values...)
-	}
-
-	return normalized, nil
+	return authzOutcome{authorized: *decoded.Authorized, statusCode: statusCode, reason: decoded.Reason}
 }
 
 // isCallerRefusal reports whether a status from the Access Manager is a decision

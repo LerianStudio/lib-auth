@@ -40,7 +40,7 @@ func maintenanceApp(t *testing.T, srv *fakeAuthServer, dims ...Dimension) *fiber
 	t.Helper()
 
 	auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
-	require.NoError(t, auth.SetManifestScope("midaz", resolveCatalog()...))
+	require.NoError(t, auth.SetManifestScope("midaz", accountCatalog()...))
 	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, maintenanceRoute, dims...))
 
 	app := fiber.New()
@@ -87,7 +87,7 @@ func TestAuthorize_BodyUnion_OneDeniedValueRefuses(t *testing.T) {
 			srv := newDecidingAuthServer(t, denied)
 
 			auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
-			require.NoError(t, auth.SetManifestScope("midaz", resolveCatalog()...))
+			require.NoError(t, auth.SetManifestScope("midaz", accountCatalog()...))
 			require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, maintenanceRoute, maintenanceDims(false, false)...))
 
 			probe := &handlerProbe{}
@@ -275,63 +275,13 @@ func maintenanceAppOn(t *testing.T, srv *fakeAuthServer, route string, dims ...D
 	t.Helper()
 
 	auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
-	require.NoError(t, auth.SetManifestScope("midaz", resolveCatalog()...))
+	require.NoError(t, auth.SetManifestScope("midaz", accountCatalog()...))
 	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, route, dims...))
 
 	app := fiber.New()
 	app.Post(route, auth.Authorize("midaz", "maintenance", "post"), ok)
 
 	return app
-}
-
-// Resolution works per field: each field is resolved by its own resolver
-// with the siblings of its own element, all in one call per resolver, and
-// every resolved value is asked.
-func TestAuthorize_BodyUnion_ResolvesPerField(t *testing.T) {
-	t.Parallel()
-
-	srv := newDecidingAuthServer(t)
-	resolver := &fakeResolver{bySibling: "ledgerId", table: map[string][]string{
-		"led-1/@m": {"acc-m"},
-		"led-1/@a": {"acc-a"},
-		"led-2/@b": {"acc-b"},
-	}}
-
-	auth := resolvingClient(t, srv.URL, "alias", resolver, http.MethodPost, maintenanceRoute,
-		Dim("ledgerId", FromBody).At("ledgerId"),
-		Dim("accountId", FromBody).At("maintenanceCreditAccount").Resolve("alias"),
-		Dim("ledgerId", FromBody).At("targets[].ledgerId"),
-		Dim("accountId", FromBody).At("targets[].aliases[]").Resolve("alias"),
-		Dim("accountId", FromBody).At("targets[].accountId").Optional(),
-	)
-
-	app := fiber.New()
-	app.Post(maintenanceRoute, auth.Authorize("midaz", "maintenance", "post"), ok)
-
-	got := doRequest(t, app, http.MethodPost, maintenanceTarget, partnerToken("acme/p1"), `{
-		"ledgerId":"led-1","maintenanceCreditAccount":"@m",
-		"targets":[{"ledgerId":"led-2","aliases":["@b"],"accountId":"acc-p"}]}`)
-	require.Equal(t, http.StatusOK, got.status, got.body)
-
-	inputs := resolver.inputs()
-	require.Len(t, inputs, 1, "one call for both resolved fields")
-	assert.Equal(t, []ResolveItem{
-		{Value: "@m", Siblings: map[string]string{"ledgerId": "led-1"}},
-		{Value: "@b", Siblings: map[string]string{"ledgerId": "led-2"}},
-	}, inputs[0].Items, "each value with the siblings of its own element")
-
-	calls := srv.attributeCalls()
-	for _, want := range []map[string]string{
-		{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-m"},
-		{"organizationId": "org-1", "ledgerId": "led-2", "accountId": "acc-b"},
-		{"organizationId": "org-1", "ledgerId": "led-2", "accountId": "acc-p"},
-	} {
-		assert.Contains(t, calls, want)
-	}
-
-	for _, call := range calls {
-		assert.NotContains(t, []string{"@m", "@b"}, call["accountId"], "a key is never asked as a value")
-	}
 }
 
 // Reading one dimension from the same body field twice — the same path, in
@@ -351,7 +301,7 @@ func TestSetManifestRouteScope_BodyUnion_SameFieldTwiceIsRefused(t *testing.T) {
 			t.Parallel()
 
 			auth := &AuthClient{Logger: &testLogger{}}
-			require.NoError(t, auth.SetManifestScope("midaz", resolveCatalog()...))
+			require.NoError(t, auth.SetManifestScope("midaz", accountCatalog()...))
 
 			err := auth.SetManifestRouteScope("midaz", http.MethodPost, maintenanceRoute, dims...)
 			require.Error(t, err)
@@ -362,7 +312,7 @@ func TestSetManifestRouteScope_BodyUnion_SameFieldTwiceIsRefused(t *testing.T) {
 
 	// Positive control: two distinct fields of the same element are accepted.
 	auth := &AuthClient{Logger: &testLogger{}}
-	require.NoError(t, auth.SetManifestScope("midaz", resolveCatalog()...))
+	require.NoError(t, auth.SetManifestScope("midaz", accountCatalog()...))
 	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, maintenanceRoute,
 		Dim("accountId", FromBody).At("items[].accountId"), Dim("accountId", FromBody).At("items[].counterpartyAccountId")))
 }

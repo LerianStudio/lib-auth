@@ -34,27 +34,14 @@ type authorizeCall struct {
 	// payload-compatibility assertions compare, so an added member, a
 	// reordered key or a changed encoding all show up.
 	raw string
-	// body is the decoded attributes and filter.
+	// body is the decoded attributes.
 	body authorizeRequestBody
-	// pending is the decoded pending member, and pendingSent whether the body
-	// carried one at all.
-	pending     []string
-	pendingSent bool
 }
 
 // authorizeRequestBody is the part of an authorize body a scripted answer
 // reads.
 type authorizeRequestBody struct {
 	Attributes map[string]string `json:"attributes"`
-	Filter     []string          `json:"filter"`
-}
-
-// pendingCall is one /v1/authorize body as the pending tests read it: the
-// attributes asked, and the pending member — with whether it was sent at all.
-type pendingCall struct {
-	attributes map[string]string
-	pending    []string
-	sent       bool
 }
 
 func newFakeAuthServer(t *testing.T, answer func(authorizeCall) any) *fakeAuthServer {
@@ -75,20 +62,12 @@ func newFakeAuthServer(t *testing.T, answer func(authorizeCall) any) *fakeAuthSe
 			t.Errorf("mock authz server: failed to read body: %v", err)
 		}
 
-		var body struct {
-			authorizeRequestBody
-			Pending json.RawMessage `json:"pending"`
-		}
+		var body authorizeRequestBody
 		if err := json.Unmarshal(raw, &body); err != nil {
 			t.Errorf("mock authz server: failed to decode body: %v", err)
 		}
 
-		call := authorizeCall{raw: string(raw), body: body.authorizeRequestBody, pendingSent: body.Pending != nil}
-		if call.pendingSent {
-			if err := json.Unmarshal(body.Pending, &call.pending); err != nil {
-				t.Errorf("mock authz server: pending is not a list of names: %s", body.Pending)
-			}
-		}
+		call := authorizeCall{raw: string(raw), body: body}
 
 		srv.mu.Lock()
 		srv.calls = append(srv.calls, call)
@@ -162,25 +141,6 @@ func newScriptedAuthServer(t *testing.T, answer func(authorizeRequestBody) strin
 	return newFakeAuthServer(t, func(call authorizeCall) any { return answer(call.body) })
 }
 
-// newPendingAuthServer allows every question. With coversRule set it answers
-// like a service applying the covers rule to accountId: a question that names
-// no accountId and does not declare it pending is denied.
-func newPendingAuthServer(t *testing.T, coversRule bool) *fakeAuthServer {
-	t.Helper()
-
-	return newFakeAuthServer(t, func(call authorizeCall) any {
-		authorized := true
-
-		if coversRule && len(call.body.Attributes) > 0 {
-			if _, named := call.body.Attributes["accountId"]; !named && !contains(call.pending, "accountId") {
-				authorized = false
-			}
-		}
-
-		return AuthResponse{Authorized: authorized}
-	})
-}
-
 func (srv *fakeAuthServer) received() []authorizeCall {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
@@ -221,16 +181,4 @@ func (srv *fakeAuthServer) attributeCalls() []map[string]string {
 	}
 
 	return attributes
-}
-
-// recorded returns every request as the pending tests read it, in order.
-func (srv *fakeAuthServer) recorded() []pendingCall {
-	calls := srv.received()
-
-	var recorded []pendingCall
-	for _, call := range calls {
-		recorded = append(recorded, pendingCall{attributes: call.body.Attributes, pending: call.pending, sent: call.pendingSent})
-	}
-
-	return recorded
 }

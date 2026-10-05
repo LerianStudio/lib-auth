@@ -371,10 +371,10 @@ func TestAuthorize_GuardDeniesEmptyDeclaredSource(t *testing.T) {
 	assert.Equal(t, int64(1), rec.hits.Load())
 }
 
-// The empty-source guard is a property of the DECLARATION, not of the token: a
-// route that declares a dimension it cannot always read is misdeclared, and a
-// non-partner caller must not be the one to discover it in production.
-func TestAuthorize_EmptyDeclaredSourceDeniesNonPartnerToo(t *testing.T) {
+// A declared dimension the request does not carry refuses a partner-bound
+// credential before any call. Any other credential never has its scope read, so
+// it is decided exactly as on a route that declares nothing.
+func TestAuthorize_EmptyDeclaredSourceDeniesOnlyThePartner(t *testing.T) {
 	t.Parallel()
 
 	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
@@ -388,12 +388,21 @@ func TestAuthorize_EmptyDeclaredSourceDeniesNonPartnerToo(t *testing.T) {
 		func(c fiber.Ctx) error { return c.SendString("reached") })
 
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	req.Header.Set("Authorization", "Bearer "+userToken())
+	req.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
 
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	assert.Equal(t, int64(0), rec.hits.Load())
+
+	req = httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken())
+
+	resp, err = app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, int64(1), rec.hits.Load())
+	assert.NotContains(t, rec.lastBody(t), "attributes")
 }
 
 // A declaration whose product does not match the route's product describes a

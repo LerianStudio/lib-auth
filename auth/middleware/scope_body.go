@@ -37,8 +37,8 @@ import (
 // arrays, or two fields naming two different references (a top-level account
 // and the aliases of a nested target). Each field is its own reference: every
 // value of every field is asked and must be allowed, each with the fields of
-// its own element, and Optional and Resolve apply per field. Reading the same
-// field twice is a misdeclaration.
+// its own element, and Optional applies per field. Reading the same field
+// twice is a misdeclaration.
 //
 // The body is read only for a partner-bound credential; any other caller is
 // decided on the dimensions from the other sources alone, as before. For a
@@ -72,12 +72,11 @@ const maxBodyScopeQuestions = 100
 
 // questions reads the body dimensions of the request and returns every distinct
 // set of identifiers to ask about, each carrying the values the other carriers
-// (the path, the query, headers) name too, and, per set, where the resolved
-// value it carries was read ("" for none).
+// (the path, the query, headers) name too.
 //
 // A request with no body names nothing; when every body dimension is optional
 // that is a body without them, not a malformed one.
-func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolution) (scopeQuestions, *errBodyScope) {
+func (p *bodyPlan) questions(body []byte, readings requestValues) ([]map[string]string, *errBodyScope) {
 	var root any
 
 	switch {
@@ -85,77 +84,50 @@ func (p *bodyPlan) questions(body []byte, readings requestValues, r scopeResolut
 		root = map[string]any{}
 	default:
 		if err := json.Unmarshal(body, &root); err != nil {
-			return scopeQuestions{}, bodyFieldError(p.fields[0], "cannot be read: the request body is not valid JSON")
+			return nil, bodyFieldError(p.fields[0], "cannot be read: the request body is not valid JSON")
 		}
 	}
 
 	set := newQuestionSet(p, readings)
 
-	var raw *[]rawQuestion
-	if p.resolves {
-		raw = &[]rawQuestion{}
-	}
-
 	for _, group := range p.groups {
-		w := groupWalk{group: group, set: set, raw: raw}
+		w := groupWalk{group: group, set: set}
 		if err := w.walk(root, 0, "", []any{root}, []string{""}); err != nil {
-			return scopeQuestions{}, err
-		}
-	}
-
-	if raw != nil {
-		if err := r.resolveBody(*raw, set, readings); err != nil {
-			return scopeQuestions{}, err
+			return nil, err
 		}
 	}
 
 	if err := set.complete(); err != nil {
-		return scopeQuestions{}, err
+		return nil, err
 	}
 
-	return set.asked(), nil
+	return set.questions, nil
 }
 
-// questions returns each set of identifiers the request must be authorized
-// for: none when the request names no dimension; the values read from the path,
-// headers or query alone when the route reads nothing from the body or the
-// caller is not partner-bound (the body is then never read) — one question per
-// combination of values when a carrier names several; and otherwise one set per
-// question the body makes, each carrying those other values.
-//
-// Resolved dimensions are translated only when readBody is set — for a
-// partner-bound caller. Any other caller is asked without them, exactly as a
-// caller whose body is not read is asked without the body's dimensions.
-func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues, readBody bool, r scopeResolution) (scopeQuestions, *errBodyScope) {
-	if readBody {
-		readings = readForm(c, s.dims, readings)
-	}
-
+// questions returns each set of identifiers a partner-bound request must be
+// authorized for: none when the request names no dimension; the values read
+// from the path, headers, query or a form alone when the route reads nothing
+// from the JSON body — one question per combination of values when a carrier
+// names several; and otherwise one set per question the body makes, each
+// carrying those other values.
+func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues) ([]map[string]string, *errBodyScope) {
+	readings = readForm(c, s.dims, readings)
 	if readings.problem != nil {
-		return scopeQuestions{}, readings.problem
+		return nil, readings.problem
 	}
 
-	if readBody && len(readings.pending) > 0 {
-		resolved, err := r.resolvePending(readings)
-		if err != nil {
-			return scopeQuestions{}, err
-		}
-
-		readings = resolved
-	}
-
-	if s.body == nil || !readBody {
+	if s.body == nil {
 		if len(readings.names) == 0 {
-			return scopeQuestions{}, nil
+			return nil, nil
 		}
 
 		set := newQuestionSet(nil, readings)
 		if err := set.add(map[string]string{}, nil); err != nil {
-			return scopeQuestions{}, err
+			return nil, err
 		}
 
-		return set.asked(), nil
+		return set.questions, nil
 	}
 
-	return s.body.questions(c.Body(), readings, r)
+	return s.body.questions(c.Body(), readings)
 }

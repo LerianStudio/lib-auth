@@ -193,9 +193,9 @@ func TestAuthorize_Form_Divergence(t *testing.T) {
 	assert.Equal(t, []map[string]string{{"organizationId": "org-1", "ledgerId": "led-1"}}, srv.attributeCalls())
 }
 
-// The form is read only for a partner-bound credential, as the JSON body is:
-// any other caller is decided on the path, query and headers alone, and its
-// body is never parsed.
+// The form is read only for a partner-bound credential, as the rest of the
+// scope is: any other caller is asked without attributes, and its body is never
+// parsed.
 func TestAuthorize_Form_NonPartnerIsDecidedWithoutTheBody(t *testing.T) {
 	t.Parallel()
 
@@ -205,7 +205,7 @@ func TestAuthorize_Form_NonPartnerIsDecidedWithoutTheBody(t *testing.T) {
 	got := doCarrier(t, app, carrierRequest{target: formTarget, token: userToken(), ctype: "multipart/form-data; boundary=x", body: "--x--\r\n"})
 
 	assert.Equal(t, http.StatusOK, got.status)
-	assert.Equal(t, []map[string]string{{"organizationId": "org-1"}}, srv.attributeCalls())
+	assert.Equal(t, []map[string]string{nil}, srv.attributeCalls())
 }
 
 func TestFormRegistration(t *testing.T) {

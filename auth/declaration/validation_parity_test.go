@@ -1,7 +1,6 @@
 package declaration
 
 import (
-	"context"
 	"testing"
 
 	"github.com/LerianStudio/lib-auth/v5/auth/middleware"
@@ -13,26 +12,7 @@ import (
 // wireUnvalidated wires m into auth exactly as WireScope does, without
 // validating it first, so the middleware's own guards are what decide.
 func wireUnvalidated(m *DeclarationManifest) error {
-	auth := &middleware.AuthClient{Logger: obs.Nop()}
-
-	resolve := func(context.Context, middleware.ResolveInput) ([][]string, error) { return nil, nil }
-	for _, name := range []string{"alias", "holderLedgers"} {
-		if err := auth.RegisterScopeResolver(name, resolve); err != nil {
-			return err
-		}
-	}
-
-	if err := auth.SetManifestScope(m.Service, catalogDimensions(m.Scope)...); err != nil {
-		return err
-	}
-
-	for _, r := range m.Scope.Routes {
-		if err := wireRoute(auth, m.Service, r); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return wireManifestScope(&middleware.AuthClient{Logger: obs.Nop()}, m)
 }
 
 // The rules both the manifest validation and the middleware enforce must
@@ -42,42 +22,35 @@ func TestValidationParity_ManifestAndMiddlewareRefuseAlike(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		manifest string
-		mutate   func(m *DeclarationManifest)
+		name   string
+		mutate func(m *DeclarationManifest)
 		// wantManifest and wantMiddleware are the refusals of each entry point.
 		wantManifest   string
 		wantMiddleware string
 	}{
 		{
-			name:           "filter_empty_entry",
-			manifest:       filteredYAML,
-			mutate:         func(m *DeclarationManifest) { m.Scope.Routes[0].Filter = []string{""} },
-			wantManifest:   "scope.routes[0].filter[0]: must not be empty",
-			wantMiddleware: "filters on a dimension with no name",
-		},
-		{
-			name:           "filter_duplicate",
-			manifest:       filteredYAML,
-			mutate:         func(m *DeclarationManifest) { m.Scope.Routes[0].Filter = []string{"accountId", "accountId"} },
-			wantManifest:   `scope.routes[0].filter[1]: duplicate dimension "accountId"`,
-			wantMiddleware: "filters on dimension accountId more than once",
-		},
-		{
-			name:           "catalog_match_without_resolve",
-			manifest:       matchYAML,
-			mutate:         func(m *DeclarationManifest) { m.Scope.Dimensions[2].Resolve = "" },
-			wantManifest:   "scope.dimensions[2]: match requires resolve",
-			wantMiddleware: "scope dimension accountId matches any of its resolved values but names no resolver",
-		},
-		{
-			name:     "route_match_without_resolve",
-			manifest: matchYAML,
+			name: "body_read_as_json_and_form",
 			mutate: func(m *DeclarationManifest) {
-				m.Scope.Routes[0].Dimensions[0] = DeclarationRouteDimension{Name: "accountId", From: "query", Field: "account", Match: "any"}
+				m.Scope.Routes[0].Dimensions[1] = DeclarationRouteDimension{Name: "ledgerId", From: "form", Field: "ledger_id"}
 			},
-			wantManifest:   "scope.routes[0].dimensions[0]: match requires resolve",
-			wantMiddleware: "scope dimension accountId matches any of its resolved values but names no resolver",
+			wantManifest:   "scope.routes[0]: reads the request body both as JSON (from: body) and as a form (from: form)",
+			wantMiddleware: "reads the request body both as JSON (FromBody) and as a form (FromForm)",
+		},
+		{
+			name: "route_dimension_not_in_catalog",
+			mutate: func(m *DeclarationManifest) {
+				m.Scope.Routes[0].Dimensions[1] = DeclarationRouteDimension{Name: "accountId", From: "body", Field: "accountId"}
+			},
+			wantManifest:   `scope.routes[0].dimensions[1]: "accountId" is not a scope dimension of the catalog`,
+			wantMiddleware: "dimension accountId on POST /v2/transactions/direct is not declared in the manifest scope of product plugin-fees",
+		},
+		{
+			name: "route_declares_nothing",
+			mutate: func(m *DeclarationManifest) {
+				m.Scope.Routes[0].Dimensions = nil
+			},
+			wantManifest:   "scope.routes[0]: must declare at least one dimension",
+			wantMiddleware: "POST /v2/transactions/direct declares no dimension",
 		},
 	}
 
@@ -85,12 +58,12 @@ func TestValidationParity_ManifestAndMiddlewareRefuseAlike(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			valid, err := parseManifest([]byte(tt.manifest))
+			valid, err := parseManifest([]byte(routedYAML))
 			require.NoError(t, err)
 			require.NoError(t, valid.Validate(), "positive control: the manifest is valid before the mutation")
 			require.NoError(t, wireUnvalidated(valid), "positive control: the middleware accepts it before the mutation")
 
-			m, err := parseManifest([]byte(tt.manifest))
+			m, err := parseManifest([]byte(routedYAML))
 			require.NoError(t, err)
 			tt.mutate(m)
 

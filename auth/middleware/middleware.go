@@ -38,7 +38,7 @@ type AuthClient struct {
 	Logger  obs.Logger
 
 	// manifestScopes holds each product's scope catalog, set by
-	// SetManifestScope and read when a route is registered.
+	// SetManifestScope and read by each route on its first request.
 	manifestScopes  map[string][]Dimension
 	manifestScopeMu sync.RWMutex
 	// manifestRouteScopes holds, per product, the dimensions single routes
@@ -48,10 +48,6 @@ type AuthClient struct {
 	// manifestGen counts manifest scope changes; routes compare it to what they
 	// derived from. Guarded by manifestScopeMu.
 	manifestGen uint64
-	// resolvers holds the scope resolvers registered by name (see
-	// RegisterScopeResolver). Guarded by resolversMu.
-	resolvers   map[string]ScopeResolver
-	resolversMu sync.RWMutex
 
 	// ForwardM2MProduct, when true, forwards the route product on M2M
 	// (application-token) authorization calls, letting the auth service strip the
@@ -196,22 +192,6 @@ type AuthResponse struct {
 	// been, and are never told apart to the end caller: which axis failed is an
 	// enumeration oracle over another partner's identifiers.
 	Reason string `json:"reason,omitempty"`
-	// Allowed answers a request that asked to filter (its "filter" member names
-	// dimensions it left out): per dimension, the values the partner may see.
-	// It is read only on a grant and only for the dimensions the request named
-	// in its filter; an empty list or null means the partner may see none. A
-	// grant without it confines nothing on the dimension. A request that names
-	// no dimension at all is refused unless the grant carries it for at least
-	// one filtered dimension — or carries Unrestricted.
-	Allowed map[string][]string `json:"allowed,omitempty"`
-	// Unrestricted states, on a grant to a partner-bound credential, that the
-	// partner is not confined on the product at all — it has no scope on it.
-	// It lets a filtered request that names no dimension be served without
-	// allowed values, every filtered dimension unrestricted. Allowed values
-	// the grant carries as well still confine: they are the narrower answer.
-	// It is read only on a grant, only for a partner-bound credential, and
-	// only on a filtered request naming no dimension; absent, it is false.
-	Unrestricted bool `json:"unrestricted,omitempty"`
 }
 
 // authzParams are the inputs of one authorization decision.
@@ -221,40 +201,11 @@ type authzParams struct {
 	action      string
 	accessToken string
 	clientIP    string
-	// attributes are the instance identifiers the route declared and this request
-	// carried. Nil for a route that declares none, which is every route today.
+	// attributes are the instance identifiers one question of a partner-bound
+	// request names. Nil for every other credential, and for a partner-bound
+	// request that names none — which the partner guard refuses: a request that
+	// cannot say WHERE it is pointing is unscopeable, not unscoped.
 	attributes map[string]string
-	// declared reports whether the question names any dimension at all. It is
-	// the distinction the partner guard turns on: a partner-bound credential on a
-	// request that cannot say WHERE it is pointing — a route that declares
-	// nothing, or optional dimensions the request left out — is unscopeable, not
-	// unscoped.
-	declared bool
-	// filter names the dimensions the question leaves out and asks the service
-	// to answer with allowed values for, instead of refusing. Nil on every route
-	// that does not filter, and for every caller that is not partner-bound.
-	filter []string
-	// pending names the dimensions the request carries values of that are still
-	// to be resolved: set only on the question a partner-bound caller is asked
-	// before its values are resolved, so the service does not take a dimension
-	// about to be named for one the request left out. Nil on every other question.
-	pending []string
-}
-
-// addScopeMembers adds to an authorize payload the scope members the question
-// carries: each is added only when non-empty.
-func (p authzParams) addScopeMembers(payload map[string]any) {
-	if len(p.attributes) > 0 {
-		payload["attributes"] = p.attributes
-	}
-
-	if len(p.filter) > 0 {
-		payload["filter"] = p.filter
-	}
-
-	if len(p.pending) > 0 {
-		payload["pending"] = p.pending
-	}
 }
 
 type oauth2Token struct {
@@ -588,18 +539,23 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // application's ErrorHandler owns the response envelope and must preserve the
 // status carried by the error.
 //
-// scopes is optional and additive: pass a RequireScope declaration when the route
-// addresses instances (an organization, a ledger) whose identifiers the
-// authorization service must see to honour a partner-scoped credential. A route
-// that passes none behaves exactly as before, down to the bytes on the wire.
+// scopes is optional: pass a RequireScope declaration when the route addresses
+// instances (an organization, a ledger) whose identifiers the authorization
+// service must see to honour a partner-scoped credential. A route that passes
+// none takes its scope from its product's manifest scope, when one is wired
+// (see SetManifestScope), on its first request. The scope is read only for a
+// partner-bound credential: any other credential is decided exactly as on a
+// route with no scope, down to the bytes on the wire. A partner-bound
+// credential on a request that names no scope dimension is refused 403.
 func (auth *AuthClient) Authorize(product, resource, action string, scopes ...ScopeDeclaration) fiber.Handler {
 	auth.warnMissingTrustedProxies()
 
-	// The declaration is validated ONCE, at route-registration time, not per
-	// request: a misdeclared route is a programming error and every one of its
-	// requests is refused, which is what makes it visible on the first call
-	// instead of on the first partner.
-	scope, derived, declErr := auth.registerRouteScope(product, scopes)
+	// The declaration is validated on its own ONCE, at route-registration time,
+	// and against its product's catalog on the route's first request: a
+	// misdeclared route is a programming error and every one of its requests is
+	// refused, which is what makes it visible on the first call instead of on
+	// the first partner.
+	route, declErr := auth.registerRouteScope(product, scopes)
 
 	return func(c fiber.Ctx) error {
 		// Inherit the ambient request context instead of extracting inbound trace
@@ -632,12 +588,9 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		// route would otherwise serve the very requests the contract says it
 		// refuses, and the error would surface only on the first deployment that
 		// turns auth on.
-		if declErr != "" {
-			if auth != nil {
-				logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", declErr)
-			}
-
-			return auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
+		scope, misdeclared := auth.routeScopeOf(ctx, c, route, declErr)
+		if misdeclared != nil {
+			return misdeclared
 		}
 
 		if !auth.canAuthorize() {
@@ -687,31 +640,13 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		// would forward the ingress address and could produce a false ALLOW.
 		clientIP := auth.resolveClientIP(c)
 
-		// Read the declared identifiers out of THIS request. A declared dimension
-		// the request does not carry is refused here, before the round-trip: an
-		// identifier with no value cannot be matched against a partner's scope, and
-		// sending it absent would quietly ask a question the route did not promise.
-		scope := scope
-		if derived != nil {
-			scope = derived.forRoute(c.Route().Method, c.Route().Path)
-		}
-
-		readings, missing := resolveAttributes(c, scope.dims)
-		if missing != "" {
-			logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
-
-			span.End()
-
-			return auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
-		}
-
 		resolution, principal, questions, refusal := auth.authorizeRequest(ctx, c, authzParams{
 			product:     product,
 			resource:    resource,
 			action:      action,
 			accessToken: accessToken,
 			clientIP:    clientIP,
-		}, scope, readings)
+		}, scope)
 		if refusal != nil {
 			span.End()
 
@@ -719,20 +654,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		}
 
 		publishPrincipal(c, span, principal)
-
-		// Record what the request was authorized AS, for the handler and the
-		// service's request log. Only for a partner-bound credential: leaving it
-		// absent otherwise is what stops a handler reading "no scope" as "a partner
-		// with no restriction".
-		if resolution.partner != "" {
-			c.Locals(PartnerLocalsKey, resolution.partner)
-			c.SetContext(context.WithValue(c.Context(), requestScopeContextKey{}, RequestScope{
-				Partner:    resolution.partner,
-				Attributes: sharedAttributes(questions),
-				Sets:       questions,
-				allowed:    resolution.allowed,
-			}))
-		}
+		recordPartnerScope(c, resolution.partner, questions)
 
 		span.End()
 
@@ -740,24 +662,58 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 	}
 }
 
+// routeScopeOf returns the scope of the route serving c, or the 403 refusal of
+// a route misdeclared — on its own (declErr) or against its product's catalog.
+func (auth *AuthClient) routeScopeOf(ctx context.Context, c fiber.Ctx, route *routeScope, declErr string) (ScopeDeclaration, error) {
+	var scope ScopeDeclaration
+
+	problem := declErr
+	if route != nil {
+		scope, problem = route.forRoute(c.Route().Method, c.Route().Path)
+	}
+
+	if problem == "" {
+		return scope, nil
+	}
+
+	if auth != nil {
+		logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", problem)
+	}
+
+	return ScopeDeclaration{}, auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
+}
+
+// recordPartnerScope records what the request was authorized AS, for the
+// handler and the service's request log. Only for a partner-bound credential:
+// leaving it absent otherwise is what stops a handler reading "no scope" as "a
+// partner with no restriction".
+func recordPartnerScope(c fiber.Ctx, partner string, questions []map[string]string) {
+	if partner == "" {
+		return
+	}
+
+	c.Locals(PartnerLocalsKey, partner)
+	c.SetContext(context.WithValue(c.Context(), requestScopeContextKey{}, RequestScope{
+		Partner:    partner,
+		Attributes: sharedAttributes(questions),
+		Sets:       questions,
+	}))
+}
+
 // authorizeRequest decides one request: it derives the caller once, works out
 // the questions the request makes, and asks them in order under ONE deadline for
-// the whole request, group by group, stopping at the first group none of whose
-// questions is allowed. A question stands alone in its group, except those
-// carrying a value resolved with MatchAny (see questionSet). It returns the last
-// resolution and the questions allowed, or the refusal.
+// the whole request, stopping at the first that is not allowed. It returns the
+// last resolution and the questions asked, or the refusal.
 //
-// The body is read only for a partner-bound credential. The authorization
-// service consumes attributes only to decide for a partner; for every other
-// credential it ignores them. So any other caller is decided exactly as before
-// body dimensions existed: one question, carrying only the dimensions read from
-// the path, headers or query, and a body this layer never parses.
+// The scope is read only for a partner-bound credential. The authorization
+// service consumes attributes only to decide for a partner; every other
+// credential is asked one question, without attributes, exactly as on a route
+// that declares no scope, and its request is never read for one.
 //
 // The questions are asked one after another, not concurrently: they are few
 // (distinct sets, capped), the decision cache answers repeats without a call,
-// the first group denied ends the request, and the single deadline bounds the
-// total.
-func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, params authzParams, scope ScopeDeclaration, readings requestValues) (authzResolution, Principal, []map[string]string, error) {
+// the first denial ends the request, and the single deadline bounds the total.
+func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, params authzParams, scope ScopeDeclaration) (authzResolution, Principal, []map[string]string, error) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -774,51 +730,59 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, c fiber.Ctx, param
 		return authzResolution{}, Principal{}, nil, auth.refusalFor(c, *failure)
 	}
 
-	resolution := scopeResolution{ctx: ctx, auth: auth, product: params.product}
-
-	// A resolver looks up the product's own data, so it runs only for a
-	// credential the authorization service has accepted: first the questions
-	// the request makes without its resolved values, and only once every one is
-	// allowed, the resolvers, then the questions about what they resolved to.
-	if caller.partner != "" && scope.resolves() {
-		resolverCtx, refusal := auth.resolverContext(ctx, c, span, params, scope, readings, caller)
-		if refusal != nil {
-			return authzResolution{}, Principal{}, nil, refusal
-		}
-
-		resolution.ctx = resolverCtx
+	questions, refusal := auth.scopeQuestions(ctx, c, scope, caller)
+	if refusal != nil {
+		return authzResolution{}, Principal{}, nil, refusal
 	}
 
-	// A route that reads dimensions from its body asks one question per
-	// distinct set of identifiers the body names, and every one must be
-	// allowed. A body that cannot be read for them is the caller's to fix:
-	// refused before any call, naming the field, and never let through.
-	asked, badBody := scope.questions(c, readings, caller.partner != "", resolution)
-	if badBody != nil {
-		return authzResolution{}, Principal{}, nil, auth.authorizeRefusal(c, badBody.statusCode(), badBody.Error())
+	asked := questions
+	if len(asked) == 0 {
+		asked = []map[string]string{nil}
 	}
 
-	named := len(asked.sets) > 0
-	if !named {
-		asked = scopeQuestions{sets: []map[string]string{nil}, groups: [][]int{{0}}}
-	}
+	var (
+		resolution authzResolution
+		principal  Principal
+	)
 
-	d := groupDecider{auth: auth, ctx: ctx, c: c, span: span, params: params, scope: scope, caller: caller, asked: asked}
+	for _, question := range asked {
+		params.attributes = question
 
-	for _, group := range asked.groups {
-		if refusal := d.decideGroup(group); refusal != nil {
-			return authzResolution{}, Principal{}, nil, refusal
+		resolution, principal = auth.decide(ctx, span, params, caller)
+
+		if denied := auth.refusalFor(c, resolution); denied != nil {
+			return authzResolution{}, Principal{}, nil, denied
 		}
 	}
 
-	d.decision.allowed = d.allowed.values
+	return resolution, principal, questions, nil
+}
 
-	var authorized []map[string]string
-	if named {
-		authorized = d.authorized
+// scopeQuestions reads, for a partner-bound caller, the questions the request
+// makes on the route's scope. Any other caller makes none. A declared dimension
+// the request does not carry is refused 403 here, before the round-trip: an
+// identifier with no value cannot be matched against a partner's scope, and
+// sending it absent would quietly ask a question the route did not promise. A
+// request whose scope cannot be read for the declared dimensions is the caller's
+// to fix: refused before any call, naming the field, and never let through.
+func (auth *AuthClient) scopeQuestions(ctx context.Context, c fiber.Ctx, scope ScopeDeclaration, caller authzCaller) ([]map[string]string, error) {
+	if caller.partner == "" {
+		return nil, nil
 	}
 
-	return d.decision, d.principal, authorized, nil
+	readings, missing := resolveAttributes(c, scope.dims)
+	if missing != "" {
+		logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
+
+		return nil, auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
+	}
+
+	questions, badScope := scope.questions(c, readings)
+	if badScope != nil {
+		return nil, auth.authorizeRefusal(c, badScope.statusCode(), badScope.Error())
+	}
+
+	return questions, nil
 }
 
 // errAuthorizationUnavailable is the error Check reports alongside 503 when
@@ -1133,13 +1097,14 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 	userType, sub := principal.Type, principal.Subject
 
 	// Fail closed on an unscopeable partner. A credential bound to a partner is
-	// only ever allowed to reach SOME instances; a route that declares no
-	// dimension cannot say which instance this request points at, so the
+	// only ever allowed to reach SOME instances; a request that names no scope
+	// dimension — on a route whose manifest declares none, or with the optional
+	// ones left out — cannot say which instance it points at, so the
 	// authorization service would have to decide the "where" with nothing to
 	// decide it on. Refusing here — before the call — is the only answer that
 	// cannot accidentally widen the credential.
-	if partner != "" && !p.declared {
-		logErrorf(ctx, auth.Logger, "Partner-bound credential on a route that declares no scope dimension; denying (fail closed)")
+	if partner != "" && len(p.attributes) == 0 {
+		logErrorf(ctx, auth.Logger, "Partner-bound credential on a request that names no scope dimension; denying (fail closed)")
 
 		return authzResolution{statusCode: http.StatusForbidden, partner: partner}, principal
 	}
@@ -1190,17 +1155,19 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 		return authzResolution{statusCode: http.StatusInternalServerError, err: err, partner: partner}, Principal{}
 	}
 
-	// attributes, filter and pending are the only members this version can add,
-	// and each is added only on a route that declares dimensions. With none
-	// declared the payload is the
-	// same set of string members in the same encoder as before, so a deployed
-	// caller's bytes on the wire do not move.
+	// attributes is the ONLY member this version can add, and it is added only
+	// for a partner-bound question, which always names dimensions. For every
+	// other credential the payload is the same set of string members in the
+	// same encoder as before, so a deployed caller's bytes on the wire do not
+	// move.
 	payload := make(map[string]any, len(requestBody)+1)
 	for k, v := range requestBody {
 		payload[k] = v
 	}
 
-	p.addScopeMembers(payload)
+	if len(p.attributes) > 0 {
+		payload["attributes"] = p.attributes
+	}
 
 	requestBodyJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -1227,18 +1194,14 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 		product:     requestBody["product"],
 		clientIP:    p.clientIP,
 		attributes:  attributesCacheKey(p.attributes),
-		filter:      foldFilter(p.filter),
-		pending:     foldFilter(p.pending),
 	}
 
 	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so
 	// the breaker only ever runs on a miss — its open state then denies (never
 	// serving a stale grant).
 	if auth.cache != nil {
-		if authorized, reason, allowed, unrestricted, hit := auth.cache.get(key); hit {
-			return authzResolution{
-				authorized: authorized, statusCode: http.StatusOK, reason: reason, allowed: allowed, unrestricted: unrestricted, partner: partner,
-			}, principal
+		if authorized, reason, hit := auth.cache.get(key); hit {
+			return authzResolution{authorized: authorized, statusCode: http.StatusOK, reason: reason, partner: partner}, principal
 		}
 	}
 

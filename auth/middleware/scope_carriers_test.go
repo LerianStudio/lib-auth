@@ -353,19 +353,27 @@ func TestAuthorize_Divergence_PathAndQuery(t *testing.T) {
 	app := fiber.New()
 	app.Post(ledgersRoute, auth.Authorize("midaz", "ledgers", "post"), probe.handle)
 
-	for _, caller := range []string{partnerToken("acme/p1"), userToken()} {
-		got := doCarrier(t, app, carrierRequest{target: "/v1/organizations/org-1/ledgers?organizationId=org-2", token: caller})
+	got := doCarrier(t, app, carrierRequest{target: "/v1/organizations/org-1/ledgers?organizationId=org-2", token: partnerToken("acme/p1")})
 
-		assert.Equal(t, http.StatusBadRequest, got.status)
-		assert.Contains(t, got.body, `path parameter "organization_id"`)
-		assert.Contains(t, got.body, `query parameter "organizationId"`)
-	}
-
+	assert.Equal(t, http.StatusBadRequest, got.status)
+	assert.Contains(t, got.body, `path parameter "organization_id"`)
+	assert.Contains(t, got.body, `query parameter "organizationId"`)
 	assert.Equal(t, int64(0), srv.hits.Load())
 	assert.Equal(t, int64(0), probe.calls.Load())
 
+	// A credential that is not partner-bound never has its scope read: it is
+	// asked once, without attributes, whatever the carriers say.
+	got = doCarrier(t, app, carrierRequest{target: "/v1/organizations/org-1/ledgers?organizationId=org-2", token: userToken()})
+	assert.Equal(t, http.StatusOK, got.status)
+	assert.Equal(t, []map[string]string{nil}, srv.attributeCalls())
+
+	srv = newDecidingAuthServer(t)
+	auth = queryLedgerClient(t, srv, Dim("organizationId", FromQuery).At("organizationId").Optional())
+	app = fiber.New()
+	app.Post(ledgersRoute, auth.Authorize("midaz", "ledgers", "post"), probe.handle)
+
 	// Positive control: agreeing carriers ask one question.
-	got := doCarrier(t, app, carrierRequest{target: "/v1/organizations/org-1/ledgers?organizationId=org-1", token: partnerToken("acme/p1")})
+	got = doCarrier(t, app, carrierRequest{target: "/v1/organizations/org-1/ledgers?organizationId=org-1", token: partnerToken("acme/p1")})
 	assert.Equal(t, http.StatusOK, got.status)
 	assert.Equal(t, []map[string]string{{"organizationId": "org-1"}}, srv.attributeCalls())
 

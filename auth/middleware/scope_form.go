@@ -62,7 +62,7 @@ func readForm(c fiber.Ctx, dims []Dimension, readings requestValues) requestValu
 		case !present:
 			readings.problem = &errBodyScope{message: "scope " + dim.location() + " is missing from the request body"}
 		default:
-			readings.record(dim, values)
+			readings.add(dim, values)
 		}
 	}
 

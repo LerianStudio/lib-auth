@@ -25,7 +25,8 @@ type bodyField struct {
 	strings bool
 	// element is the prefix of the element the value is read from: the
 	// enclosing array element, or, for a string of an array of strings, the
-	// element holding the array. A resolved value's siblings share it.
+	// element holding the array. A value travels with the fields of its own
+	// element (see nearest).
 	element []bodySegment
 }
 
@@ -49,9 +50,6 @@ type bodyPlan struct {
 	// firstField locates, per dimension name, the first body field it is read
 	// from, for the refusal of a body that disagrees with another carrier.
 	firstField map[string]string
-	// resolves is set when a body field names a resolver: the questions are then
-	// collected whole, their keys translated in one batch, and only then asked.
-	resolves bool
 }
 
 // parseBodyField parses a field path, or describes what is wrong with it.
@@ -198,14 +196,12 @@ func newBodyField(dim Dimension) (bodyField, string) {
 }
 
 // newBodyPlan is the plan of fields before its groups are built: the fields it
-// reads, the first location of each name, and whether every field is optional
-// and any is resolved.
+// reads, the first location of each name, and whether every field is optional.
 func newBodyPlan(fields []bodyField) *bodyPlan {
 	plan := &bodyPlan{fields: make([]string, 0, len(fields)), firstField: make(map[string]string), allOptional: true}
 	for _, f := range fields {
 		plan.fields = append(plan.fields, f.dim.key)
 		plan.allOptional = plan.allOptional && f.dim.optional
-		plan.resolves = plan.resolves || f.dim.resolver != ""
 
 		if _, ok := plan.firstField[f.dim.name]; !ok {
 			plan.firstField[f.dim.name] = f.dim.location()

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
@@ -31,15 +32,13 @@ type scopedClientSetup struct {
 	url string
 	// catalog is the manifest scope; manifestDims when nil.
 	catalog []Dimension
-	// resolvers are registered, by name, before the route is declared.
-	resolvers map[string]ScopeResolver
 	// legacy builds the client on the legacy derivation model
 	// (M2MInversionEnabled=false).
 	legacy bool
 }
 
-// bodyScopedClientWith is bodyScopedClient with the catalog, the resolvers and
-// the derivation model of setup.
+// bodyScopedClientWith is bodyScopedClient with the catalog and the derivation
+// model of setup.
 func bodyScopedClientWith(t *testing.T, setup scopedClientSetup, method, path string, dims ...Dimension) *AuthClient {
 	t.Helper()
 
@@ -49,14 +48,41 @@ func bodyScopedClientWith(t *testing.T, setup scopedClientSetup, method, path st
 	}
 
 	auth := &AuthClient{Address: setup.url, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: !setup.legacy}
-	for name, resolver := range setup.resolvers {
-		require.NoError(t, auth.RegisterScopeResolver(name, resolver))
-	}
 
 	require.NoError(t, auth.SetManifestScope("midaz", catalog...))
 	require.NoError(t, auth.SetManifestRouteScope("midaz", method, path, dims...))
 
 	return auth
+}
+
+const (
+	legsRoute = "/v1/organizations/:organization_id/ledgers/:ledger_id/transactions"
+	legsPath  = "/v1/organizations/org-1/ledgers/led-1/transactions"
+)
+
+// accountCatalog is the path catalog plus an account dimension.
+func accountCatalog() []Dimension {
+	return append(manifestDims(), Dim("accountId", FromPath).At("account_id"))
+}
+
+func doRequest(t *testing.T, app *fiber.App, method, target, token, body string) bodyResult {
+	t.Helper()
+
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	// A request asking up to twice the cap of questions outlasts the default
+	// one-second test timeout under -race.
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
+	require.NoError(t, err)
+
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	return bodyResult{status: resp.StatusCode, body: string(raw)}
 }
 
 type bodyResult struct {
@@ -542,7 +568,7 @@ func TestSetManifestRouteScope_Validation(t *testing.T) {
 		{name: "no_dims", method: "POST", path: directPath, wantErr: "no dimension"},
 		{name: "empty_method", method: "", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("organizationId")}, wantErr: "method"},
 		{name: "relative_path", method: "POST", path: "v2/x", dims: []Dimension{Dim("organizationId", FromBody).At("organizationId")}, wantErr: "path"},
-		{name: "path_dim", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromPath).At("organization_id")}, wantErr: "derived from the path"},
+		{name: "path_param_not_on_route", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromPath).At("organization_id")}, wantErr: `reads path parameter "organization_id", which the route path does not carry`},
 		{name: "outside_catalog", method: "POST", path: directPath, dims: []Dimension{Dim("portfolioId", FromBody).At("portfolioId")}, wantErr: "portfolioId"},
 		{name: "empty_field", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("")}, wantErr: "empty request key"},
 		{name: "empty_segment", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("a..b")}, wantErr: "a..b"},

@@ -1,0 +1,12 @@
+[
+  "POST /v1/authorize {\"action\":\"get\",\"product\":\"midaz\",\"resource\":\"accounts\",\"sub\":\"acme-org/user-1\"}",
+  "POST /v1/authorize {\"action\":\"get\",\"product\":\"midaz\",\"resource\":\"accounts\",\"sub\":\"acme-org/user-1\"}",
+  "POST /v1/authorize {\"action\":\"get\",\"product\":\"midaz\",\"resource\":\"balances\",\"sub\":\"acme-org/user-1\"}",
+  "POST /v1/authorize {\"action\":\"post\",\"product\":\"midaz\",\"resource\":\"transactions\",\"sub\":\"acme-org/user-1\"}",
+  "POST /v1/authorize {\"action\":\"post\",\"product\":\"midaz\",\"resource\":\"transactions\",\"sub\":\"acme-org/user-1\"}",
+  "POST /v1/authorize {\"action\":\"get\",\"resource\":\"accounts\",\"sub\":\"acme/app\"}",
+  "POST /v1/authorize {\"action\":\"get\",\"resource\":\"accounts\",\"sub\":\"acme/app\"}",
+  "POST /v1/authorize {\"action\":\"get\",\"resource\":\"balances\",\"sub\":\"acme/app\"}",
+  "POST /v1/authorize {\"action\":\"post\",\"resource\":\"transactions\",\"sub\":\"acme/app\"}",
+  "POST /v1/authorize {\"action\":\"post\",\"resource\":\"transactions\",\"sub\":\"acme/app\"}"
+]

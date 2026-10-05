@@ -53,13 +53,6 @@ type Dimension struct {
 	source   Source
 	key      string
 	optional bool
-	// resolver names the registered ScopeResolver that translates what the
-	// request carries into the dimension's values; empty when the request
-	// carries the values themselves.
-	resolver string
-	// matchAny allows a resolved value when ANY of the values it stands for is
-	// allowed, instead of every one.
-	matchAny bool
 }
 
 // Dim declares a dimension read from source under the SAME key as its name. Use
@@ -80,13 +73,6 @@ func (d Dimension) At(key string) Dimension {
 // request that does not carry it — a body field absent or null — asks its
 // question without it; a value that is there must still be a non-empty string.
 // It never mutates the receiver.
-//
-// On a resolved dimension it also covers a value that resolves to none — an
-// account in no portfolio: the question goes without the dimension instead of
-// being refused, and the authorization service decides on what the credential
-// is scoped on. Outside the body, when one of several values of a carrier
-// resolves to none, the request is asked without the dimension at all.
-// A resolved dimension that is not optional refuses such a value.
 func (d Dimension) Optional() Dimension {
 	d.optional = true
 
@@ -216,19 +202,6 @@ type ScopeDeclaration struct {
 	// body is the compiled plan of the dimensions read from the request body, or
 	// nil when the route reads none.
 	body *bodyPlan
-	// filter names the dimensions the route filters its list on (see Filter).
-	filter []string
-}
-
-// resolves reports whether any dimension of the declaration is resolved.
-func (s ScopeDeclaration) resolves() bool {
-	for _, dim := range s.dims {
-		if dim.resolver != "" {
-			return true
-		}
-	}
-
-	return false
 }
 
 // RequireScope declares the dimensions a route's requests carry, for the product
@@ -261,9 +234,6 @@ type RequestScope struct {
 	// distinct set the body names, and Attributes then keeps only the
 	// identifiers every set shares.
 	Sets []map[string]string
-	// allowed are the values the authorization service returned per filtered
-	// dimension; read them with Allowed.
-	allowed map[string][]string
 }
 
 // requestScopeContextKey is the unexported, typed key the scope is stored under.
@@ -290,65 +260,6 @@ type requestValues struct {
 	// problem is the first carrier found malformed, or the first dimension two
 	// carriers disagree on. It is reported once the caller is authenticated.
 	problem *errBodyScope
-	// pending are the values read for dimensions that are resolved: what the
-	// request carries is not the dimension's value but a key to translate.
-	// They join values only once resolved, for a partner-bound caller.
-	pending []pendingValues
-	// resolvedAt locates the first value resolved outside the body, once
-	// resolved: the place a refusal of the questions carrying it names.
-	resolvedAt string
-	// anyOf holds, per dimension resolved with MatchAny, the values each
-	// request value resolved to: one of each must be allowed. values holds them
-	// all, for the checks against the other carriers.
-	anyOf map[string][][]string
-	// derived holds the dimensions a resolved carrier contributed values to.
-	// Those values are derived by the server, not asserted by the client: they
-	// join the values of the other carriers instead of having to agree with
-	// them.
-	derived map[string]bool
-}
-
-// clone copies the readings, so reading the request twice — before and after
-// the credential is validated — leaves the original untouched.
-func (rv requestValues) clone() requestValues {
-	out := rv
-	out.names = append([]string(nil), rv.names...)
-	out.pending = append([]pendingValues(nil), rv.pending...)
-
-	if rv.values != nil {
-		out.values = make(map[string][]string, len(rv.values))
-		for name, values := range rv.values {
-			out.values[name] = append([]string(nil), values...)
-		}
-	}
-
-	if rv.where != nil {
-		out.where = make(map[string]string, len(rv.where))
-		for name, where := range rv.where {
-			out.where[name] = where
-		}
-	}
-
-	return out
-}
-
-// pendingValues are the values one carrier names for a resolved dimension,
-// still to be translated.
-type pendingValues struct {
-	dim    Dimension
-	values []string
-}
-
-// record records the values a carrier names for dim: as the dimension's values,
-// or as values still to resolve when the dimension is resolved.
-func (rv *requestValues) record(dim Dimension, values []string) {
-	if dim.resolver != "" {
-		rv.pending = append(rv.pending, pendingValues{dim: dim, values: values})
-
-		return
-	}
-
-	rv.add(dim, values)
 }
 
 // add records the values one carrier names for a dimension. A dimension already
@@ -371,37 +282,6 @@ func (rv *requestValues) add(dim Dimension, values []string) {
 	rv.names = append(rv.names, dim.name)
 	rv.values[dim.name] = values
 	rv.where[dim.name] = dim.location()
-}
-
-// union records the values a resolved carrier derives for a dimension. They
-// join the values the other carriers name — every one is asked — instead of
-// having to agree with them.
-func (rv *requestValues) union(dim Dimension, values []string) {
-	rv.markDerived(dim.name)
-
-	previous, ok := rv.values[dim.name]
-	if !ok {
-		rv.add(dim, values)
-
-		return
-	}
-
-	for _, v := range values {
-		if !containsValue(previous, v) {
-			previous = append(previous, v)
-		}
-	}
-
-	rv.values[dim.name] = previous
-}
-
-// markDerived records that a resolved carrier contributed values to name.
-func (rv *requestValues) markDerived(name string) {
-	if rv.derived == nil {
-		rv.derived = make(map[string]bool)
-	}
-
-	rv.derived[name] = true
 }
 
 // sameValues reports whether two lists of distinct values name the same set.
@@ -456,7 +336,7 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
 		case !present:
 			return requestValues{}, dim.name
 		default:
-			rv.record(dim, values)
+			rv.add(dim, values)
 		}
 	}
 
@@ -531,10 +411,6 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 		return ScopeDeclaration{}, problem
 	}
 
-	if filterErr := filterProblem(scope.filter); filterErr != "" {
-		return ScopeDeclaration{}, filterErr
-	}
-
 	scope.body = plan
 
 	return scope, ""
@@ -564,10 +440,6 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 
 		if dim.key == "" {
 			return nil, "scope dimension " + dim.name + " declares an empty request key"
-		}
-
-		if problem := dim.matchProblem(); problem != "" {
-			return nil, problem
 		}
 
 		// A body dimension may repeat, read from distinct fields, each asked; the
@@ -614,12 +486,6 @@ func checkAgainstCatalog(scope ScopeDeclaration, catalog []Dimension) string {
 		}
 	}
 
-	for _, name := range scope.filter {
-		if _, ok := known[name]; !ok {
-			return "scope filter dimension " + name + " is not declared in the manifest scope of product " + scope.product
-		}
-	}
-
 	return ""
 }
 
@@ -658,73 +524,85 @@ func deriveRouteDimensions(catalog []Dimension, path string) []Dimension {
 	return dims
 }
 
-// routeScope derives, and remembers per route path, the declaration of a route
-// that relies on its product's catalog. One handler may be registered on several
-// routes, so the path — not the handler — is the key.
+// routeScope works out, and remembers per route path, the scope of a route on
+// its first request — not when the route is registered — so a catalog wired
+// after the routes reaches them as one wired before does. One handler may be
+// registered on several routes, so the path, not the handler, is the key.
 type routeScope struct {
 	auth    *AuthClient
 	product string
-	byRoute sync.Map // method and route path -> cachedRouteScope
+	// explicit is the route's own declaration, already validated on its own;
+	// nil when the route relies on its product's catalog.
+	explicit *ScopeDeclaration
+	byRoute  sync.Map // method and route path -> cachedRouteScope
 }
 
-// cachedRouteScope is a route's derived declaration together with the manifest
-// generation it was derived from, so a later SetManifestScope or
-// SetManifestRouteScope reaches routes registered before it.
+// cachedRouteScope is a route's scope together with the manifest generation it
+// was worked out from, so a later SetManifestScope or SetManifestRouteScope
+// reaches routes that already served a request. problem is non-empty when the
+// route cannot be honoured on that generation.
 type cachedRouteScope struct {
 	generation uint64
 	scope      ScopeDeclaration
+	problem    string
 }
 
-func (r *routeScope) forRoute(method, path string) ScopeDeclaration {
+// forRoute returns the scope of the route, and a non-empty description of what
+// is wrong when the route cannot be honoured: an explicit declaration naming a
+// dimension its product's catalog does not declare.
+func (r *routeScope) forRoute(method, path string) (ScopeDeclaration, string) {
 	key := routeScopeKey(method, path)
 	generation := r.auth.manifestGeneration()
 
 	if cached, ok := r.byRoute.Load(key); ok {
 		if entry := cached.(cachedRouteScope); entry.generation == generation {
-			return entry.scope
+			return entry.scope, entry.problem
 		}
 	}
 
-	generation, catalog, body, declared := r.auth.manifestRouteScope(r.product, key)
+	generation, catalog, route, declared := r.auth.manifestRouteScope(r.product, key)
+	entry := cachedRouteScope{generation: generation}
 
-	scope := ScopeDeclaration{product: r.product, dims: deriveRouteDimensions(catalog, path)}
-
-	if declared {
-		scope.dims = body.dims
-		scope.body = body.plan
-		scope.filter = body.filter
+	switch {
+	case r.explicit != nil:
+		entry.scope = *r.explicit
+		entry.problem = checkAgainstCatalog(*r.explicit, catalog)
+	case declared:
+		entry.scope = ScopeDeclaration{product: r.product, dims: route.dims, body: route.plan}
+	default:
+		entry.scope = ScopeDeclaration{product: r.product, dims: deriveRouteDimensions(catalog, path)}
 	}
 
-	r.byRoute.Store(key, cachedRouteScope{generation: generation, scope: scope})
+	if entry.problem != "" {
+		logErrorf(context.Background(), r.auth.Logger, "Route %s for product %q is misdeclared and will refuse every request: %s", key, r.product, entry.problem)
+	}
 
-	return scope
+	r.byRoute.Store(key, entry)
+
+	return entry.scope, entry.problem
 }
 
-// registerRouteScope resolves a route's scope at registration time: its explicit
-// declaration, validated and — when the product has a manifest scope — checked
-// against that catalog; or, when the route passes none and a catalog exists, the
-// deriver that reads the route's dimensions from its path. A misdeclaration is
+// registerRouteScope validates a route's explicit declaration on its own, at
+// registration time, and returns what works out the route's scope on each
+// request (see routeScope). A declaration that is wrong whatever the catalog is
 // logged here, in the boot log, and not only on the first request it refuses.
-func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclaration) (ScopeDeclaration, *routeScope, string) {
+// A nil client has no catalog, and its routes no scope.
+func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclaration) (*routeScope, string) {
 	scope, declErr := resolveDeclaration(product, scopes)
-
-	catalog := auth.manifestScopeFor(product)
-	if declErr == "" && len(scopes) > 0 {
-		declErr = checkAgainstCatalog(scope, catalog)
+	if auth == nil {
+		return nil, declErr
 	}
 
-	if declErr == "" {
-		declErr = auth.unregisteredResolver(scope.dims)
-	}
-
-	var derived *routeScope
-	if len(scopes) == 0 && len(catalog) > 0 {
-		derived = &routeScope{auth: auth, product: product}
-	}
-
-	if declErr != "" && auth != nil {
+	if declErr != "" {
 		logErrorf(context.Background(), auth.Logger, "Route for product %q is misdeclared and will refuse every request: %s", product, declErr)
+
+		return nil, declErr
 	}
 
-	return scope, derived, declErr
+	route := &routeScope{auth: auth, product: product}
+	if len(scopes) > 0 {
+		route.explicit = &scope
+	}
+
+	return route, ""
 }

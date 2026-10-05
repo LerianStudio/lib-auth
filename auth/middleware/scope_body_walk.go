@@ -8,9 +8,6 @@ import (
 type groupWalk struct {
 	group bodyGroup
 	set   *questionSet
-	// raw, when non-nil, collects each question instead of adding it to set:
-	// the plan resolves body keys, which are translated in one batch first.
-	raw *[]rawQuestion
 }
 
 // walk descends the group's array prefix from node. chain holds the element of
@@ -136,28 +133,10 @@ func (w groupWalk) emit(chain []any, locations []string) *errBodyScope {
 	for _, chosen := range combinations {
 		values := make(map[string]string, len(chosen))
 		at := make(map[string]string, len(chosen))
-		resolvers := make(map[string]string)
-		matchAny := make(map[string]bool)
-		optional := make(map[string]bool)
 
 		for _, r := range chosen {
 			values[r.field.dim.name] = r.value
 			at[r.field.dim.name] = r.at
-
-			if r.field.dim.resolver != "" {
-				resolvers[r.field.dim.name] = r.field.dim.resolver
-				matchAny[r.field.dim.name] = r.field.dim.matchAny
-				optional[r.field.dim.name] = r.field.dim.optional
-			}
-		}
-
-		if w.raw != nil {
-			*w.raw = append(*w.raw, rawQuestion{
-				values: values, at: at, resolvers: resolvers, siblings: siblings(chosen), matchAny: matchAny,
-				optional: optional,
-			})
-
-			continue
 		}
 
 		if err := w.set.add(values, at); err != nil {
@@ -282,7 +261,7 @@ func commonPrefixLen(a, b []bodySegment) int {
 }
 
 // readingsKey identifies a set of readings by each field and value, so the same
-// values read through a resolved and a plain field stay apart.
+// values read through two fields stay apart.
 func readingsKey(readings []bodyReading) string {
 	var b strings.Builder
 
@@ -293,41 +272,6 @@ func readingsKey(readings []bodyReading) string {
 	}
 
 	return b.String()
-}
-
-// siblings returns, per resolved reading of a question, the values of the
-// question's plain readings of the same element: what the resolver is given to
-// confine its lookup to. A reading with none has no entry.
-func siblings(chosen []bodyReading) map[string]map[string]string {
-	var out map[string]map[string]string
-
-	for _, f := range chosen {
-		if f.field.dim.resolver == "" {
-			continue
-		}
-
-		for _, g := range chosen {
-			if g.field.dim.resolver != "" || g.field.strings || !sameSegments(g.field.element, f.field.element) {
-				continue
-			}
-
-			if out == nil {
-				out = make(map[string]map[string]string)
-			}
-
-			if out[f.field.dim.name] == nil {
-				out[f.field.dim.name] = make(map[string]string)
-			}
-
-			out[f.field.dim.name][g.field.dim.name] = g.value
-		}
-	}
-
-	return out
-}
-
-func sameSegments(a, b []bodySegment) bool {
-	return len(a) == len(b) && isSegmentPrefix(a, b)
 }
 
 // readBodyField reads one field relative to its element, and returns where it
