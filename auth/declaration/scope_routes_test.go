@@ -146,12 +146,10 @@ func TestValidate_ScopeRoutes(t *testing.T) {
 		mutate  func(m *DeclarationManifest)
 		wantErr string
 	}{
-		{name: "from_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "" }, wantErr: `scope.routes[0].dimensions[0]: from must be one of "body", "form", "query", "header", "path", got ""`},
+		{name: "from_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "" }, wantErr: `scope.routes[0].dimensions[0]: from must be one of "body", "form", "query", "header", got ""`},
 		{name: "from_unknown", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "cookie" }, wantErr: `got "cookie"`},
 		{name: "from_unknown", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "cookie" }, wantErr: `got "cookie"`},
-		{name: "from_path_not_a_param_name", mutate: func(m *DeclarationManifest) {
-			m.Scope.Routes[0].Dimensions[0] = DeclarationRouteDimension{Name: "organizationId", From: "path", Field: ":id"}
-		}, wantErr: `scope.routes[0].dimensions[0]: field ":id" must be a bare path parameter name`},
+		{name: "from_path", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].From = "path" }, wantErr: `got "path"`},
 		{name: "field_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[1].Dimensions[1].Field = " " }, wantErr: "scope.routes[1].dimensions[1]: field must not be empty"},
 		{name: "name_missing", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].Name = "" }, wantErr: "scope.routes[0].dimensions[0]: name must not be empty"},
 		{name: "name_outside_catalog", mutate: func(m *DeclarationManifest) { m.Scope.Routes[0].Dimensions[0].Name = "portfolioId" }, wantErr: `"portfolioId" is not a scope dimension`},
@@ -229,9 +227,9 @@ func TestWireScope_RouteErrorsFailTheBoot(t *testing.T) {
 	require.NotEqual(t, routedYAML, unknownFrom)
 	require.ErrorContains(t, WireScope(auth, []byte(unknownFrom)), `got "cookie"`)
 
-	paramNotOnRoute := strings.Replace(routedYAML, "from: body\n          field: ledgerId", "from: path\n          field: ledger_id", 1)
-	require.NotEqual(t, routedYAML, paramNotOnRoute)
-	require.ErrorContains(t, WireScope(auth, []byte(paramNotOnRoute)), `reads path parameter "ledger_id", which the route path does not carry`)
+	pathFrom := strings.Replace(routedYAML, "from: body\n          field: ledgerId", "from: path\n          field: ledger_id", 1)
+	require.NotEqual(t, routedYAML, pathFrom)
+	require.ErrorContains(t, WireScope(auth, []byte(pathFrom)), `got "path"`)
 
 	badField := strings.Replace(routedYAML, `"items[].ledgerId"`, `"items[]."`, 1)
 	require.NotEqual(t, routedYAML, badField)

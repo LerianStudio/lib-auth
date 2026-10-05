@@ -74,14 +74,14 @@ func TestAuthorize_ManifestScope_WiredAfterTheRoutes(t *testing.T) {
 	auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
 
 	app := fiber.New()
-	app.Get(genericAccountRoute, auth.Authorize("midaz", "accounts", "get"), ok)
+	app.Post(legsRoute, auth.Authorize("midaz", "transactions", "post"), ok)
 	app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id", auth.Authorize("midaz", "ledgers", "get"), ok)
 
 	require.NoError(t, auth.SetManifestScope("midaz", accountCatalog()...))
-	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodGet, genericAccountRoute, Dim("accountId", FromPath).At("id")))
+	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, legsRoute, Dim("accountId", FromBody).At("accountId")))
 
 	assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/organizations/org-1/ledgers/led-1", partnerToken("acme/p1")))
-	assert.Equal(t, http.StatusOK, doGet(t, app, genericAccountTarget, partnerToken("acme/p1")))
+	assert.Equal(t, http.StatusOK, doPost(t, app, legsPath, partnerToken("acme/p1"), `{"accountId":"acc-1"}`).status)
 
 	assert.Equal(t, []map[string]string{
 		{"organizationId": "org-1", "ledgerId": "led-1"},

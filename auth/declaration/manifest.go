@@ -67,8 +67,7 @@ type DeclarationManifest struct {
 
 // The places a request carries a dimension's value. A catalog dimension is read
 // from the path, the query or a header; a scope.routes dimension from the JSON
-// body, a urlencoded form body, the query, a header or a path parameter of the
-// route.
+// body, a urlencoded form body, the query or a header.
 const (
 	scopeFromPath   = "path"
 	scopeFromQuery  = "query"
@@ -85,25 +84,25 @@ type DeclarationScope struct {
 	// identifiers are resolved in.
 	Dimensions []DeclarationDimension `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
 	// Routes declares, per route, the catalog dimensions that route reads
-	// somewhere the catalog does not say: its request body, a query parameter, a
-	// header, or a path parameter the catalog knows by another name. They are
+	// somewhere other than its path: its request body, a query parameter or a
+	// header. They are
 	// this library's to read: the identity service never receives them, and they
 	// are left out of the wire body and of CanonicalHash (see serverProjection),
 	// so declaring them changes nothing that is published.
 	Routes []DeclarationScopeRoute `json:"routes,omitempty" yaml:"routes,omitempty"`
 }
 
-// DeclarationScopeRoute names one route and the dimensions it reads where the
-// catalog does not say.
+// DeclarationScopeRoute names one route and the dimensions it reads somewhere
+// other than its path.
 type DeclarationScopeRoute struct {
 	// Method is the route's HTTP method, in any letter case.
 	Method string `json:"method,omitempty" yaml:"method,omitempty"`
 	// Path is the route's full path exactly as it is registered, group prefixes
 	// included, with its ':' parameters (e.g. "/v2/transactions/direct").
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
-	// Dimensions are the catalog dimensions the route reads where the catalog
-	// does not say. The other dimensions its path carries are still derived from
-	// the path; one read from two carriers must name the same values in each.
+	// Dimensions are the catalog dimensions the route reads somewhere other
+	// than its path. The dimensions its path carries are still derived from the
+	// path; one read from two carriers must name the same values in each.
 	Dimensions []DeclarationRouteDimension `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
 }
 
@@ -112,8 +111,8 @@ type DeclarationScopeRoute struct {
 type DeclarationRouteDimension struct {
 	// Name is a dimension of the catalog (scope.dimensions[].name).
 	Name string `json:"name,omitempty" yaml:"name,omitempty"`
-	// From is where the request carries the value: "body", "form", "query",
-	// "header" or "path". A route reads its body either as JSON (body) or as an
+	// From is where the request carries the value: "body", "form", "query" or
+	// "header". A route reads its body either as JSON (body) or as an
 	// application/x-www-form-urlencoded form (form), never both.
 	From string `json:"from,omitempty" yaml:"from,omitempty"`
 	// Field is where under From the value is. For "body", its path in the JSON
@@ -124,11 +123,7 @@ type DeclarationRouteDimension struct {
 	// For "form", the form field name; for "query", the parameter name; for
 	// "header", the header name, in any letter case. A form field, query
 	// parameter or header may list several values; see middleware.FromQuery and
-	// middleware.FromForm. For "path", the name of a parameter of the route path
-	// without the ':' marker ("id" for a segment ":id"): the route's own name for
-	// the dimension, which replaces, on that route only, what the catalog would
-	// derive from the path for the same dimension and the same parameter; see
-	// middleware.AuthClient.SetManifestRouteScope.
+	// middleware.FromForm.
 	Field string `json:"field,omitempty" yaml:"field,omitempty"`
 	// Optional means a request may leave the value out: when the request does
 	// not carry it (a body key on its path absent or null, a form field, query

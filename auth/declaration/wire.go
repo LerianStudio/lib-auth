@@ -323,7 +323,6 @@ var (
 		scopeFromForm:   middleware.FromForm,
 		scopeFromQuery:  middleware.FromQuery,
 		scopeFromHeader: middleware.FromHeader,
-		scopeFromPath:   middleware.FromPath,
 	}
 )
 
@@ -364,9 +363,9 @@ func routeDimensions(r DeclarationScopeRoute) []middleware.Dimension {
 //		auth.Authorize("midaz", "ledgers", "get"), handler)
 //
 // The routes of scope.routes read the dimensions they declare from their JSON
-// request body, a urlencoded form body, the query, headers or a path parameter
-// of their own (see middleware.AuthClient.SetManifestRouteScope); a route that
-// cannot be honoured fails here, at boot.
+// request body, a urlencoded form body, the query or headers (see
+// middleware.AuthClient.SetManifestRouteScope); a route that cannot be honoured
+// fails here, at boot.
 //
 // A manifest without a scope section leaves the service with no catalog.
 func WireScope(auth *middleware.AuthClient, manifest []byte) error {

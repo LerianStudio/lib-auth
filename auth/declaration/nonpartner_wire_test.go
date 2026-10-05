@@ -53,17 +53,6 @@ scope:
           field: "send.source.from[].accountId"
 `
 
-// wireCompatMappedManifest is wireCompatManifest with a route that maps its
-// generic ":id" parameter to the account dimension.
-const wireCompatMappedManifest = wireCompatManifest + `
-    - method: GET
-      path: /v1/organizations/:organization_id/ledgers/:ledger_id/balances/:id
-      dimensions:
-        - name: accountId
-          from: path
-          field: id
-`
-
 // wireCompatGolden holds the authorize bodies the develop line sends for the
 // requests of nonPartnerAuthorizeBodies, captured from a build of it. They are
 // literal bytes, so an added member, a reordered key or a changed encoding on a
@@ -83,7 +72,7 @@ func compatToken(claims jwt.MapClaims) string {
 // client for its routes and its publisher, declaration.New given that client —
 // and returns the raw /v1/authorize body of each request a credential that is
 // not partner-bound makes on it: a user and an application, on a route the
-// catalog scopes, a body route, and a route with a generic ":id".
+// catalog scopes, a body route, and a route the catalog gives no account.
 func nonPartnerAuthorizeBodies(t *testing.T, manifest string) []string {
 	t.Helper()
 
@@ -162,12 +151,10 @@ func TestNew_NonPartnerAuthorizeBodiesMatchTheDevelopLine(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &golden))
 	require.Len(t, golden, 10, "the golden file holds one body per request")
 
-	for _, manifest := range []string{wireCompatManifest, wireCompatMappedManifest} {
-		got := nonPartnerAuthorizeBodies(t, manifest)
-		assert.Equal(t, golden, got)
+	got := nonPartnerAuthorizeBodies(t, wireCompatManifest)
+	assert.Equal(t, golden, got)
 
-		for _, body := range got {
-			assert.NotContains(t, body, "attributes")
-		}
+	for _, body := range got {
+		assert.NotContains(t, body, "attributes")
 	}
 }

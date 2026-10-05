@@ -729,7 +729,7 @@ Every dimension is read from one of five places, the same for an explicit
 
 | Source | `from:` | Key (`param` / `field`) | Several values | Catalog | `scope.routes` |
 |---|---|---|---|---|---|
-| `FromPath` | `path` | path parameter, without `:` | never — one segment is one value | yes | yes (the route's own parameter, see [Mapping a route's own path parameter](#mapping-a-routes-own-path-parameter-from-path)) |
+| `FromPath` | `path` | path parameter, without `:` | never — one segment is one value | yes | no (derived from the path) |
 | `FromQuery` | `query` | query parameter | yes | yes | yes |
 | `FromHeader` | `header` | header name, any letter case | yes | yes | yes |
 | `FromBody` | `body` | path of keys in the JSON body | one per array element | no | yes |
@@ -829,7 +829,7 @@ scope:
 * All the questions of one request share one timeout (`AUTH_TIMEOUT`), the
   token is verified once, and the first denial ends the request.
 * Validation when the manifest is wired (`declaration.New` or `WireScope`):
-  `from` must be `body`, `form`, `query`, `header` or `path`, `field` is
+  `from` must be `body`, `form`, `query` or `header`, `field` is
   required and valid for its `from`, `name` must be a catalog
   dimension, routes are unique by method and path, a route reads its body as
   JSON or as a form but not both, and the fields must fit together; any error
@@ -915,37 +915,6 @@ fields with `from: form`, the field name as `field`:
   places and a disagreement is refused.
 * A route reads its body either as JSON (`from: body`) or as a form
   (`from: form`), never both. The catalog reads no body.
-
-### Mapping a route's own path parameter (`from: path`)
-
-The catalog names each path dimension by one parameter (`:account_id`). A route
-that calls the same instance something else — a generic `:id` — maps its own
-parameter to the dimension under `scope.routes`, without renaming the route:
-
-```yaml
-scope:
-  dimensions: [ ... ]    # accountId read from path param account_id
-  routes:
-    - method: GET
-      path: /v1/organizations/:organization_id/ledgers/:ledger_id/accounts/:id
-      dimensions:
-        - { name: accountId, from: path, field: id }
-```
-
-`GET /v1/organizations/org-1/ledgers/led-1/accounts/acc-1` then asks
-`{"organizationId": "org-1", "ledgerId": "led-1", "accountId": "acc-1"}`.
-
-* `field` is the parameter as written after the `:` marker, and the route path
-  must carry it as one whole segment; anything else fails when the manifest is
-  wired.
-* **The route's mapping wins, for that route only.** On it, the catalog does not
-  derive the mapped dimension from its own parameter, nor any catalog dimension
-  from the mapped parameter: the parameter answers for the one dimension the
-  route names. Every other route derives from the catalog as before, and the
-  other dimensions of the route's path are still derived.
-* The catalog's rule of one parameter per dimension is the catalog's: several
-  routes may map the same generic parameter, each to its own dimension.
-* In code, `auth.SetManifestRouteScope(product, method, path, authMiddleware.Dim("accountId", authMiddleware.FromPath).At("id"))`.
 
 ### Publishing the scope
 

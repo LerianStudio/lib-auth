@@ -568,7 +568,7 @@ func TestSetManifestRouteScope_Validation(t *testing.T) {
 		{name: "no_dims", method: "POST", path: directPath, wantErr: "no dimension"},
 		{name: "empty_method", method: "", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("organizationId")}, wantErr: "method"},
 		{name: "relative_path", method: "POST", path: "v2/x", dims: []Dimension{Dim("organizationId", FromBody).At("organizationId")}, wantErr: "path"},
-		{name: "path_param_not_on_route", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromPath).At("organization_id")}, wantErr: `reads path parameter "organization_id", which the route path does not carry`},
+		{name: "path_dim", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromPath).At("organization_id")}, wantErr: "derived from the path"},
 		{name: "outside_catalog", method: "POST", path: directPath, dims: []Dimension{Dim("portfolioId", FromBody).At("portfolioId")}, wantErr: "portfolioId"},
 		{name: "empty_field", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("")}, wantErr: "empty request key"},
 		{name: "empty_segment", method: "POST", path: directPath, dims: []Dimension{Dim("organizationId", FromBody).At("a..b")}, wantErr: "a..b"},

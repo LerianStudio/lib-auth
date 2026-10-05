@@ -93,7 +93,7 @@ func newPublisher(t *testing.T, auth TokenMinter, manifest string) {
 
 // New gives the client it mints with the manifest's scope, so the routes that
 // client authorizes derive their scope from it — routes registered before New
-// as well as after, and a route that maps its generic ":id".
+// as well as after.
 func TestNew_WiresTheManifestScopeIntoTheClient(t *testing.T) {
 	t.Parallel()
 
@@ -103,9 +103,9 @@ func TestNew_WiresTheManifestScopeIntoTheClient(t *testing.T) {
 	app := fiber.New()
 	app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/accounts/:account_id", auth.Authorize("midaz", "accounts", "get"), compatOK)
 
-	newPublisher(t, auth, wireCompatMappedManifest)
+	newPublisher(t, auth, wireCompatManifest)
 
-	app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/balances/:id", auth.Authorize("midaz", "balances", "get"), compatOK)
+	app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id/balances/:account_id", auth.Authorize("midaz", "balances", "get"), compatOK)
 
 	assert.Equal(t, http.StatusOK, status(t, app, http.MethodGet, "/v1/organizations/org-1/ledgers/led-1/accounts/acc-1", compatPartner))
 	assert.Equal(t, http.StatusOK, status(t, app, http.MethodGet, "/v1/organizations/org-1/ledgers/led-1/balances/acc-2", compatPartner))
@@ -150,7 +150,7 @@ func TestNew_NotCalledLeavesPartnersDenied(t *testing.T) {
 func TestNew_OtherMinterIsLeftAlone(t *testing.T) {
 	t.Parallel()
 
-	newPublisher(t, minterFunc(func(context.Context, string, string) (string, error) { return "token", nil }), wireCompatMappedManifest)
+	newPublisher(t, minterFunc(func(context.Context, string, string) (string, error) { return "token", nil }), wireCompatManifest)
 }
 
 // A manifest route the middleware cannot honour fails New, as it fails
@@ -162,15 +162,15 @@ func TestNew_RouteTheMiddlewareRefusesFailsNew(t *testing.T) {
 
 	_, err := New(Config{
 		Slug: "midaz", Manifest: []byte(wireCompatManifest + `
-    - method: GET
-      path: /v1/organizations/:organization_id/ledgers/:ledger_id/balances/:balance_id
+    - method: POST
+      path: /v1/organizations/:organization_id/ledgers/:ledger_id/transfers
       dimensions:
         - name: accountId
-          from: path
-          field: id
+          from: body
+          field: "items[]."
 `), IdentityAddr: "http://identity.invalid", Auth: auth, ClientID: "id", ClientSecret: "secret",
 	})
-	require.ErrorContains(t, err, `reads path parameter "id", which the route path does not carry`)
+	require.ErrorContains(t, err, `"items[]."`)
 }
 
 type minterFunc func(ctx context.Context, clientID, clientSecret string) (string, error)
@@ -180,24 +180,3 @@ func (f minterFunc) GetApplicationToken(ctx context.Context, clientID, clientSec
 }
 
 func compatOK(c fiber.Ctx) error { return c.SendString("ok") }
-
-// Several routes may map the same generic parameter, each to its own
-// dimension: the catalog's one-parameter-per-dimension rule is the catalog's,
-// not the routes'.
-func TestValidate_RoutesMapOneParameterToDifferentDimensions(t *testing.T) {
-	t.Parallel()
-
-	manifest := []byte(wireCompatMappedManifest + `
-    - method: GET
-      path: /v1/organizations/:organization_id/ledgers/:id
-      dimensions:
-        - name: ledgerId
-          from: path
-          field: id
-`)
-
-	m, err := parseManifest(manifest)
-	require.NoError(t, err)
-	require.NoError(t, m.Validate())
-	require.NoError(t, WireScope(&middleware.AuthClient{Logger: obs.Nop()}, manifest))
-}

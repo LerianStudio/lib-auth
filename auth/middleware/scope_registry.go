@@ -99,11 +99,10 @@ func routeScopeKey(method, path string) string {
 }
 
 // SetManifestRouteScope declares the dimensions ONE route of the product reads
-// somewhere its catalog does not say — its JSON body (FromBody), a urlencoded
-// form (FromForm), the query (FromQuery), a header (FromHeader), or a path
-// parameter the catalog knows by another name (FromPath) — for a product whose
-// catalog SetManifestScope already wired: some routes carry the instance they
-// address in the body, and only the route knows where.
+// from somewhere other than its path — its JSON body (FromBody), a urlencoded
+// form (FromForm), the query (FromQuery) or a header (FromHeader) — for a
+// product whose catalog SetManifestScope already wired: some routes carry the
+// instance they address in the body, and only the route knows where.
 //
 // method and path identify the route exactly as it is registered (the full path,
 // group prefixes included, with its ':' parameters). dims are catalog
@@ -111,18 +110,6 @@ func routeScopeKey(method, path string) string {
 // RequireScope declaration is. The route still derives the dimensions its path
 // carries; a dimension it also reads elsewhere must name the same values in
 // both, or the request is refused with 400 naming the two.
-//
-// A path dimension maps a parameter of the route to a catalog dimension, for a
-// route whose parameter is not the one the catalog names — a generic ":id"
-// that is the account on "/accounts/:id":
-//
-//	auth.SetManifestRouteScope("midaz", "GET", "/v1/organizations/:organization_id/ledgers/:ledger_id/accounts/:id",
-//		middleware.Dim("accountId", middleware.FromPath).At("id"))
-//
-// The route must carry the parameter as one whole segment. For that route only,
-// the mapping replaces what the catalog would derive from the path for the same
-// dimension and for the same parameter, so the parameter answers for the one
-// dimension the route names.
 //
 // The declaration package builds these from the manifest's scope.routes: call
 // declaration.WireScope rather than this directly. A route that passes
@@ -148,12 +135,12 @@ func (auth *AuthClient) SetManifestRouteScope(product, method, path string, dims
 	}
 
 	for _, dim := range dims {
-		if problem := checkRouteDimension(product, path, dim, known); problem != "" {
+		if problem := checkRouteDimension(product, dim, known); problem != "" {
 			return errors.New("manifest route scope: dimension " + dim.name + " on " + method + " " + path + " " + problem)
 		}
 	}
 
-	routeDims := append(withoutMapped(deriveRouteDimensions(catalog, path), dims), dims...)
+	routeDims := append(deriveRouteDimensions(catalog, path), dims...)
 
 	plan, problem := compileDims(routeDims)
 	if problem != "" {
@@ -198,10 +185,11 @@ func (auth *AuthClient) routeTarget(product, method, path string, count int) (st
 }
 
 // checkRouteDimension describes what is wrong with dim as a dimension declared
-// on one manifest route, or returns "".
-func checkRouteDimension(product, path string, dim Dimension, catalog map[string]struct{}) string {
-	if dim.source == FromPath && !hasPathParam(path, dim.key) {
-		return "reads path parameter " + strconv.Quote(dim.key) + ", which the route path does not carry"
+// on one manifest route, or returns "". The route's path dimensions are derived
+// from its path, as on every other route.
+func checkRouteDimension(product string, dim Dimension, catalog map[string]struct{}) string {
+	if dim.source == FromPath {
+		return "is derived from the path and must not be declared on the route"
 	}
 
 	if _, ok := catalog[dim.name]; !ok {
@@ -209,50 +197,6 @@ func checkRouteDimension(product, path string, dim Dimension, catalog map[string
 	}
 
 	return ""
-}
-
-// withoutMapped returns the derived dimensions a route's own path dimensions do
-// not replace: a path dimension the route maps elsewhere, or one reading a
-// parameter the route maps to a dimension, is the route's to say.
-func withoutMapped(derived, mapped []Dimension) []Dimension {
-	names := make(map[string]struct{}, len(mapped))
-	params := make(map[string]struct{}, len(mapped))
-
-	for _, dim := range mapped {
-		if dim.source == FromPath {
-			names[dim.name] = struct{}{}
-			params[dim.key] = struct{}{}
-		}
-	}
-
-	kept := make([]Dimension, 0, len(derived))
-
-	for _, dim := range derived {
-		if dim.source == FromPath {
-			_, named := names[dim.name]
-			_, read := params[dim.key]
-
-			if named || read {
-				continue
-			}
-		}
-
-		kept = append(kept, dim)
-	}
-
-	return kept
-}
-
-// hasPathParam reports whether one whole segment of path is the parameter
-// :param.
-func hasPathParam(path, param string) bool {
-	for _, segment := range strings.Split(path, "/") {
-		if segment == ":"+param {
-			return true
-		}
-	}
-
-	return false
 }
 
 // manifestGeneration is the count of manifest scope changes, read by routes to

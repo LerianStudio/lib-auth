@@ -356,11 +356,10 @@ func validateCovers(prefix string, d DeclarationDimension) []string {
 // validateScopeRoutes validates scope.routes against the catalog: every route
 // names its method and an absolute path, appears once, and declares at least one
 // dimension, reading its body at most one way; every dimension names a catalog
-// dimension, reads from the body, a form, the query, a header or the path, and
-// names its field there. Whether the fields fit together on the route — a
-// well-formed body path, a path parameter the route carries, every dimension
-// read for each array element, no field read twice — is checked by the
-// middleware when the route is wired.
+// dimension, reads from the body, a form, the query or a header, and names its
+// field there. Whether the fields fit together on the route — a well-formed
+// body path, every dimension read for each array element, no field read twice
+// — is checked by the middleware when the route is wired.
 func (m *DeclarationManifest) validateScopeRoutes(catalog map[string]struct{}) []string {
 	var violations []string
 
@@ -421,7 +420,7 @@ func validateRouteDimension(prefix string, d DeclarationRouteDimension, catalog 
 
 	if _, known := routeDimensionSources[d.From]; !known {
 		violations = append(violations, fmt.Sprintf(
-			`%s: from must be one of "body", "form", "query", "header", "path", got %q`, prefix, d.From))
+			`%s: from must be one of "body", "form", "query", "header", got %q`, prefix, d.From))
 	}
 
 	switch problem := requestKeyProblem(d.From, d.Field); {
