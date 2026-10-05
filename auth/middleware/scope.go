@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -118,8 +119,13 @@ func (d Dimension) read(c fiber.Ctx) (values []string, present bool, problem str
 		return splitValues(raw)
 	case FromQuery:
 		var raw []string
-		for _, v := range c.Request().URI().QueryArgs().PeekMulti(d.key) {
-			raw = append(raw, string(v))
+
+		// Compared without regard to letter case, as the handler's query binding
+		// matches keys: the key the handler may bind is the key checked.
+		for k, v := range c.Request().URI().QueryArgs().All() {
+			if strings.EqualFold(string(k), d.key) {
+				raw = append(raw, string(v))
+			}
 		}
 
 		return splitValues(raw)
@@ -183,14 +189,30 @@ func (d Dimension) location() string {
 }
 
 // carrier identifies the place in the request a dimension is read from. Header
-// names are case-insensitive, so two spellings of one header are one carrier.
+// names and query keys are case-insensitive, so two spellings of one are one
+// carrier.
 func (d Dimension) carrier() string {
 	key := d.key
-	if d.source == FromHeader {
-		key = strings.ToLower(key)
+	if d.source == FromHeader || d.source == FromQuery {
+		key = foldKey(key)
 	}
 
 	return strconv.Itoa(int(d.source)) + ":" + key
+}
+
+// foldKey maps key to one spelling shared by every key strings.EqualFold, the
+// readers' match, holds equal to it: each rune becomes the least rune of its
+// simple case-folding orbit. strings.ToLower is not that rule — "Σ" and "ς" are
+// equal to EqualFold but lower-case to different runes.
+func foldKey(key string) string {
+	return strings.Map(func(r rune) rune {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			least = min(least, f)
+		}
+
+		return least
+	}, key)
 }
 
 // ScopeDeclaration is a route's statement of which product it belongs to and
