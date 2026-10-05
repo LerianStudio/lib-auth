@@ -84,7 +84,7 @@ func TestAuthorize_CachedPartnerDenialKeepsItsCode(t *testing.T) {
 		assert.Equal(t, "AUT-1009", commonsErr.Code)
 	}
 
-	assert.Len(t, rec.bodies.Load().([]string), 1, "the second request must be served from the cache")
+	assert.Len(t, rec.requests(), 1, "the second request must be served from the cache")
 }
 
 // Every other denial and every token failure keeps the refusal it always had: no

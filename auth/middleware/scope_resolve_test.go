@@ -85,12 +85,11 @@ func (r *fakeResolver) inputs() []ResolveInput {
 func resolvingClient(t *testing.T, url, name string, resolver *fakeResolver, method, path string, dims ...Dimension) *AuthClient {
 	t.Helper()
 
-	auth := &AuthClient{Address: url, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
-	require.NoError(t, auth.RegisterScopeResolver(name, resolver.resolve))
-	require.NoError(t, auth.SetManifestScope("midaz", resolveCatalog()...))
-	require.NoError(t, auth.SetManifestRouteScope("midaz", method, path, dims...))
-
-	return auth
+	return bodyScopedClientWith(t, scopedClientSetup{
+		url:       url,
+		catalog:   resolveCatalog(),
+		resolvers: map[string]ScopeResolver{name: resolver.resolve},
+	}, method, path, dims...)
 }
 
 func doRequest(t *testing.T, app *fiber.App, method, target, token, body string) bodyResult {

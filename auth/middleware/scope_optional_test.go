@@ -14,7 +14,7 @@ import (
 
 // optionalClient reads organizationId from the body, required, and ledgerId
 // from field, optional.
-func optionalClient(t *testing.T, srv *decidingAuthServer, field string) *AuthClient {
+func optionalClient(t *testing.T, srv *fakeAuthServer, field string) *AuthClient {
 	t.Helper()
 
 	return bodyScopedClient(t, srv.URL, http.MethodPost, directPath,

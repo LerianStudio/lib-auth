@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,110 +18,42 @@ import (
 // Body scope test helpers
 // ---------------------------------------------------------------------------
 
-// decidingAuthServer answers POST /v1/authorize with ALLOW unless the request's
-// attributes carry one of the denied values, and records the attributes of every
-// call in order. It is what lets a batch test prove that ONE value outside the
-// scope refuses the whole request.
-type decidingAuthServer struct {
-	*httptest.Server
-
-	denied map[string]bool
-
-	mu    sync.Mutex
-	calls []map[string]string
-	hits  atomic.Int64
-	// allow, when set, decides each question in place of denied.
-	allow func(attributes map[string]string) bool
-	// allowPending, when set, decides each question with the dimensions it
-	// declares pending, in place of allow and denied.
-	allowPending func(attributes map[string]string, pending []string) bool
-}
-
-// newDecidingAuthServerFunc is a deciding server whose answer to each question
-// is allow's.
-func newDecidingAuthServerFunc(t *testing.T, allow func(attributes map[string]string) bool) *decidingAuthServer {
-	t.Helper()
-
-	srv := newDecidingAuthServer(t)
-
-	srv.mu.Lock()
-	srv.allow = allow
-	srv.mu.Unlock()
-
-	return srv
-}
-
-func newDecidingAuthServer(t *testing.T, denied ...string) *decidingAuthServer {
-	t.Helper()
-
-	srv := &decidingAuthServer{denied: make(map[string]bool, len(denied))}
-	for _, v := range denied {
-		srv.denied[v] = true
-	}
-
-	srv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("mock authz server: failed to read body: %v", err)
-		}
-
-		var body struct {
-			Attributes map[string]string `json:"attributes"`
-			Pending    []string          `json:"pending"`
-		}
-		if err := json.Unmarshal(raw, &body); err != nil {
-			t.Errorf("mock authz server: failed to decode body: %v", err)
-		}
-
-		srv.mu.Lock()
-		srv.calls = append(srv.calls, body.Attributes)
-		allow := srv.allow
-		allowPending := srv.allowPending
-		srv.mu.Unlock()
-		srv.hits.Add(1)
-
-		authorized := true
-
-		for _, v := range body.Attributes {
-			if srv.denied[v] {
-				authorized = false
-			}
-		}
-
-		if allow != nil {
-			authorized = allow(body.Attributes)
-		}
-
-		if allowPending != nil {
-			authorized = allowPending(body.Attributes, body.Pending)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-
-		if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: authorized}); err != nil {
-			t.Errorf("mock authz server: failed to encode response: %v", err)
-		}
-	}))
-
-	t.Cleanup(srv.Close)
-
-	return srv
-}
-
-func (srv *decidingAuthServer) attributeCalls() []map[string]string {
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-
-	return append([]map[string]string(nil), srv.calls...)
-}
-
 // bodyScopedClient is a client with the path catalog AND the body dimensions of
 // the given route.
 func bodyScopedClient(t *testing.T, url, method, path string, dims ...Dimension) *AuthClient {
 	t.Helper()
 
-	auth := &AuthClient{Address: url, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
-	require.NoError(t, auth.SetManifestScope("midaz", manifestDims()...))
+	return bodyScopedClientWith(t, scopedClientSetup{url: url}, method, path, dims...)
+}
+
+// scopedClientSetup is how bodyScopedClientWith builds its client.
+type scopedClientSetup struct {
+	url string
+	// catalog is the manifest scope; manifestDims when nil.
+	catalog []Dimension
+	// resolvers are registered, by name, before the route is declared.
+	resolvers map[string]ScopeResolver
+	// legacy builds the client on the legacy derivation model
+	// (M2MInversionEnabled=false).
+	legacy bool
+}
+
+// bodyScopedClientWith is bodyScopedClient with the catalog, the resolvers and
+// the derivation model of setup.
+func bodyScopedClientWith(t *testing.T, setup scopedClientSetup, method, path string, dims ...Dimension) *AuthClient {
+	t.Helper()
+
+	catalog := setup.catalog
+	if catalog == nil {
+		catalog = manifestDims()
+	}
+
+	auth := &AuthClient{Address: setup.url, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: !setup.legacy}
+	for name, resolver := range setup.resolvers {
+		require.NoError(t, auth.RegisterScopeResolver(name, resolver))
+	}
+
+	require.NoError(t, auth.SetManifestScope("midaz", catalog...))
 	require.NoError(t, auth.SetManifestRouteScope("midaz", method, path, dims...))
 
 	return auth
@@ -219,7 +150,7 @@ func TestAuthorize_BodyScope_SingleValueOutsideIsRefused(t *testing.T) {
 
 const batchPath = "/v2/transactions/batch"
 
-func batchClient(t *testing.T, srv *decidingAuthServer) *AuthClient {
+func batchClient(t *testing.T, srv *fakeAuthServer) *AuthClient {
 	t.Helper()
 
 	return bodyScopedClient(t, srv.URL, http.MethodPost, batchPath,

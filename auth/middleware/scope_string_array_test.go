@@ -20,11 +20,7 @@ import (
 func stringArrayClient(t *testing.T, url string, dims ...Dimension) *AuthClient {
 	t.Helper()
 
-	auth := &AuthClient{Address: url, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
-	require.NoError(t, auth.SetManifestScope("midaz", resolveCatalog()...))
-	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, legsRoute, dims...))
-
-	return auth
+	return bodyScopedClientWith(t, scopedClientSetup{url: url, catalog: resolveCatalog()}, http.MethodPost, legsRoute, dims...)
 }
 
 func stringArrayApp(auth *AuthClient, probe *handlerProbe) *fiber.App {

@@ -36,7 +36,7 @@ func maintenanceDims(creditOptional, aliasesOptional bool) []Dimension {
 	return []Dimension{credit, aliases}
 }
 
-func maintenanceApp(t *testing.T, srv *decidingAuthServer, dims ...Dimension) *fiber.App {
+func maintenanceApp(t *testing.T, srv *fakeAuthServer, dims ...Dimension) *fiber.App {
 	t.Helper()
 
 	auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
@@ -271,7 +271,7 @@ func TestAuthorize_BodyUnion_StillAgreesWithAnotherCarrier(t *testing.T) {
 	assert.Len(t, srv.attributeCalls(), 1, "only the agreeing request was asked")
 }
 
-func maintenanceAppOn(t *testing.T, srv *decidingAuthServer, route string, dims ...Dimension) *fiber.App {
+func maintenanceAppOn(t *testing.T, srv *fakeAuthServer, route string, dims ...Dimension) *fiber.App {
 	t.Helper()
 
 	auth := &AuthClient{Address: srv.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}

@@ -162,7 +162,7 @@ func TestSetManifestScope_NilReceiver(t *testing.T) {
 // Authorize with a manifest scope
 // ---------------------------------------------------------------------------
 
-func scopedClient(t *testing.T, rec *recordingAuthServer) *AuthClient {
+func scopedClient(t *testing.T, rec *fakeAuthServer) *AuthClient {
 	t.Helper()
 
 	auth := &AuthClient{Address: rec.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}

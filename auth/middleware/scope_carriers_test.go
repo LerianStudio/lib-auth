@@ -62,7 +62,7 @@ const ledgersRoute = "/v1/organizations/:organization_id/ledgers"
 
 // queryLedgerClient reads the organization from the path (catalog) and the
 // ledger from the query on ledgersRoute.
-func queryLedgerClient(t *testing.T, srv *decidingAuthServer, dims ...Dimension) *AuthClient {
+func queryLedgerClient(t *testing.T, srv *fakeAuthServer, dims ...Dimension) *AuthClient {
 	t.Helper()
 
 	if len(dims) == 0 {

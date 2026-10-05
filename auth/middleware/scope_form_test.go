@@ -17,7 +17,7 @@ const formType = "application/x-www-form-urlencoded"
 
 // formClient reads the organization from the path (catalog) and the given
 // dimensions on ledgersRoute.
-func formClient(t *testing.T, srv *decidingAuthServer, dims ...Dimension) *AuthClient {
+func formClient(t *testing.T, srv *fakeAuthServer, dims ...Dimension) *AuthClient {
 	t.Helper()
 
 	if len(dims) == 0 {

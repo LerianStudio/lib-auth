@@ -54,13 +54,12 @@ func (p *principalProbe) seen() (int, Principal, bool) {
 func legacyResolvingClient(t *testing.T, url string, probe *principalProbe) *AuthClient {
 	t.Helper()
 
-	auth := &AuthClient{Address: url, Enabled: true, Logger: &testLogger{}}
-	require.NoError(t, auth.RegisterScopeResolver("legs", probe.resolve))
-	require.NoError(t, auth.SetManifestScope("midaz", resolveCatalog()...))
-	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodGet, txRoute,
-		Dim("accountId", FromPath).At("transaction_id").Resolve("legs")))
-
-	return auth
+	return bodyScopedClientWith(t, scopedClientSetup{
+		url:       url,
+		catalog:   resolveCatalog(),
+		resolvers: map[string]ScopeResolver{"legs": probe.resolve},
+		legacy:    true,
+	}, http.MethodGet, txRoute, Dim("accountId", FromPath).At("transaction_id").Resolve("legs"))
 }
 
 func legacyPartnerToken(claims jwt.MapClaims) string {

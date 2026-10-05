@@ -1,10 +1,7 @@
 package middleware
 
 import (
-	"encoding/json"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -23,55 +20,6 @@ const (
 	accountsTarget = "/v1/organizations/org-1/ledgers/led-1/accounts"
 	orgsRoute      = "/v1/organizations"
 )
-
-// scriptedAuthServer records every raw /v1/authorize body and answers each
-// with what answer returns for the decoded body.
-type scriptedAuthServer struct {
-	*httptest.Server
-
-	mu     sync.Mutex
-	bodies []string
-}
-
-type authorizeRequestBody struct {
-	Attributes map[string]string `json:"attributes"`
-	Filter     []string          `json:"filter"`
-}
-
-func newScriptedAuthServer(t *testing.T, answer func(authorizeRequestBody) string) *scriptedAuthServer {
-	t.Helper()
-
-	srv := &scriptedAuthServer{}
-	srv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("mock authz server: failed to read body: %v", err)
-		}
-
-		var body authorizeRequestBody
-		if err := json.Unmarshal(raw, &body); err != nil {
-			t.Errorf("mock authz server: failed to decode body: %v", err)
-		}
-
-		srv.mu.Lock()
-		srv.bodies = append(srv.bodies, string(raw))
-		srv.mu.Unlock()
-
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(answer(body)))
-	}))
-
-	t.Cleanup(srv.Close)
-
-	return srv
-}
-
-func (srv *scriptedAuthServer) requests() []string {
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-
-	return append([]string(nil), srv.bodies...)
-}
 
 // allowAccounts allows every question and, when the request asks to filter
 // on accountId, answers with the allowed accounts.

@@ -27,7 +27,7 @@ const (
 
 // holderApp serves the holder route, its ledgers resolved with the given
 // dimension, and records the scope the handler saw.
-func holderApp(t *testing.T, srv *decidingAuthServer, resolver *fakeResolver, dims ...Dimension) (*fiber.App, *handlerProbe, *RequestScope) {
+func holderApp(t *testing.T, srv *fakeAuthServer, resolver *fakeResolver, dims ...Dimension) (*fiber.App, *handlerProbe, *RequestScope) {
 	t.Helper()
 
 	auth := resolvingClient(t, srv.URL, "holderLedgers", resolver, http.MethodGet, holderRoute, dims...)
@@ -476,7 +476,7 @@ func TestAuthorize_ResolveAny_BodyNamesOneValueOfEachItem(t *testing.T) {
 		return map[string]string{"organizationId": "org-1", "ledgerId": ledger}
 	}
 
-	newApp := func(srv *decidingAuthServer) *fiber.App {
+	newApp := func(srv *fakeAuthServer) *fiber.App {
 		auth := resolvingClient(t, srv.URL, "holderLedgers", resolver, http.MethodPost, route,
 			Dim("ledgerId", FromQuery).At("holder").Resolve("holderLedgers").MatchAny(),
 			Dim("ledgerId", FromBody).At("ledgerId"))

@@ -1,11 +1,7 @@
 package middleware
 
 import (
-	"encoding/json"
-	"io"
 	"net/http"
-	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
@@ -13,83 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// pendingCall is one /v1/authorize body as the pending tests read it: the
-// attributes asked, and the pending member — with whether it was sent at all.
-type pendingCall struct {
-	attributes map[string]string
-	pending    []string
-	sent       bool
-}
-
-// pendingAuthServer records every authorize body. With coversRule set it
-// answers like a service applying the covers rule to accountId: a question
-// that names no accountId and does not declare it pending is denied.
-type pendingAuthServer struct {
-	*httptest.Server
-
-	coversRule bool
-
-	mu    sync.Mutex
-	calls []pendingCall
-}
-
-func newPendingAuthServer(t *testing.T, coversRule bool) *pendingAuthServer {
-	t.Helper()
-
-	srv := &pendingAuthServer{coversRule: coversRule}
-
-	srv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("mock authz server: failed to read body: %v", err)
-		}
-
-		var body struct {
-			Attributes map[string]string `json:"attributes"`
-			Pending    json.RawMessage   `json:"pending"`
-		}
-		if err := json.Unmarshal(raw, &body); err != nil {
-			t.Errorf("mock authz server: failed to decode body: %v", err)
-		}
-
-		call := pendingCall{attributes: body.Attributes, sent: body.Pending != nil}
-		if call.sent {
-			if err := json.Unmarshal(body.Pending, &call.pending); err != nil {
-				t.Errorf("mock authz server: pending is not a list of names: %s", body.Pending)
-			}
-		}
-
-		srv.mu.Lock()
-		srv.calls = append(srv.calls, call)
-		srv.mu.Unlock()
-
-		authorized := true
-
-		if srv.coversRule && len(body.Attributes) > 0 {
-			if _, named := body.Attributes["accountId"]; !named && !contains(call.pending, "accountId") {
-				authorized = false
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-
-		if err := json.NewEncoder(w).Encode(AuthResponse{Authorized: authorized}); err != nil {
-			t.Errorf("mock authz server: failed to encode response: %v", err)
-		}
-	}))
-
-	t.Cleanup(srv.Close)
-
-	return srv
-}
-
-func (srv *pendingAuthServer) recorded() []pendingCall {
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-
-	return append([]pendingCall(nil), srv.calls...)
-}
 
 func contains(list []string, want string) bool {
 	for _, v := range list {

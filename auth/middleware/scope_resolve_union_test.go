@@ -24,41 +24,33 @@ const (
 func portfolioClient(t *testing.T, url string, resolver *fakeResolver, method, path string, dims ...Dimension) *AuthClient {
 	t.Helper()
 
-	auth := &AuthClient{Address: url, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
-	require.NoError(t, auth.RegisterScopeResolver("portfolio", resolver.resolve))
-	require.NoError(t, auth.SetManifestScope("midaz", append(resolveCatalog(),
-		Dim("portfolioId", FromQuery).At("portfolio_id"))...))
-	require.NoError(t, auth.SetManifestRouteScope("midaz", method, path, dims...))
-
-	return auth
+	return bodyScopedClientWith(t, scopedClientSetup{
+		url:       url,
+		catalog:   append(resolveCatalog(), Dim("portfolioId", FromQuery).At("portfolio_id")),
+		resolvers: map[string]ScopeResolver{"portfolio": resolver.resolve},
+	}, method, path, dims...)
 }
 
 // newScopedAuthServer is an authorization service holding one partner scoped
 // on the given dimensions: a question is allowed when it names, for every one
 // of them, one of its allowed values. A question missing a dimension the
 // partner is scoped on is refused, unless it declares the dimension pending.
-func newScopedAuthServer(t *testing.T, scope map[string][]string) *decidingAuthServer {
+func newScopedAuthServer(t *testing.T, scope map[string][]string) *fakeAuthServer {
 	t.Helper()
 
-	srv := newDecidingAuthServer(t)
-
-	srv.mu.Lock()
-	srv.allowPending = func(attributes map[string]string, pending []string) bool {
+	return newFakeAuthServer(t, func(call authorizeCall) any {
 		for name, allowed := range scope {
-			value, named := attributes[name]
+			value, named := call.body.Attributes[name]
 
 			switch {
-			case !named && containsValue(pending, name):
+			case !named && containsValue(call.pending, name):
 			case !named || !containsValue(allowed, value):
-				return false
+				return AuthResponse{Authorized: false}
 			}
 		}
 
-		return true
-	}
-	srv.mu.Unlock()
-
-	return srv
+		return AuthResponse{Authorized: true}
+	})
 }
 
 // namesAttribute reports whether some call carried the attribute.
