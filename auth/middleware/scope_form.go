@@ -5,7 +5,7 @@ import (
 	"mime"
 	"net/url"
 
-	"github.com/gofiber/fiber"
+	"github.com/gofiber/fiber/v3"
 )
 
 // FromForm reads a field of an application/x-www-form-urlencoded request body.
