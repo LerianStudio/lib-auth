@@ -1,0 +1,1459 @@
+[
+  {
+    "name": "midaz ledger manifest",
+    "product": "midaz",
+    "manifestFile": "scope_catalog/midaz_ledger.yaml",
+    "stored": [
+      {
+        "resource": "ledgers",
+        "action": "update",
+        "level": "tenant"
+      }
+    ],
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "path",
+          "param": "organization_id",
+          "required": true,
+          "multi": false,
+          "collection": "organizations",
+          "label": "Midaz organization"
+        },
+        {
+          "name": "ledgerId",
+          "from": "path",
+          "param": "ledger_id",
+          "required": false,
+          "multi": true,
+          "collection": "ledgers",
+          "covers": [
+            "holders",
+            "instruments",
+            "protection"
+          ],
+          "label": "ledger",
+          "parent": "organizationId"
+        },
+        {
+          "name": "accountTypeId",
+          "from": "path",
+          "param": "account_type_id",
+          "required": false,
+          "multi": true,
+          "collection": "account-types",
+          "label": "account type",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "accountId",
+          "from": "path",
+          "param": "account_id",
+          "required": false,
+          "multi": true,
+          "collection": "accounts",
+          "covers": [
+            "balances",
+            "transactions",
+            "operations",
+            "fee-debts",
+            "dashboard",
+            "account-block-exceptions",
+            "instruments",
+            "holders"
+          ],
+          "label": "account",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "accountAlias",
+          "from": "path",
+          "param": "alias",
+          "required": false,
+          "multi": true,
+          "collection": "accounts",
+          "covers": [
+            "balances",
+            "transactions",
+            "operations",
+            "fee-debts",
+            "dashboard",
+            "account-block-exceptions",
+            "instruments",
+            "holders"
+          ],
+          "label": "account alias",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "assetId",
+          "from": "path",
+          "param": "asset_id",
+          "required": false,
+          "multi": true,
+          "collection": "assets",
+          "label": "asset",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "portfolioId",
+          "from": "path",
+          "param": "portfolio_id",
+          "required": false,
+          "multi": true,
+          "collection": "portfolios",
+          "covers": [
+            "accounts",
+            "balances",
+            "transactions",
+            "operations",
+            "fee-debts",
+            "dashboard",
+            "account-block-exceptions",
+            "instruments",
+            "holders"
+          ],
+          "label": "portfolio",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "segmentId",
+          "from": "path",
+          "param": "segment_id",
+          "required": false,
+          "multi": true,
+          "collection": "segments",
+          "covers": [
+            "accounts",
+            "balances",
+            "transactions",
+            "operations",
+            "fee-debts",
+            "dashboard",
+            "account-block-exceptions",
+            "instruments",
+            "holders"
+          ],
+          "label": "segment",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "balanceId",
+          "from": "path",
+          "param": "balance_id",
+          "required": false,
+          "multi": true,
+          "collection": "balances",
+          "label": "balance",
+          "parent": "accountId"
+        },
+        {
+          "name": "transactionId",
+          "from": "path",
+          "param": "transaction_id",
+          "required": false,
+          "multi": true,
+          "collection": "transactions",
+          "label": "transaction",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "operationId",
+          "from": "path",
+          "param": "operation_id",
+          "required": false,
+          "multi": true,
+          "collection": "operations",
+          "label": "operation",
+          "parent": "accountId"
+        },
+        {
+          "name": "operationRouteId",
+          "from": "path",
+          "param": "operation_route_id",
+          "required": false,
+          "multi": true,
+          "collection": "operation-routes",
+          "label": "operation route",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "transactionRouteId",
+          "from": "path",
+          "param": "transaction_route_id",
+          "required": false,
+          "multi": true,
+          "collection": "transaction-routes",
+          "label": "transaction route",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "holderId",
+          "from": "path",
+          "param": "holder_id",
+          "required": false,
+          "multi": true,
+          "collection": "holders",
+          "covers": [
+            "accounts",
+            "balances",
+            "transactions",
+            "operations",
+            "fee-debts",
+            "dashboard",
+            "account-block-exceptions",
+            "instruments"
+          ],
+          "label": "holder",
+          "parent": "organizationId"
+        },
+        {
+          "name": "instrumentId",
+          "from": "path",
+          "param": "instrument_id",
+          "required": false,
+          "multi": true,
+          "collection": "instruments",
+          "label": "instrument",
+          "parent": "holderId"
+        },
+        {
+          "name": "relatedPartyId",
+          "from": "path",
+          "param": "related_party_id",
+          "required": false,
+          "multi": true,
+          "collection": "related-parties",
+          "label": "related party",
+          "parent": "instrumentId"
+        },
+        {
+          "name": "billingPackageId",
+          "from": "path",
+          "param": "billing_package_id",
+          "required": false,
+          "multi": true,
+          "collection": "billing-packages",
+          "label": "billing package",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "packageId",
+          "from": "path",
+          "param": "package_id",
+          "required": false,
+          "multi": true,
+          "collection": "packages",
+          "label": "fee package",
+          "parent": "ledgerId"
+        },
+        {
+          "name": "feeDebtId",
+          "from": "path",
+          "param": "fee_debt_id",
+          "required": false,
+          "multi": true,
+          "collection": "fee-debts",
+          "label": "fee debt",
+          "parent": "ledgerId"
+        }
+      ],
+      "partners": true,
+      "levels": [
+        {
+          "resource": "account-types",
+          "action": "post",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "account-types",
+          "action": "patch",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "account-types",
+          "action": "get",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "account-types",
+          "action": "delete",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "account-block-exceptions",
+          "action": "post",
+          "level": "accountId"
+        },
+        {
+          "resource": "accounts",
+          "action": "post",
+          "level": "accountId"
+        },
+        {
+          "resource": "accounts",
+          "action": "patch",
+          "level": "accountId"
+        },
+        {
+          "resource": "accounts",
+          "action": "get",
+          "level": "accountId"
+        },
+        {
+          "resource": "accounts",
+          "action": "delete",
+          "level": "accountId"
+        },
+        {
+          "resource": "accounts",
+          "action": "head",
+          "level": "accountId"
+        },
+        {
+          "resource": "asset-rates",
+          "action": "put",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "asset-rates",
+          "action": "get",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "assets",
+          "action": "post",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "assets",
+          "action": "patch",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "assets",
+          "action": "get",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "assets",
+          "action": "delete",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "assets",
+          "action": "head",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "balances",
+          "action": "get",
+          "level": "accountId"
+        },
+        {
+          "resource": "balances",
+          "action": "patch",
+          "level": "accountId"
+        },
+        {
+          "resource": "balances",
+          "action": "delete",
+          "level": "accountId"
+        },
+        {
+          "resource": "balances",
+          "action": "post",
+          "level": "accountId"
+        },
+        {
+          "resource": "billing-calculate",
+          "action": "post",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "billing-packages",
+          "action": "post",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "billing-packages",
+          "action": "get",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "billing-packages",
+          "action": "patch",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "billing-packages",
+          "action": "delete",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "dashboard",
+          "action": "get",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "encryption",
+          "action": "post",
+          "level": "organizationId"
+        },
+        {
+          "resource": "encryption",
+          "action": "get",
+          "level": "organizationId"
+        },
+        {
+          "resource": "estimates",
+          "action": "post",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "fee-debts",
+          "action": "get",
+          "level": "accountId"
+        },
+        {
+          "resource": "fee-debts",
+          "action": "post",
+          "level": "accountId"
+        },
+        {
+          "resource": "holders",
+          "action": "post",
+          "level": "organizationId"
+        },
+        {
+          "resource": "holders",
+          "action": "get",
+          "level": "organizationId"
+        },
+        {
+          "resource": "holders",
+          "action": "patch",
+          "level": "organizationId"
+        },
+        {
+          "resource": "holders",
+          "action": "delete",
+          "level": "organizationId"
+        },
+        {
+          "resource": "instruments",
+          "action": "get",
+          "level": "accountId"
+        },
+        {
+          "resource": "instruments",
+          "action": "post",
+          "level": "accountId"
+        },
+        {
+          "resource": "instruments",
+          "action": "patch",
+          "level": "accountId"
+        },
+        {
+          "resource": "instruments",
+          "action": "delete",
+          "level": "accountId"
+        },
+        {
+          "resource": "ledgers",
+          "action": "post",
+          "level": "organizationId"
+        },
+        {
+          "resource": "ledgers",
+          "action": "patch",
+          "level": "organizationId"
+        },
+        {
+          "resource": "ledgers",
+          "action": "get",
+          "level": "organizationId"
+        },
+        {
+          "resource": "ledgers",
+          "action": "delete",
+          "level": "organizationId"
+        },
+        {
+          "resource": "ledgers",
+          "action": "head",
+          "level": "organizationId"
+        },
+        {
+          "resource": "operation-routes",
+          "action": "post",
+          "level": "organizationId"
+        },
+        {
+          "resource": "operation-routes",
+          "action": "patch",
+          "level": "organizationId"
+        },
+        {
+          "resource": "operation-routes",
+          "action": "get",
+          "level": "organizationId"
+        },
+        {
+          "resource": "operation-routes",
+          "action": "delete",
+          "level": "organizationId"
+        },
+        {
+          "resource": "operations",
+          "action": "get",
+          "level": "accountId"
+        },
+        {
+          "resource": "operations",
+          "action": "patch",
+          "level": "accountId"
+        },
+        {
+          "resource": "organizations",
+          "action": "post",
+          "level": "tenant"
+        },
+        {
+          "resource": "organizations",
+          "action": "patch",
+          "level": "tenant"
+        },
+        {
+          "resource": "organizations",
+          "action": "get",
+          "level": "tenant"
+        },
+        {
+          "resource": "organizations",
+          "action": "delete",
+          "level": "tenant"
+        },
+        {
+          "resource": "organizations",
+          "action": "head",
+          "level": "tenant"
+        },
+        {
+          "resource": "packages",
+          "action": "post",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "packages",
+          "action": "get",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "packages",
+          "action": "patch",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "packages",
+          "action": "delete",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "portfolios",
+          "action": "post",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "portfolios",
+          "action": "patch",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "portfolios",
+          "action": "get",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "portfolios",
+          "action": "delete",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "portfolios",
+          "action": "head",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "protection",
+          "action": "get",
+          "level": "organizationId"
+        },
+        {
+          "resource": "segments",
+          "action": "post",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "segments",
+          "action": "patch",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "segments",
+          "action": "get",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "segments",
+          "action": "delete",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "segments",
+          "action": "head",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "settings",
+          "action": "post",
+          "level": "tenant"
+        },
+        {
+          "resource": "settings",
+          "action": "get",
+          "level": "tenant"
+        },
+        {
+          "resource": "settings",
+          "action": "delete",
+          "level": "tenant"
+        },
+        {
+          "resource": "streaming-manifest",
+          "action": "get",
+          "level": "tenant"
+        },
+        {
+          "resource": "transaction-routes",
+          "action": "post",
+          "level": "organizationId"
+        },
+        {
+          "resource": "transaction-routes",
+          "action": "patch",
+          "level": "organizationId"
+        },
+        {
+          "resource": "transaction-routes",
+          "action": "get",
+          "level": "organizationId"
+        },
+        {
+          "resource": "transaction-routes",
+          "action": "delete",
+          "level": "organizationId"
+        },
+        {
+          "resource": "transactions",
+          "action": "post",
+          "level": "accountId"
+        },
+        {
+          "resource": "transactions",
+          "action": "patch",
+          "level": "accountId"
+        },
+        {
+          "resource": "transactions",
+          "action": "get",
+          "level": "accountId"
+        },
+        {
+          "resource": "transactions",
+          "action": "head",
+          "level": "accountId"
+        },
+        {
+          "resource": "account-types",
+          "action": "head",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "asset-rates",
+          "action": "delete",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "asset-rates",
+          "action": "head",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "asset-rates",
+          "action": "patch",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "asset-rates",
+          "action": "post",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "balances",
+          "action": "head",
+          "level": "accountId"
+        },
+        {
+          "resource": "encryption",
+          "action": "delete",
+          "level": "organizationId"
+        },
+        {
+          "resource": "encryption",
+          "action": "head",
+          "level": "organizationId"
+        },
+        {
+          "resource": "encryption",
+          "action": "patch",
+          "level": "organizationId"
+        },
+        {
+          "resource": "holders",
+          "action": "head",
+          "level": "organizationId"
+        },
+        {
+          "resource": "instruments",
+          "action": "head",
+          "level": "accountId"
+        },
+        {
+          "resource": "operation-routes",
+          "action": "head",
+          "level": "organizationId"
+        },
+        {
+          "resource": "operations",
+          "action": "delete",
+          "level": "accountId"
+        },
+        {
+          "resource": "operations",
+          "action": "head",
+          "level": "accountId"
+        },
+        {
+          "resource": "operations",
+          "action": "post",
+          "level": "accountId"
+        },
+        {
+          "resource": "settings",
+          "action": "head",
+          "level": "tenant"
+        },
+        {
+          "resource": "settings",
+          "action": "patch",
+          "level": "tenant"
+        },
+        {
+          "resource": "transaction-routes",
+          "action": "head",
+          "level": "organizationId"
+        },
+        {
+          "resource": "transactions",
+          "action": "delete",
+          "level": "accountId"
+        }
+      ]
+    }
+  },
+  {
+    "name": "midaz tracer manifest",
+    "product": "tracer",
+    "manifestFile": "scope_catalog/midaz_tracer.yaml",
+    "stored": [
+      {
+        "resource": "ledgers",
+        "action": "update",
+        "level": "tenant"
+      }
+    ],
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "tracer",
+      "dimensions": [
+        {
+          "name": "ruleId",
+          "from": "path",
+          "param": "rule_id",
+          "required": false,
+          "multi": true,
+          "collection": "rules",
+          "covers": [
+            "limits"
+          ],
+          "label": "rule"
+        },
+        {
+          "name": "limitId",
+          "from": "path",
+          "param": "limit_id",
+          "required": false,
+          "multi": true,
+          "collection": "limits",
+          "covers": [
+            "rules"
+          ],
+          "label": "limit"
+        },
+        {
+          "name": "validationId",
+          "from": "path",
+          "param": "validation_id",
+          "required": false,
+          "multi": true,
+          "collection": "validations",
+          "label": "transaction validation"
+        },
+        {
+          "name": "auditEventId",
+          "from": "path",
+          "param": "audit_event_id",
+          "required": false,
+          "multi": true,
+          "collection": "audit-events",
+          "label": "audit event"
+        },
+        {
+          "name": "portfolioId",
+          "from": "path",
+          "param": "portfolio_id",
+          "required": false,
+          "multi": true,
+          "collection": "portfolios",
+          "covers": [
+            "validations",
+            "audit-events",
+            "rules",
+            "limits"
+          ],
+          "label": "portfolio"
+        },
+        {
+          "name": "segmentId",
+          "from": "path",
+          "param": "segment_id",
+          "required": false,
+          "multi": true,
+          "collection": "segments",
+          "covers": [
+            "validations",
+            "audit-events",
+            "rules",
+            "limits"
+          ],
+          "label": "segment"
+        },
+        {
+          "name": "merchantId",
+          "from": "path",
+          "param": "merchant_id",
+          "required": false,
+          "multi": true,
+          "collection": "merchants",
+          "covers": [
+            "validations",
+            "audit-events",
+            "rules",
+            "limits"
+          ],
+          "label": "merchant"
+        },
+        {
+          "name": "accountId",
+          "from": "path",
+          "param": "account_id",
+          "required": false,
+          "multi": true,
+          "collection": "accounts",
+          "covers": [
+            "validations",
+            "audit-events",
+            "rules",
+            "limits"
+          ],
+          "label": "account"
+        }
+      ],
+      "partners": true,
+      "levels": [
+        {
+          "resource": "rules",
+          "action": "post",
+          "level": "tenant"
+        },
+        {
+          "resource": "rules",
+          "action": "get",
+          "level": "tenant"
+        },
+        {
+          "resource": "rules",
+          "action": "patch",
+          "level": "tenant"
+        },
+        {
+          "resource": "rules",
+          "action": "delete",
+          "level": "tenant"
+        },
+        {
+          "resource": "limits",
+          "action": "post",
+          "level": "tenant"
+        },
+        {
+          "resource": "limits",
+          "action": "get",
+          "level": "tenant"
+        },
+        {
+          "resource": "limits",
+          "action": "patch",
+          "level": "tenant"
+        },
+        {
+          "resource": "limits",
+          "action": "delete",
+          "level": "tenant"
+        },
+        {
+          "resource": "validations",
+          "action": "get",
+          "level": "tenant"
+        },
+        {
+          "resource": "validations",
+          "action": "post",
+          "level": "accountId"
+        },
+        {
+          "resource": "audit-events",
+          "action": "get",
+          "level": "tenant"
+        },
+        {
+          "resource": "streaming-manifest",
+          "action": "get",
+          "level": "tenant"
+        },
+        {
+          "resource": "reservations",
+          "action": "post",
+          "level": "tenant"
+        },
+        {
+          "resource": "dashboard",
+          "action": "get",
+          "level": "tenant"
+        }
+      ]
+    }
+  },
+  {
+    "name": "no catalog section: access only",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npermissions:\n  - { resource: ledgers, action: get, effect: allow, roles: [viewer] }\nroles:\n  - { name: viewer }\n",
+    "stored": [
+      {
+        "resource": "ledgers",
+        "action": "update",
+        "level": "tenant"
+      }
+    ],
+    "declares": false,
+    "readsStored": false,
+    "catalog": null
+  },
+  {
+    "name": "no catalog section: partners false and no scope",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: false\npermissions:\n  - { resource: ledgers, action: get, effect: allow, roles: [viewer] }\nroles:\n  - { name: viewer }\n",
+    "stored": [
+      {
+        "resource": "ledgers",
+        "action": "update",
+        "level": "tenant"
+      }
+    ],
+    "declares": false,
+    "readsStored": false,
+    "catalog": null
+  },
+  {
+    "name": "scope with partners false",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: false\nscope:\n  dimensions:\n    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations, label: \"Midaz organization\" }\n    - { name: ledgerId, from: path, param: ledger_id, multi: true, collection: ledgers, label: ledger, parent: organizationId }\npermissions:\n  - { resource: ledgers, action: get, effect: allow, roles: [viewer] }\nroles:\n  - { name: viewer }\n",
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "path",
+          "param": "organization_id",
+          "required": true,
+          "multi": false,
+          "collection": "organizations",
+          "label": "Midaz organization"
+        },
+        {
+          "name": "ledgerId",
+          "from": "path",
+          "param": "ledger_id",
+          "required": false,
+          "multi": true,
+          "collection": "ledgers",
+          "label": "ledger",
+          "parent": "organizationId"
+        }
+      ],
+      "partners": false
+    }
+  },
+  {
+    "name": "partners only, no catalog stored",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: true\n",
+    "declares": true,
+    "readsStored": true,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [],
+      "partners": true
+    }
+  },
+  {
+    "name": "partners only keeps the stored levels",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: true\n",
+    "stored": [
+      {
+        "resource": "ledgers",
+        "action": "update",
+        "level": "tenant"
+      }
+    ],
+    "declares": true,
+    "readsStored": true,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [],
+      "partners": true,
+      "levels": [
+        {
+          "resource": "ledgers",
+          "action": "update",
+          "level": "tenant"
+        }
+      ]
+    }
+  },
+  {
+    "name": "scope only keeps the stored levels",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\nscope:\n  dimensions:\n    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations, label: \"Midaz organization\" }\n    - { name: ledgerId, from: path, param: ledger_id, multi: true, collection: ledgers, label: ledger, parent: organizationId }\n",
+    "stored": [
+      {
+        "resource": "ledgers",
+        "action": "update",
+        "level": "tenant"
+      }
+    ],
+    "declares": true,
+    "readsStored": true,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "path",
+          "param": "organization_id",
+          "required": true,
+          "multi": false,
+          "collection": "organizations",
+          "label": "Midaz organization"
+        },
+        {
+          "name": "ledgerId",
+          "from": "path",
+          "param": "ledger_id",
+          "required": false,
+          "multi": true,
+          "collection": "ledgers",
+          "label": "ledger",
+          "parent": "organizationId"
+        }
+      ],
+      "partners": false,
+      "levels": [
+        {
+          "resource": "ledgers",
+          "action": "update",
+          "level": "tenant"
+        }
+      ]
+    }
+  },
+  {
+    "name": "scope only with an empty stored catalog",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\nscope:\n  dimensions:\n    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations, label: \"Midaz organization\" }\n    - { name: ledgerId, from: path, param: ledger_id, multi: true, collection: ledgers, label: ledger, parent: organizationId }\n",
+    "stored": [],
+    "declares": true,
+    "readsStored": true,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "path",
+          "param": "organization_id",
+          "required": true,
+          "multi": false,
+          "collection": "organizations",
+          "label": "Midaz organization"
+        },
+        {
+          "name": "ledgerId",
+          "from": "path",
+          "param": "ledger_id",
+          "required": false,
+          "multi": true,
+          "collection": "ledgers",
+          "label": "ledger",
+          "parent": "organizationId"
+        }
+      ],
+      "partners": false
+    }
+  },
+  {
+    "name": "scope only, no catalog stored",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\nscope:\n  dimensions:\n    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations, label: \"Midaz organization\" }\n    - { name: ledgerId, from: path, param: ledger_id, multi: true, collection: ledgers, label: ledger, parent: organizationId }\n",
+    "declares": true,
+    "readsStored": true,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "path",
+          "param": "organization_id",
+          "required": true,
+          "multi": false,
+          "collection": "organizations",
+          "label": "Midaz organization"
+        },
+        {
+          "name": "ledgerId",
+          "from": "path",
+          "param": "ledger_id",
+          "required": false,
+          "multi": true,
+          "collection": "ledgers",
+          "label": "ledger",
+          "parent": "organizationId"
+        }
+      ],
+      "partners": false
+    }
+  },
+  {
+    "name": "access section derives the levels, trimmed",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations, label: \"Midaz organization\" }\n    - { name: ledgerId, from: path, param: ledger_id, multi: true, collection: ledgers, label: ledger, parent: organizationId }\npermissions:\n  - { resource: ledgers, action: get, effect: allow, roles: [editor] }\n  - { resource: \" ledgers \", action: \" update \", effect: allow, roles: [editor], level: organizationId }\n  - { resource: accounts, action: post, effect: allow, roles: [editor], level: ledgerId }\n  - { resource: organizations, action: post, effect: allow, roles: [editor], level: tenant }\nroles:\n  - { name: editor }\n",
+    "stored": [
+      {
+        "resource": "ledgers",
+        "action": "update",
+        "level": "tenant"
+      }
+    ],
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "path",
+          "param": "organization_id",
+          "required": true,
+          "multi": false,
+          "collection": "organizations",
+          "label": "Midaz organization"
+        },
+        {
+          "name": "ledgerId",
+          "from": "path",
+          "param": "ledger_id",
+          "required": false,
+          "multi": true,
+          "collection": "ledgers",
+          "label": "ledger",
+          "parent": "organizationId"
+        }
+      ],
+      "partners": true,
+      "levels": [
+        {
+          "resource": "ledgers",
+          "action": "update",
+          "level": "organizationId"
+        },
+        {
+          "resource": "accounts",
+          "action": "post",
+          "level": "ledgerId"
+        },
+        {
+          "resource": "organizations",
+          "action": "post",
+          "level": "tenant"
+        }
+      ]
+    }
+  },
+  {
+    "name": "access section with no level clears the stored ones",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations, label: \"Midaz organization\" }\n    - { name: ledgerId, from: path, param: ledger_id, multi: true, collection: ledgers, label: ledger, parent: organizationId }\npermissions:\n  - { resource: ledgers, action: get, effect: allow, roles: [viewer] }\nroles:\n  - { name: viewer }\n",
+    "stored": [
+      {
+        "resource": "ledgers",
+        "action": "update",
+        "level": "tenant"
+      }
+    ],
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "path",
+          "param": "organization_id",
+          "required": true,
+          "multi": false,
+          "collection": "organizations",
+          "label": "Midaz organization"
+        },
+        {
+          "name": "ledgerId",
+          "from": "path",
+          "param": "ledger_id",
+          "required": false,
+          "multi": true,
+          "collection": "ledgers",
+          "label": "ledger",
+          "parent": "organizationId"
+        }
+      ],
+      "partners": true
+    }
+  },
+  {
+    "name": "roles only is an access section",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations, label: \"Midaz organization\" }\n    - { name: ledgerId, from: path, param: ledger_id, multi: true, collection: ledgers, label: ledger, parent: organizationId }\nroles:\n  - { name: viewer }\n",
+    "stored": [
+      {
+        "resource": "ledgers",
+        "action": "update",
+        "level": "tenant"
+      }
+    ],
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "path",
+          "param": "organization_id",
+          "required": true,
+          "multi": false,
+          "collection": "organizations",
+          "label": "Midaz organization"
+        },
+        {
+          "name": "ledgerId",
+          "from": "path",
+          "param": "ledger_id",
+          "required": false,
+          "multi": true,
+          "collection": "ledgers",
+          "label": "ledger",
+          "parent": "organizationId"
+        }
+      ],
+      "partners": true
+    }
+  },
+  {
+    "name": "m2m only is an access section",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations, label: \"Midaz organization\" }\n    - { name: ledgerId, from: path, param: ledger_id, multi: true, collection: ledgers, label: ledger, parent: organizationId }\nm2m: { exposed: true }\n",
+    "stored": [
+      {
+        "resource": "ledgers",
+        "action": "update",
+        "level": "tenant"
+      }
+    ],
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "path",
+          "param": "organization_id",
+          "required": true,
+          "multi": false,
+          "collection": "organizations",
+          "label": "Midaz organization"
+        },
+        {
+          "name": "ledgerId",
+          "from": "path",
+          "param": "ledger_id",
+          "required": false,
+          "multi": true,
+          "collection": "ledgers",
+          "label": "ledger",
+          "parent": "organizationId"
+        }
+      ],
+      "partners": true
+    }
+  },
+  {
+    "name": "empty dimension list",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\nscope:\n  dimensions: []\npermissions:\n  - { resource: ledgers, action: get, effect: allow, roles: [viewer] }\nroles:\n  - { name: viewer }\n",
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [],
+      "partners": false
+    }
+  },
+  {
+    "name": "empty scope object",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\nscope: {}\npermissions:\n  - { resource: ledgers, action: get, effect: allow, roles: [viewer] }\nroles:\n  - { name: viewer }\n",
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [],
+      "partners": false
+    }
+  },
+  {
+    "name": "dimension values are trimmed, parent and level are not",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\nscope:\n  dimensions:\n    - { name: organizationId, from: path, param: organization_id, collection: \" organizations \", label: \" org \" }\n    - { name: accountId, from: query, param: account_id, collection: accounts, covers: [\" balances \", operations], parent: organizationId }\npermissions:\n  - { resource: accounts, action: post, effect: allow, roles: [editor], level: accountId }\nroles:\n  - { name: editor }\n",
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "path",
+          "param": "organization_id",
+          "required": false,
+          "multi": false,
+          "collection": "organizations",
+          "label": "org"
+        },
+        {
+          "name": "accountId",
+          "from": "query",
+          "param": "account_id",
+          "required": false,
+          "multi": false,
+          "collection": "accounts",
+          "covers": [
+            "balances",
+            "operations"
+          ],
+          "label": "",
+          "parent": "organizationId"
+        }
+      ],
+      "partners": false,
+      "levels": [
+        {
+          "resource": "accounts",
+          "action": "post",
+          "level": "accountId"
+        }
+      ]
+    }
+  },
+  {
+    "name": "scope routes are not part of the catalog",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: organizationId, from: header, param: X-Organization-Id, collection: organizations }\n  routes:\n    - method: POST\n      path: /v1/things\n      dimensions:\n        - { name: organizationId, from: body, field: organization_id }\npermissions:\n  - { resource: ledgers, action: get, effect: allow, roles: [viewer] }\nroles:\n  - { name: viewer }\n",
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "organizationId",
+          "from": "header",
+          "param": "X-Organization-Id",
+          "required": false,
+          "multi": false,
+          "collection": "organizations",
+          "label": ""
+        }
+      ],
+      "partners": true
+    }
+  },
+  {
+    "name": "product comes from the caller, not the service",
+    "product": "fees",
+    "manifest": "service: plugin-fees\nversion: 1\npartners: true\npermissions:\n  - { resource: ledgers, action: get, effect: allow, roles: [viewer] }\nroles:\n  - { name: viewer }\n",
+    "declares": true,
+    "readsStored": false,
+    "catalog": {
+      "product": "fees",
+      "dimensions": [],
+      "partners": true
+    }
+  }
+]
