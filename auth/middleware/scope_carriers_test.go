@@ -263,6 +263,48 @@ func TestAuthorize_Query_KeyCaseVariantIsRefused(t *testing.T) {
 	}
 }
 
+// A malformed carrier is the caller's to fix and is refused with 400 even when
+// another required dimension is also absent, whichever of the two the route
+// declares first: the missing dimension would otherwise hide the field the
+// caller has to correct behind a bare 403.
+func TestAuthorize_Query_MalformedKeyIsReportedBeforeMissingDimension(t *testing.T) {
+	t.Parallel()
+
+	malformed := Dim("organizationId", FromQuery).At("organizationId")
+	missing := Dim("ledgerId", FromQuery).At("ledgerId")
+
+	for name, tc := range map[string]struct {
+		query string
+		want  string
+	}{
+		"case_variant": {"ORGANIZATIONID=org-1", `query parameter "organizationId" must be named exactly "organizationId"`},
+		"empty_value":  {"organizationId=", `query parameter "organizationId" must not name an empty value`},
+	} {
+		for order, dims := range map[string][]Dimension{
+			"malformed_first": {malformed, missing},
+			"missing_first":   {missing, malformed},
+		} {
+			t.Run(name+"/"+order, func(t *testing.T) {
+				t.Parallel()
+
+				srv := newDecidingAuthServer(t)
+				auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath, dims...)
+
+				probe := &handlerProbe{}
+				app := fiber.New()
+				app.Post(directPath, auth.Authorize("midaz", "transactions", "post"), probe.handle)
+
+				got := doCarrier(t, app, carrierRequest{target: directPath + "?" + tc.query, token: partnerToken("acme/p1")})
+
+				assert.Equal(t, http.StatusBadRequest, got.status)
+				assert.Contains(t, got.body, tc.want)
+				assert.Equal(t, int64(0), srv.hits.Load())
+				assert.Equal(t, int64(0), probe.calls.Load())
+			})
+		}
+	}
+}
+
 // A caller that is not partner-bound has no scope read, so a key in another
 // letter case changes nothing for it.
 func TestAuthorize_Query_KeyCaseVariantIgnoredForNonPartner(t *testing.T) {

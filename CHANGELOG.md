@@ -1,3 +1,10 @@
+## [5.4.2-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.4.1...v5.4.2-beta.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **middleware:** report a malformed scope key before a missing dimension ([ecd9d6a](https://github.com/LerianStudio/lib-auth/commit/ecd9d6a366fb9af3b0c8983fb7f0388b7c9a05eb))
+
 ## [5.4.1](https://github.com/LerianStudio/lib-auth/compare/v5.4.0...v5.4.1) (2026-10-06)
 
 
