@@ -1,3 +1,10 @@
+## [5.4.1](https://github.com/LerianStudio/lib-auth/compare/v5.4.0...v5.4.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **middleware:** require the exact query key for a scope dimension ([049ae1a](https://github.com/LerianStudio/lib-auth/commit/049ae1a7202fab3e77f58c29d21c306581b748c9))
+
 ## [5.4.1-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.4.0...v5.4.1-beta.1) (2026-10-06)
 
 
