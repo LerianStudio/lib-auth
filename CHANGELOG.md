@@ -1,3 +1,10 @@
+## [5.5.0](https://github.com/LerianStudio/lib-auth/compare/v5.4.2...v5.5.0) (2026-10-06)
+
+
+### Features
+
+* **declaration:** derive the scope catalog from a manifest ([fbeba54](https://github.com/LerianStudio/lib-auth/commit/fbeba546a9fde70e84ad728c4e3cf0e00f2334cb))
+
 ## [5.5.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.4.2...v5.5.0-beta.1) (2026-10-06)
 
 
