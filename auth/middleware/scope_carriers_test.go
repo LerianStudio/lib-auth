@@ -193,21 +193,17 @@ func TestAuthorize_Query_Absent(t *testing.T) {
 	assert.Equal(t, []map[string]string{{"organizationId": "org-1"}}, srv.attributeCalls())
 }
 
-// Query keys are read without regard to letter case, as the handler's query
-// binding reads them: the key a handler may bind is a key the scope checks.
-func TestAuthorize_Query_KeyIsCaseInsensitive(t *testing.T) {
+// Only the declared query key, in its declared letter case, carries the
+// dimension: the key the scope checks is the one key every handler binds.
+func TestAuthorize_Query_KeyIsExact(t *testing.T) {
 	t.Parallel()
 
 	for name, tc := range map[string]struct {
 		query string
 		want  []map[string]string
 	}{
-		"other_case_alone": {"ORGANIZATIONID=org-1", []map[string]string{{"organizationId": "org-1"}}},
-		"same_value_twice": {"organizationId=org-1&ORGANIZATIONID=org-1", []map[string]string{{"organizationId": "org-1"}}},
-		"two_values": {"organizationId=org-1&ORGANIZATIONID=org-2", []map[string]string{
-			{"organizationId": "org-1"},
-			{"organizationId": "org-2"},
-		}},
+		"exact":         {"organizationId=org-1", []map[string]string{{"organizationId": "org-1"}}},
+		"unrelated_key": {"organizationId=org-1&organization=org-2", []map[string]string{{"organizationId": "org-1"}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -227,33 +223,63 @@ func TestAuthorize_Query_KeyIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// A value under another spelling of the key outside the scope refuses the
-// request, and a spelling that disagrees with another carrier is a divergence.
-func TestAuthorize_Query_KeyCaseVariantIsChecked(t *testing.T) {
+// A query key equal to the declared one only without regard to letter case is
+// refused before any call, naming the key the dimension must be sent under,
+// whether the dimension is required or optional and whether or not the exact
+// key is sent alongside it.
+func TestAuthorize_Query_KeyCaseVariantIsRefused(t *testing.T) {
 	t.Parallel()
 
-	srv := newDecidingAuthServer(t, "org-2")
+	for name, query := range map[string]string{
+		"variant_alone":       "ORGANIZATIONID=org-1",
+		"other_variant_alone": "OrganizationID=org-1",
+		"exact_then_variant":  "organizationId=org-1&ORGANIZATIONID=org-1",
+		"variant_then_exact":  "ORGANIZATIONID=org-2&organizationId=org-1",
+	} {
+		for _, optional := range []bool{false, true} {
+			t.Run(name+"/optional="+strconv.FormatBool(optional), func(t *testing.T) {
+				t.Parallel()
+
+				dim := Dim("organizationId", FromQuery).At("organizationId")
+				if optional {
+					dim = dim.Optional()
+				}
+
+				srv := newDecidingAuthServer(t)
+				auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath, dim)
+
+				probe := &handlerProbe{}
+				app := fiber.New()
+				app.Post(directPath, auth.Authorize("midaz", "transactions", "post"), probe.handle)
+
+				got := doCarrier(t, app, carrierRequest{target: directPath + "?" + query, token: partnerToken("acme/p1")})
+
+				assert.Equal(t, http.StatusBadRequest, got.status)
+				assert.Contains(t, got.body, `query parameter "organizationId" must be named exactly "organizationId"`)
+				assert.Equal(t, int64(0), srv.hits.Load())
+				assert.Equal(t, int64(0), probe.calls.Load())
+			})
+		}
+	}
+}
+
+// A caller that is not partner-bound has no scope read, so a key in another
+// letter case changes nothing for it.
+func TestAuthorize_Query_KeyCaseVariantIgnoredForNonPartner(t *testing.T) {
+	t.Parallel()
+
+	srv := newDecidingAuthServer(t)
 	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath,
 		Dim("organizationId", FromQuery).At("organizationId"))
 
-	probe := &handlerProbe{}
 	app := fiber.New()
-	app.Post(directPath, auth.Authorize("midaz", "transactions", "post"), probe.handle)
+	app.Post(directPath, auth.Authorize("midaz", "transactions", "post"), ok)
 
-	got := doCarrier(t, app, carrierRequest{target: directPath + "?organizationId=org-1&ORGANIZATIONID=org-2", token: partnerToken("acme/p1")})
-	assert.Equal(t, http.StatusForbidden, got.status)
-	assert.Equal(t, int64(0), probe.calls.Load())
+	got := doCarrier(t, app, carrierRequest{target: directPath + "?ORGANIZATIONID=org-1", token: userToken()})
 
-	srv = newDecidingAuthServer(t)
-	auth = queryLedgerClient(t, srv, Dim("organizationId", FromQuery).At("organizationId").Optional())
-	app = fiber.New()
-	app.Post(ledgersRoute, auth.Authorize("midaz", "ledgers", "post"), probe.handle)
-
-	got = doCarrier(t, app, carrierRequest{target: "/v1/organizations/org-1/ledgers?ORGANIZATIONID=org-2", token: partnerToken("acme/p1")})
-	assert.Equal(t, http.StatusBadRequest, got.status)
-	assert.Contains(t, got.body, `query parameter "organizationId"`)
-	assert.Equal(t, int64(0), srv.hits.Load())
-	assert.Equal(t, int64(0), probe.calls.Load())
+	assert.Equal(t, http.StatusOK, got.status)
+	assert.Equal(t, int64(1), srv.hits.Load())
+	assert.Equal(t, []map[string]string{nil}, srv.attributeCalls())
 }
 
 // Header names are case-insensitive, both as declared and as sent.

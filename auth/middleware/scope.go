@@ -35,9 +35,10 @@ const (
 	// letter case. A header repeated, or a value listing several separated by
 	// ',', names every one of them, each its own question.
 	FromHeader
-	// FromQuery reads a query-string parameter. A parameter repeated, or a value
-	// listing several separated by ',', names every one of them, each its own
-	// question.
+	// FromQuery reads a query-string parameter under its exact key. A parameter
+	// repeated, or a value listing several separated by ',', names every one of
+	// them, each its own question. A key differing from the declared one only in
+	// letter case is refused.
 	FromQuery
 )
 
@@ -120,11 +121,16 @@ func (d Dimension) read(c fiber.Ctx) (values []string, present bool, problem str
 	case FromQuery:
 		var raw []string
 
-		// Compared without regard to letter case, as the handler's query binding
-		// matches keys: the key the handler may bind is the key checked.
+		// Only the exact key carries the dimension. A key differing from it only
+		// in letter case is refused rather than ignored or read: whether a handler
+		// binds it depends on the handler, and the scope must check the key the
+		// handler acts on.
 		for k, v := range c.Request().URI().QueryArgs().All() {
-			if strings.EqualFold(string(k), d.key) {
+			switch key := string(k); {
+			case key == d.key:
 				raw = append(raw, string(v))
+			case strings.EqualFold(key, d.key):
+				return nil, true, "must be named exactly " + strconv.Quote(d.key) + "; a key differing only in letter case is refused"
 			}
 		}
 
@@ -189,8 +195,8 @@ func (d Dimension) location() string {
 }
 
 // carrier identifies the place in the request a dimension is read from. Header
-// names and query keys are case-insensitive, so two spellings of one are one
-// carrier.
+// names are case-insensitive, and a query key in another letter case is refused
+// by the reader, so two spellings of one are one carrier.
 func (d Dimension) carrier() string {
 	key := d.key
 	if d.source == FromHeader || d.source == FromQuery {
