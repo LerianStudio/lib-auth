@@ -341,9 +341,14 @@ func divergence(name, first, second string) *errBodyScope {
 // does not carry, which the caller denies: a declared identifier with no value
 // cannot be matched against anything, and sending it absent would silently ask
 // a narrower question than the route promised. An optional dimension the request
-// does not carry is left out.
+// does not carry is left out. A malformed carrier outranks an absent dimension,
+// whatever order the two are declared in: every dimension is read before the
+// absence is reported, and a request that is malformed is answered as such.
 func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
-	var rv requestValues
+	var (
+		rv      requestValues
+		missing string
+	)
 
 	for _, dim := range dims {
 		// A body dimension is not one value of the request but one per question
@@ -362,10 +367,16 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
 			}
 		case !present && dim.optional:
 		case !present:
-			return requestValues{}, dim.name
+			if missing == "" {
+				missing = dim.name
+			}
 		default:
 			rv.add(dim, values)
 		}
+	}
+
+	if rv.problem == nil && missing != "" {
+		return requestValues{}, missing
 	}
 
 	return rv, ""
