@@ -36,6 +36,28 @@ type Principal struct {
 	// carry none). In multi-tenant deployments the tenant-manager remains the
 	// authority on which tenant a request belongs to.
 	TenantID string
+
+	// SourceService is the token's "sourceService" claim copied VERBATIM and
+	// published ONLY for application tokens; it is empty for normal-user tokens
+	// and whenever the claim is absent or not a string. It names the service a
+	// machine credential acts on behalf of, and unlike Sub it is identical across
+	// every credential that service holds, so a multi-tenant producer served by
+	// one application per tenant keeps one SourceService where it has many Subs.
+	// The credential issuer stamps it, but this library publishes it with the same
+	// provenance as every other claim on the Principal, and that depends on the
+	// mode: when the authorization service vouches for the token, or when local
+	// signature verification is configured, a caller cannot choose its value. With
+	// PrincipalRequiredWhenDisabled and no verification keys there is no trust
+	// anchor, the claim is SELF-ASSERTED, and any caller can present any value (see
+	// the trust-boundary warning in the README). A consumer that uses it as an
+	// identity must not rely on it in that mode.
+	//
+	// The library never trims, lower-cases or validates it, and never lets it
+	// affect authorization or PrincipalFromContext's validity rules. Marker values
+	// the issuer writes for "no declared source" (for example "undeclared") are
+	// published as-is: the consumer decides whether such a value may identify
+	// anyone, and an identity decision should refuse an empty or marker value.
+	SourceService string
 }
 
 // principalContextKey is the unexported, typed key under which Authorize stores
@@ -84,9 +106,12 @@ func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 	sub, _ := claims["sub"].(string)
 	clientID, _ := claims["azp"].(string)
 	tenantID, _ := claims["tenantId"].(string)
+	sourceService, _ := claims["sourceService"].(string)
 
 	if userType == application {
 		owner = ""
+	} else {
+		sourceService = ""
 	}
 
 	return Principal{
@@ -96,6 +121,8 @@ func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 		Subject:  subject,
 		ClientID: clientID,
 		TenantID: tenantID,
+
+		SourceService: sourceService,
 	}
 }
 

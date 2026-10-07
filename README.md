@@ -326,6 +326,8 @@ type Principal struct {
     Subject  string // "<owner>/<sub>" for normal-user, "<sub>" for application
     ClientID string // "azp" claim when present, else empty
     TenantID string // "tenantId" claim verbatim, else empty
+
+    SourceService string // "sourceService" claim verbatim; application tokens only, else empty
 }
 
 func PrincipalFromContext(ctx context.Context) (Principal, bool)
@@ -346,11 +348,29 @@ reports a principal, since single-tenant tokens may carry none. It is a claim, n
 tenant-isolation decision: in multi-tenant deployments the tenant-manager remains
 the authority on which tenant a request belongs to.
 
+`SourceService` is the token's `sourceService` claim — the name of the service a
+machine credential acts on behalf of — copied verbatim and published only for
+`application` tokens; it is empty on `normal-user` tokens and when the claim is
+absent or not a string. Where `Sub` differs per credential, `SourceService` is the
+same on every credential one service holds, so a multi-tenant producer that is
+issued one application per tenant keeps a single `SourceService`. The credential
+issuer stamps it, but the library gives it the same provenance as every other claim
+on the `Principal`. When the authorization service vouches for the token, or local
+signature verification is configured, a caller cannot choose its value. With
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` and no verification keys the claim is
+**self-asserted**: any caller can present any value, so a service must not use it
+as an identity in that mode (see the trust-boundary warning under
+[Bearer required while auth is disabled](#bearer-required-while-auth-is-disabled)).
+It never affects authorization or whether `PrincipalFromContext` reports a
+principal. The library does not validate it: an issuer may write a marker such as
+`undeclared` for a credential created without a source, and a service that uses the
+value as an identity must refuse an empty or marker value.
+
 Publication covers the authorized decision, a decision-cache hit, and the
 `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` path below. A denied request publishes
 nothing, and neither does the default disabled pass-through. The only identity attribute any of
 these spans carries is `app.auth.principal.type`. The span copy of the authorization
-payload omits `sub`, so `Owner`, `Sub`, `Subject`, `ClientID` and `TenantID` are recorded nowhere,
+payload omits `sub`, so `Owner`, `Sub`, `Subject`, `ClientID`, `TenantID` and `SourceService` are recorded nowhere,
 and neither the access token nor any principal identifier reaches a span attribute
 or a log line written by this library — the request id is what correlates a span
 with the service's own audit trail. The one caller identifier this library hands

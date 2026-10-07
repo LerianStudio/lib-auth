@@ -659,3 +659,180 @@ func TestAuthorize_RefusalPublishesNoTenantID(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, status)
 	assert.Equal(t, tenantEcho{}, got)
 }
+
+// ---------------------------------------------------------------------------
+// Principal.SourceService — the "sourceService" claim, published through the real chain
+// ---------------------------------------------------------------------------
+
+type sourceServiceEcho struct {
+	Found         bool   `json:"found"`
+	SourceService string `json:"sourceService"`
+}
+
+// newSourceServiceEchoApp gates one route with Authorize and returns, as JSON,
+// whether a Principal was published and the SourceService it carries. The
+// ErrorHandler reads the same context, so a refusal that published anything would
+// show up in its body too.
+func newSourceServiceEchoApp(auth *AuthClient) *fiber.App {
+	echo := func(c fiber.Ctx) sourceServiceEcho {
+		p, ok := PrincipalFromContext(c.Context())
+
+		return sourceServiceEcho{Found: ok, SourceService: p.SourceService}
+	}
+
+	app := fiber.New(fiber.Config{ErrorHandler: func(c fiber.Ctx, err error) error {
+		code := http.StatusInternalServerError
+
+		var fe *fiber.Error
+		if errors.As(err, &fe) {
+			code = fe.Code
+		}
+
+		return c.Status(code).JSON(echo(c))
+	}})
+
+	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+		return c.JSON(echo(c))
+	})
+
+	return app
+}
+
+func sourceServiceEchoRequest(t *testing.T, app *fiber.App, claims jwt.MapClaims) (int, sourceServiceEcho) {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+createTestJWT(claims))
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	var got sourceServiceEcho
+	require.NoError(t, json.Unmarshal(body, &got), "body: %s", body)
+
+	return resp.StatusCode, got
+}
+
+// TestAuthorize_PublishesSourceServiceForApplicationsOnly drives every path that
+// publishes a Principal with each claim shape on each token type. The claim is
+// copied verbatim (case, edge whitespace and marker values kept) for application
+// tokens; a normal-user token never exposes it, even when it carries the claim; an
+// absent or non-string claim publishes an empty SourceService on a Principal that
+// is still valid, because the claim never decides whether a principal exists.
+func TestAuthorize_PublishesSourceServiceForApplicationsOnly(t *testing.T) {
+	t.Parallel()
+
+	modes := []struct {
+		name     string
+		auth     func(address string) *AuthClient
+		appFound bool // whether an application token yields an identified principal
+	}{
+		{
+			name: "round_trip_inversion",
+			auth: func(address string) *AuthClient {
+				return &AuthClient{Address: address, Enabled: true, M2MInversionEnabled: true, Logger: &testLogger{}}
+			},
+			appFound: true,
+		},
+		{
+			name: "round_trip_legacy",
+			auth: func(address string) *AuthClient {
+				return &AuthClient{Address: address, Enabled: true, Logger: &testLogger{}}
+			},
+			appFound: false, // fabricated role: pinned absent by TestAuthorize_PublishesPrincipal
+		},
+		{
+			name: "disabled_principal_required",
+			auth: func(string) *AuthClient {
+				return &AuthClient{
+					Enabled:                       false,
+					M2MInversionEnabled:           true,
+					PrincipalRequiredWhenDisabled: true,
+					Logger:                        &testLogger{},
+				}
+			},
+			appFound: true,
+		},
+	}
+
+	tokens := []struct {
+		name   string
+		claims jwt.MapClaims
+		isApp  bool
+	}{
+		{name: "normal_user", claims: jwt.MapClaims{"type": normalUser, "owner": "acme-org", "sub": "user123"}},
+		{name: "application", claims: jwt.MapClaims{"type": application, "sub": "admin/robot", "azp": "cid"}, isApp: true},
+	}
+
+	shapes := []struct {
+		name  string
+		claim any // nil means the claim is absent
+		want  string
+	}{
+		{name: "present_verbatim", claim: " Pix-JD ", want: " Pix-JD "},
+		{name: "marker_verbatim", claim: "undeclared", want: "undeclared"},
+		{name: "absent", claim: nil, want: ""},
+		{name: "non_string", claim: 42, want: ""},
+	}
+
+	for _, mode := range modes {
+		for _, tok := range tokens {
+			if tok.isApp && !mode.appFound {
+				continue
+			}
+
+			for _, shape := range shapes {
+				t.Run(mode.name+"/"+tok.name+"/"+shape.name, func(t *testing.T) {
+					t.Parallel()
+
+					server := mockAuthServer(t, true, http.StatusOK)
+					defer server.Close()
+
+					claims := jwt.MapClaims{}
+					for k, v := range tok.claims {
+						claims[k] = v
+					}
+
+					if shape.claim != nil {
+						claims["sourceService"] = shape.claim
+					}
+
+					want := shape.want
+					if !tok.isApp {
+						want = "" // a user token never exposes the claim
+					}
+
+					status, got := sourceServiceEchoRequest(t, newSourceServiceEchoApp(mode.auth(server.URL)), claims)
+
+					assert.Equal(t, http.StatusOK, status)
+					assert.True(t, got.Found, "an empty or odd sourceService must not invalidate the principal")
+					assert.Equal(t, want, got.SourceService)
+				})
+			}
+		}
+	}
+}
+
+// TestAuthorize_RefusalPublishesNoSourceService pins that a refused request
+// publishes nothing — no Principal, so no SourceService — even to the service's
+// ErrorHandler, which runs on the same request context.
+func TestAuthorize_RefusalPublishesNoSourceService(t *testing.T) {
+	t.Parallel()
+
+	server := mockAuthServer(t, false, http.StatusOK)
+	defer server.Close()
+
+	auth := &AuthClient{Address: server.URL, Enabled: true, M2MInversionEnabled: true, Logger: &testLogger{}}
+
+	status, got := sourceServiceEchoRequest(t, newSourceServiceEchoApp(auth), jwt.MapClaims{
+		"type": application, "sub": "admin/robot", "sourceService": "pix-jd",
+	})
+
+	assert.Equal(t, http.StatusForbidden, status)
+	assert.Equal(t, sourceServiceEcho{}, got)
+}
