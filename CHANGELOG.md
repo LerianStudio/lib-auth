@@ -1,3 +1,23 @@
+## [5.6.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.6.0-beta.1...v5.6.0-beta.2) (2026-10-07)
+
+
+### Features
+
+* **middleware:** resolve the route a mounted Authorize is for ([8b2f345](https://github.com/LerianStudio/lib-auth/commit/8b2f34533650fb811eda8d7c9dc6c5039e76b562))
+* **middleware:** state the route a prefix-mounted Authorize is for ([7677a1f](https://github.com/LerianStudio/lib-auth/commit/7677a1ff791f3c0b04c18c10a1a35b92e6615665))
+
+
+### Bug Fixes
+
+* **middleware:** never compile a route template with no segment ([b2eec3b](https://github.com/LerianStudio/lib-auth/commit/b2eec3b9a777b1494bee5a368e263b8aabb1de30))
+* **middleware:** read the scope of the route Fiber serves ([30d21bb](https://github.com/LerianStudio/lib-auth/commit/30d21bbcdea210ffded2cce8ee929827606cdb98))
+* **middleware:** resolve a mounted request under the app's own routing ([0364b1a](https://github.com/LerianStudio/lib-auth/commit/0364b1acc805885ac9074d5c20e876c64eeb781a))
+
+
+### Performance Improvements
+
+* **middleware:** resolve a mounted request only when its scope is read ([8f0207f](https://github.com/LerianStudio/lib-auth/commit/8f0207ff2f83f8c68d591cb983c91280ea764617))
+
 ## [5.6.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.5.0...v5.6.0-beta.1) (2026-10-07)
 
 
