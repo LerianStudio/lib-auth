@@ -177,7 +177,7 @@ func TestDecisionCache_PartnerKeyIncludesProduct(t *testing.T) {
 	assert.Equal(t, int64(2), rec.hits.Load(),
 		"a different product must miss the partner cache; an identical repeat must hit it")
 
-	bodies := rec.recordedBodies()
+	bodies := rec.requests()
 	require.Len(t, bodies, 2)
 
 	for i, product := range []string{"midaz", "reporter"} {

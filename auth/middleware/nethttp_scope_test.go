@@ -87,12 +87,13 @@ func TestAuthorizeHTTP_ManifestScope_DerivesAttributesFromThePattern(t *testing.
 	}
 }
 
-// A pattern whose path carries no catalog parameter derives nothing, so a
-// partner is refused before the call, as on a Fiber route.
+// A pattern whose path carries no catalog parameter derives nothing and behaves
+// as an undeclared route, as on a Fiber route: a partner credential is asked
+// with no attributes, and the authorization service's answer is the answer.
 func TestAuthorizeHTTP_ManifestScope_PatternWithoutParamsIsUndeclared(t *testing.T) {
 	t.Parallel()
 
-	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	rec := newScopedPartnerAuthServer(t)
 	auth := scopedClient(t, rec)
 
 	got := serveGated(t, "GET /v1/health-of-things", auth.AuthorizeHTTP("midaz", "things", "get")(principalEcho(nil)), func() *http.Request {
@@ -103,7 +104,7 @@ func TestAuthorizeHTTP_ManifestScope_PatternWithoutParamsIsUndeclared(t *testing
 	})
 
 	assert.Equal(t, http.StatusForbidden, got.Code)
-	assert.Empty(t, rec.recordedBodies(), "an unscopeable partner request never reaches the Access Manager")
+	assert.Equal(t, []map[string]string{nil}, rec.attributeCalls(), "asked, with no attributes")
 }
 
 // A body-scoped route asks one question per element and refuses the whole

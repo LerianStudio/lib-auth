@@ -22,16 +22,26 @@ type requestView interface {
 	token() (string, error)
 	// clientIP returns the caller address derived from TRUSTED_PROXIES, or "".
 	clientIP(auth *AuthClient) string
-	// dimension returns the value the request carries for d, or "".
-	dimension(d Dimension) string
+	// pathParam returns the value of the route's path parameter key, or "".
+	pathParam(key string) string
+	// headerValues returns every value of every header line whose name matches
+	// name without regard to letter case, in the order the request sends them.
+	headerValues(name string) []string
+	// queryValues returns every value of the query parameter named exactly key,
+	// in order, and whether the query also names a key differing from it only in
+	// letter case.
+	queryValues(key string) (values []string, caseVariant bool)
+	// contentType returns the request's Content-Type header.
+	contentType() string
 	// route returns the method and the registered path of the route serving the
 	// request, its parameters written ":name", which is how a route that relies
 	// on its product's manifest scope finds its dimensions. A path the adapter
-	// cannot tell is "", and such a route derives no dimension.
+	// cannot tell is "", and such a route derives no path dimension.
 	route() (method, path string)
-	// body returns the request body, read for a route that declares dimensions
-	// in it; a body the adapter cannot read is the refusal.
-	body() ([]byte, *RefusalError)
+	// body returns the request body, read for a partner-bound credential on a
+	// route that declares dimensions in it; a body the adapter cannot read is
+	// the refusal, carrying the status it is refused with.
+	body() ([]byte, *errBodyScope)
 }
 
 // authorizeRoute is what a mounted middleware knows about its route, fixed at
@@ -40,35 +50,34 @@ type authorizeRoute struct {
 	product  string
 	resource string
 	action   string
-	scope    ScopeDeclaration
-	// derived is set when the route passes no RequireScope and its product has
-	// a manifest scope: the route's dimensions are then derived per request
-	// from the route it is served on.
-	derived *routeScope
-	// declErr is non-empty when the scope declaration cannot be honoured; every
-	// request on the route is then refused.
+	// scope works out the route's scope on each request, against its product's
+	// catalog; nil for a nil client, whose routes have no scope.
+	scope *routeScope
+	// declErr is non-empty when the declaration cannot be honoured whatever the
+	// catalog; every request on the route is then refused.
 	declErr string
 }
 
-// newAuthorizeRoute validates the route's scope declaration ONCE, at registration
-// time, not per request: a misdeclared route is a programming error and every one
-// of its requests is refused, which is what makes it visible on the first call
-// instead of on the first partner.
+// newAuthorizeRoute validates the route's scope declaration on its own ONCE, at
+// registration time, and against its product's catalog on the route's first
+// request: a misdeclared route is a programming error and every one of its
+// requests is refused, which is what makes it visible on the first call instead
+// of on the first partner.
 func (auth *AuthClient) newAuthorizeRoute(product, resource, action string, scopes []ScopeDeclaration) authorizeRoute {
-	scope, derived, declErr := auth.registerRouteScope(product, scopes)
+	scope, declErr := auth.registerRouteScope(product, scopes)
 
-	return authorizeRoute{product: product, resource: resource, action: action, scope: scope, derived: derived, declErr: declErr}
+	return authorizeRoute{product: product, resource: resource, action: action, scope: scope, declErr: declErr}
 }
 
-// scopeFor is the declaration the request in flight is decided on: the route's
-// own, or the one derived from its product's manifest scope for the route the
-// request is served on.
-func (route authorizeRoute) scopeFor(req requestView) ScopeDeclaration {
-	if route.derived == nil {
-		return route.scope
+// scopeFor is the declaration the request in flight is decided on, and a
+// non-empty description of what is wrong when the route cannot be honoured: on
+// its own, or against its product's catalog.
+func (route authorizeRoute) scopeFor(req requestView) (ScopeDeclaration, string) {
+	if route.declErr != "" || route.scope == nil {
+		return ScopeDeclaration{}, route.declErr
 	}
 
-	return route.derived.forRoute(req.route())
+	return route.scope.forRoute(req.route())
 }
 
 // authorizeOutcome is what the shared flow decided for one request. With neither
@@ -117,9 +126,10 @@ func (auth *AuthClient) decide(ctx context.Context, route authorizeRoute, req re
 	// A misdeclared route refuses EVERY request, whatever the auth posture: the
 	// disabled-auth pass-through below must not hide it, or the error would
 	// surface only on the first deployment that turns auth on.
-	if route.declErr != "" {
+	scope, problem := route.scopeFor(req)
+	if problem != "" {
 		if auth != nil {
-			logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", route.declErr)
+			logErrorf(ctx, auth.Logger, "Refusing request on a misdeclared route: %s", problem)
 		}
 
 		return authorizeOutcome{refusal: statusRefusal(http.StatusForbidden)}
@@ -139,7 +149,7 @@ func (auth *AuthClient) decide(ctx context.Context, route authorizeRoute, req re
 		return auth.decideWithoutRoundTrip(ctx, route.product, req)
 	}
 
-	return auth.decideWithRoundTrip(ctx, route, req)
+	return auth.decideWithRoundTrip(ctx, route, scope, req)
 }
 
 // startAuthorizeSpan opens the "lib_auth.authorize" span every decision runs under.
@@ -164,7 +174,7 @@ func tokenRefusal(err error) *RefusalError {
 }
 
 // decideWithRoundTrip asks the Access Manager.
-func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorizeRoute, req requestView) authorizeOutcome {
+func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorizeRoute, scope ScopeDeclaration, req requestView) authorizeOutcome {
 	ctx, span := startAuthorizeSpan(ctx)
 	defer span.End()
 
@@ -178,26 +188,13 @@ func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorize
 	// is forwarded (see resolveClientIP for why there is no socket-peer fallback).
 	clientIP := req.clientIP(auth)
 
-	// A declared dimension the request does not carry is refused here, before the
-	// round-trip: an identifier with no value cannot be matched against a
-	// partner's scope, and sending it absent would ask a narrower question.
-	scope := route.scopeFor(req)
-
-	attributes, missing := resolveAttributes(req, scope.dims)
-	if missing != "" {
-		logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
-
-		return authorizeOutcome{refusal: statusRefusal(http.StatusForbidden)}
-	}
-
 	resolution, principal, questions, refusal := auth.authorizeRequest(ctx, req, authzParams{
 		product:     route.product,
 		resource:    route.resource,
 		action:      route.action,
 		accessToken: accessToken,
 		clientIP:    clientIP,
-		declared:    scope.declared(),
-	}, scope, attributes)
+	}, scope)
 	if refusal != nil {
 		return authorizeOutcome{refusal: refusal}
 	}
@@ -222,16 +219,15 @@ func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorize
 // the whole request, stopping at the first that is not allowed. It returns the
 // last resolution and the questions asked, or the refusal.
 //
-// The body is read only for a partner-bound credential. The authorization
-// service consumes attributes only to decide for a partner; for every other
-// credential it ignores them. So any other caller is decided exactly as before
-// body dimensions existed: one question, carrying only the dimensions read from
-// the path, headers or query, and a body this layer never parses.
+// The scope is read only for a partner-bound credential. The authorization
+// service consumes attributes only to decide for a partner; every other
+// credential is asked one question, without attributes, exactly as on a route
+// that declares no scope, and its request is never read for one.
 //
 // The questions are asked one after another, not concurrently: they are few
 // (distinct sets, capped), the decision cache answers repeats without a call,
 // the first denial ends the request, and the single deadline bounds the total.
-func (auth *AuthClient) authorizeRequest(ctx context.Context, req requestView, params authzParams, scope ScopeDeclaration, attributes map[string]string) (authzResolution, Principal, []map[string]string, *RefusalError) {
+func (auth *AuthClient) authorizeRequest(ctx context.Context, req requestView, params authzParams, scope ScopeDeclaration) (authzResolution, Principal, []map[string]string, *RefusalError) {
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
 	ctx, span := tracer.Start(ctx, "lib_auth.check_authorization")
@@ -252,13 +248,9 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, req requestView, p
 		return authzResolution{}, Principal{}, nil, refusalFor(*failure)
 	}
 
-	// A route that reads dimensions from its body asks one question per
-	// distinct set of identifiers the body names, and every one must be
-	// allowed. A body that cannot be read for them is the caller's to fix:
-	// refused before any call, naming the field, and never let through.
-	questions, badBody := scope.questions(req, attributes, caller.partner != "")
-	if badBody != nil {
-		return authzResolution{}, Principal{}, nil, badBody
+	questions, refusal := auth.scopeQuestions(ctx, req, scope, caller)
+	if refusal != nil {
+		return authzResolution{}, Principal{}, nil, refusal
 	}
 
 	asked := questions
@@ -276,12 +268,39 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, req requestView, p
 
 		resolution, principal = auth.ask(ctx, span, params, caller)
 
-		if refusal := refusalFor(resolution); refusal != nil {
-			return authzResolution{}, Principal{}, nil, refusal
+		if denied := refusalFor(resolution); denied != nil {
+			return authzResolution{}, Principal{}, nil, denied
 		}
 	}
 
 	return resolution, principal, questions, nil
+}
+
+// scopeQuestions reads, for a partner-bound caller, the questions the request
+// makes on the route's scope. Any other caller makes none. A declared dimension
+// the request does not carry is refused 403 here, before the round-trip: an
+// identifier with no value cannot be matched against a partner's scope, and
+// sending it absent would quietly ask a question the route did not promise. A
+// request whose scope cannot be read for the declared dimensions is the caller's
+// to fix: refused before any call, naming the field, and never let through.
+func (auth *AuthClient) scopeQuestions(ctx context.Context, req requestView, scope ScopeDeclaration, caller authzCaller) ([]map[string]string, *RefusalError) {
+	if caller.partner == "" {
+		return nil, nil
+	}
+
+	readings, missing := resolveAttributes(req, scope.dims)
+	if missing != "" {
+		logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
+
+		return nil, statusRefusal(http.StatusForbidden)
+	}
+
+	questions, badScope := scope.questions(req, readings)
+	if badScope != nil {
+		return nil, newRefusal(badScope.statusCode(), badScope.Error())
+	}
+
+	return questions, nil
 }
 
 // refusalFor is the refusal a resolution answers the request with, or nil when
@@ -303,8 +322,15 @@ func refusalFor(resolution authzResolution) *RefusalError {
 	if !authorized {
 		// The denial reason picks the word: a credential the Access Manager called
 		// finished is answered 401 so its holder re-issues it; every other denial
-		// stays 403.
-		return statusRefusal(denialStatus(resolution.reason))
+		// stays 403. A finished partner is named as the cause, with the code the
+		// authorization service answers a token request for it with.
+		status := denialStatus(resolution.reason)
+
+		if response, ok := partnerDenial(resolution.reason); ok {
+			return accessManagerRefusalAt(status, response)
+		}
+
+		return statusRefusal(status)
 	}
 
 	return nil

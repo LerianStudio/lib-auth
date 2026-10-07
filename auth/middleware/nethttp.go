@@ -53,17 +53,21 @@ func (auth *AuthClient) WithHTTPErrorHandler(h HTTPErrorHandler) *AuthClient {
 //     bytes. A missing credential is 401 "Missing Token", any other malformed
 //     one 401 "Unauthorized"; neither reaches the Access Manager.
 //   - A FromPath dimension reads r.PathValue, which only the Go 1.22+ ServeMux
-//     populates. Under another router it resolves empty and the request is
-//     refused with 403.
+//     populates. Under another router it resolves empty, and a partner-bound
+//     credential is refused with 403.
 //   - A route that relies on its product's manifest scope (no RequireScope, see
 //     SetManifestScope and SetManifestRouteScope) is the request method and the
 //     path of r.Pattern, its "{name}" and "{name...}" segments read as ":name".
-//     Under another router there is no pattern and the route derives no
-//     dimension, so a partner-bound credential is refused with 403.
-//   - A body-scoped route (FromBody) reads at most maxAuthorizeHTTPBodyBytes
-//     (4 MiB, Fiber's default BodyLimit) for a partner-bound credential; a
-//     larger body is refused with 413. The bytes read are put back on the
-//     request for next.
+//     Under another router there is no pattern and the route derives no path
+//     dimension, so a partner-bound credential is asked without them.
+//   - A body-scoped route (FromBody, FromForm) reads at most
+//     maxAuthorizeHTTPBodyBytes (4 MiB, Fiber's default BodyLimit) for a
+//     partner-bound credential; a larger body is refused with 413. The bytes
+//     read are put back on the request for next.
+//
+// Headers, the query and a urlencoded form are read exactly as Authorize reads
+// them: every occurrence, each split on ',', a query key in another letter case
+// refused. The query is read as r.URL.Query reads it.
 //
 // The caller IP is derived from TRUSTED_PROXIES exactly as on the Fiber path,
 // anchored on r.RemoteAddr.
@@ -142,8 +146,48 @@ func (v netHTTPRequest) clientIP(auth *AuthClient) string {
 	return auth.resolveClientIPHTTP(v.r)
 }
 
-func (v netHTTPRequest) dimension(d Dimension) string {
-	return d.resolveHTTP(v.r)
+// pathParam reads r.PathValue, which only the Go 1.22+ ServeMux populates:
+// under any other router a path dimension resolves empty and the request is
+// refused, never sent unscoped.
+func (v netHTTPRequest) pathParam(key string) string {
+	return v.r.PathValue(key)
+}
+
+func (v netHTTPRequest) headerValues(name string) []string {
+	var values []string
+
+	for k, lines := range v.r.Header {
+		if strings.EqualFold(k, name) {
+			values = append(values, lines...)
+		}
+	}
+
+	return values
+}
+
+// queryValues reads the query as r.URL.Query does, which is how a net/http
+// handler reads it.
+func (v netHTTPRequest) queryValues(key string) ([]string, bool) {
+	if v.r.URL == nil {
+		return nil, false
+	}
+
+	var values []string
+
+	for name, occurrences := range v.r.URL.Query() {
+		switch {
+		case name == key:
+			values = occurrences
+		case strings.EqualFold(name, key):
+			return nil, true
+		}
+	}
+
+	return values, false
+}
+
+func (v netHTTPRequest) contentType() string {
+	return v.r.Header.Get("Content-Type")
 }
 
 // route is the request method and the path of the ServeMux pattern that matched
@@ -163,18 +207,18 @@ const maxAuthorizeHTTPBodyBytes = 4 << 20
 // body reads the request body, at most maxAuthorizeHTTPBodyBytes, and puts the
 // bytes back on the request so the handler reads exactly what the caller sent.
 // A larger body is refused with 413, one that fails to read with 400.
-func (v netHTTPRequest) body() ([]byte, *RefusalError) {
+func (v netHTTPRequest) body() ([]byte, *errBodyScope) {
 	if v.r.Body == nil {
 		return nil, nil
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(v.r.Body, maxAuthorizeHTTPBodyBytes+1))
 	if err != nil {
-		return nil, statusRefusal(http.StatusBadRequest)
+		return nil, &errBodyScope{message: http.StatusText(http.StatusBadRequest), status: http.StatusBadRequest}
 	}
 
 	if len(raw) > maxAuthorizeHTTPBodyBytes {
-		return nil, statusRefusal(http.StatusRequestEntityTooLarge)
+		return nil, &errBodyScope{message: http.StatusText(http.StatusRequestEntityTooLarge), status: http.StatusRequestEntityTooLarge}
 	}
 
 	v.r.Body = io.NopCloser(bytes.NewReader(raw))

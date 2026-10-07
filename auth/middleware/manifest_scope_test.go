@@ -117,7 +117,7 @@ func TestSetManifestScope_Validation(t *testing.T) {
 		{name: "empty_is_valid", product: "midaz"},
 		{name: "empty_product", product: " ", dims: manifestDims(), wantErr: "product"},
 		{name: "empty_name", product: "midaz", dims: []Dimension{Dim("", FromPath).At("x")}, wantErr: "no name"},
-		{name: "not_from_path", product: "midaz", dims: []Dimension{Dim("organizationId", FromHeader)}, wantErr: "path"},
+		{name: "from_body", product: "midaz", dims: []Dimension{Dim("organizationId", FromBody)}, wantErr: "path, the query or a header"},
 		{name: "empty_key", product: "midaz", dims: []Dimension{Dim("organizationId", FromPath).At("")}, wantErr: "empty"},
 		{
 			name: "duplicate_name", product: "midaz",
@@ -162,7 +162,7 @@ func TestSetManifestScope_NilReceiver(t *testing.T) {
 // Authorize with a manifest scope
 // ---------------------------------------------------------------------------
 
-func scopedClient(t *testing.T, rec *recordingAuthServer) *AuthClient {
+func scopedClient(t *testing.T, rec *fakeAuthServer) *AuthClient {
 	t.Helper()
 
 	auth := &AuthClient{Address: rec.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
@@ -241,19 +241,19 @@ func TestAuthorize_ManifestScope_SharedHandlerDerivesPerRoute(t *testing.T) {
 }
 
 // A path with none of the manifest's parameters derives nothing and behaves as
-// an undeclared route: a partner credential is refused before the call, while a
+// an undeclared route: a partner credential is asked with no attributes, while a
 // non-partner caller sends the same bytes as before.
 func TestAuthorize_ManifestScope_PathWithoutParamsIsUndeclared(t *testing.T) {
 	t.Parallel()
 
-	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	rec := newScopedPartnerAuthServer(t)
 	auth := scopedClient(t, rec)
 
 	app := fiber.New()
 	app.Get("/v1/organization_id/settings", auth.Authorize("midaz", "settings", "get"), ok)
 
 	assert.Equal(t, http.StatusForbidden, doGet(t, app, "/v1/organization_id/settings", partnerToken("acme/p1")))
-	assert.Equal(t, int64(0), rec.hits.Load(), "an unscopeable partner request is refused before the call")
+	assert.Equal(t, []map[string]string{nil}, rec.attributeCalls(), "asked, with no attributes")
 
 	// Positive control: same route, non-partner caller.
 	assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/organization_id/settings", userToken()))
@@ -265,14 +265,14 @@ func TestAuthorize_ManifestScope_PathWithoutParamsIsUndeclared(t *testing.T) {
 func TestAuthorize_ManifestScope_OnlyForItsProduct(t *testing.T) {
 	t.Parallel()
 
-	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	rec := newScopedPartnerAuthServer(t)
 	auth := scopedClient(t, rec)
 
 	app := fiber.New()
 	app.Get("/v1/organizations/:organization_id/routes", auth.Authorize("routing", "routes", "get"), ok)
 
 	assert.Equal(t, http.StatusForbidden, doGet(t, app, "/v1/organizations/org-1/routes", partnerToken("acme/p1")))
-	assert.Equal(t, int64(0), rec.hits.Load())
+	assert.Equal(t, []map[string]string{nil}, rec.attributeCalls(), "asked, with no attributes")
 
 	assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/organizations/org-1/routes", userToken()))
 	assert.NotContains(t, rec.lastBody(t), "attributes")
@@ -296,7 +296,8 @@ func TestAuthorize_ManifestScope_ExplicitDeclarationStillWorks(t *testing.T) {
 }
 
 // An explicit declaration naming a dimension the manifest scope does not
-// declare is refused, and said so at registration — the startup log.
+// declare refuses every request, and says so in the log on the route's first
+// request — whichever of the catalog and the route was wired first.
 func TestAuthorize_ManifestScope_ExplicitDimensionOutsideTheCatalogIsRefused(t *testing.T) {
 	t.Parallel()
 
@@ -309,14 +310,12 @@ func TestAuthorize_ManifestScope_ExplicitDimensionOutsideTheCatalogIsRefused(t *
 	handler := auth.Authorize("midaz", "accounts", "get",
 		RequireScope("midaz", Dim("portfolioId", FromPath).At("portfolio_id")))
 
-	assert.Contains(t, logger.all(), "portfolioId",
-		"the misdeclaration is logged when the route is registered, before any request")
-
 	app := fiber.New()
 	app.Get("/v1/portfolios/:portfolio_id", handler, ok)
 
 	assert.Equal(t, http.StatusForbidden, doGet(t, app, "/v1/portfolios/pf-1", userToken()))
 	assert.Equal(t, int64(0), rec.hits.Load())
+	assert.Contains(t, logger.all(), "portfolioId", "the misdeclaration is logged")
 
 	// Positive control: a declared dimension on the same client is honoured.
 	app.Get("/v1/organizations/:organization_id",

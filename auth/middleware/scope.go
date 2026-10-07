@@ -2,14 +2,11 @@ package middleware
 
 import (
 	"context"
-	"errors"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-
-	"github.com/gofiber/fiber/v3"
+	"unicode"
 )
 
 // PartnerLocalsKey is the fiber.Locals key under which Authorize records the
@@ -28,15 +25,19 @@ type Source int
 
 const (
 	// SourceUnset is the zero value and reads nothing. A dimension left at this
-	// source resolves empty, which the fail-closed guard denies.
+	// source is a misdeclaration, refused when the declaration is validated.
 	SourceUnset Source = iota
 	// FromPath reads a path parameter (fiber.Ctx.Params under Authorize,
 	// http.Request.PathValue under AuthorizeHTTP).
 	FromPath
-	// FromHeader reads a request header (fiber.Ctx.Get / http.Header.Get).
+	// FromHeader reads a request header, its name compared without regard to
+	// letter case. A header repeated, or a value listing several separated by
+	// ',', names every one of them, each its own question.
 	FromHeader
-	// FromQuery reads a query-string parameter (fiber.Ctx.Query /
-	// url.Values.Get).
+	// FromQuery reads a query-string parameter under its exact key. A parameter
+	// repeated, or a value listing several separated by ',', names every one of
+	// them, each its own question. A key differing from the declared one only in
+	// letter case is refused.
 	FromQuery
 )
 
@@ -49,9 +50,10 @@ const (
 // "X-Organization-Id"). Collapsing them would force every route to rename its
 // own parameters to match an external catalog.
 type Dimension struct {
-	name   string
-	source Source
-	key    string
+	name     string
+	source   Source
+	key      string
+	optional bool
 }
 
 // Dim declares a dimension read from source under the SAME key as its name. Use
@@ -68,6 +70,19 @@ func (d Dimension) At(key string) Dimension {
 	return d
 }
 
+// Optional returns a copy of the dimension that a request may leave out. A
+// request that does not carry it — a body field absent or null — asks its
+// question without it; a value that is there must still be a non-empty string.
+// It never mutates the receiver.
+func (d Dimension) Optional() Dimension {
+	d.optional = true
+
+	return d
+}
+
+// IsOptional reports whether a request may leave the dimension out.
+func (d Dimension) IsOptional() bool { return d.optional }
+
 // Name is the attribute key sent to the authorization service.
 func (d Dimension) Name() string { return d.name }
 
@@ -77,43 +92,118 @@ func (d Dimension) Key() string { return d.key }
 // Source is where in the request the value is read from.
 func (d Dimension) Source() Source { return d.source }
 
-// resolve reads the dimension's value out of the request, or "" when the source
-// carries nothing.
-func (d Dimension) resolve(c fiber.Ctx) string {
+// read reads the dimension's values out of the request. present is false when
+// the request does not carry the dimension at all; problem is non-empty when it
+// carries it malformed. A path parameter is one value. A query parameter or a
+// header may name several: every occurrence of it, each split on ',' with the
+// spaces around an element trimmed, so "?id=a&id=b", "?id=a,b" and two header
+// lines "a" and "b" all name a and b. An element that is empty after trimming
+// names nothing and is malformed. Body dimensions are read by the body plan.
+func (d Dimension) read(req requestView) (values []string, present bool, problem string) {
 	switch d.source {
 	case FromPath:
-		return c.Params(d.key)
+		value := req.pathParam(d.key)
+
+		return []string{value}, value != "", ""
 	case FromHeader:
-		return c.Get(d.key)
+		// Compared without regard to letter case, whatever the app's header
+		// normalization: the header the handler reads is the header checked.
+		return splitValues(req.headerValues(d.key))
 	case FromQuery:
-		return fiber.Query[string](c, d.key)
-	case SourceUnset, FromBody:
-		return ""
+		// Only the exact key carries the dimension. A key differing from it only
+		// in letter case is refused rather than ignored or read: whether a handler
+		// binds it depends on the handler, and the scope must check the key the
+		// handler acts on.
+		raw, caseVariant := req.queryValues(d.key)
+		if caseVariant {
+			return nil, true, "must be named exactly " + strconv.Quote(d.key) + "; a key differing only in letter case is refused"
+		}
+
+		return splitValues(raw)
+	case SourceUnset, FromBody, FromForm:
+		return nil, false, ""
 	default:
-		return ""
+		return nil, false, ""
 	}
 }
 
-// resolveHTTP is resolve for a net/http request. FromPath reads r.PathValue,
-// which only the Go 1.22+ ServeMux populates: under any other router a path
-// dimension resolves empty and the request is refused, never sent unscoped.
-func (d Dimension) resolveHTTP(r *http.Request) string {
+// splitValues splits every occurrence of a query parameter, header or form
+// field into its comma-separated elements, trimmed, keeping each distinct value
+// once in the order first named.
+func splitValues(raw []string) ([]string, bool, string) {
+	if len(raw) == 0 {
+		return nil, false, ""
+	}
+
+	var values []string
+
+	seen := make(map[string]struct{})
+
+	for _, occurrence := range raw {
+		for _, element := range strings.Split(occurrence, ",") {
+			value := strings.TrimSpace(element)
+			if value == "" {
+				return nil, true, "must not name an empty value"
+			}
+
+			if _, dup := seen[value]; dup {
+				continue
+			}
+
+			seen[value] = struct{}{}
+			values = append(values, value)
+		}
+	}
+
+	return values, true, ""
+}
+
+// location names where in the request the dimension is read, for the refusals
+// that point the caller at it.
+func (d Dimension) location() string {
 	switch d.source {
 	case FromPath:
-		return r.PathValue(d.key)
+		return "path parameter " + strconv.Quote(d.key)
 	case FromHeader:
-		return r.Header.Get(d.key)
+		return "header " + strconv.Quote(d.key)
 	case FromQuery:
-		if r.URL == nil {
-			return ""
+		return "query parameter " + strconv.Quote(d.key)
+	case FromBody:
+		return "body field " + strconv.Quote(d.key)
+	case FromForm:
+		return "form field " + strconv.Quote(d.key)
+	case SourceUnset:
+		return "nowhere"
+	default:
+		return "nowhere"
+	}
+}
+
+// carrier identifies the place in the request a dimension is read from. Header
+// names are case-insensitive, and a query key in another letter case is refused
+// by the reader, so two spellings of one are one carrier.
+func (d Dimension) carrier() string {
+	key := d.key
+	if d.source == FromHeader || d.source == FromQuery {
+		key = foldKey(key)
+	}
+
+	return strconv.Itoa(int(d.source)) + ":" + key
+}
+
+// foldKey maps key to one spelling shared by every key strings.EqualFold, the
+// readers' match, holds equal to it: each rune becomes the least rune of its
+// simple case-folding orbit. strings.ToLower is not that rule — "Σ" and "ς" are
+// equal to EqualFold but lower-case to different runes.
+func foldKey(key string) string {
+	return strings.Map(func(r rune) rune {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			least = min(least, f)
 		}
 
-		return r.URL.Query().Get(d.key)
-	case SourceUnset, FromBody:
-		return ""
-	default:
-		return ""
-	}
+		return least
+	}, key)
 }
 
 // ScopeDeclaration is a route's statement of which product it belongs to and
@@ -137,12 +227,7 @@ func RequireScope(product string, dims ...Dimension) ScopeDeclaration {
 	return ScopeDeclaration{product: product, dims: dims}
 }
 
-// declared reports whether the declaration carries at least one dimension.
-func (s ScopeDeclaration) declared() bool {
-	return len(s.dims) > 0
-}
-
-// RequestScope is what Authorize (or AuthorizeHTTP) resolved for the request in flight: the partner
+// RequestScope is what Authorize or AuthorizeHTTP resolved for the request in flight: the partner
 // the credential is bound to, and the instance identifiers that were sent as
 // attributes. Read it with ScopeFromContext to apply the same scope inside the
 // request body, where the route's declaration cannot reach.
@@ -178,34 +263,108 @@ func ScopeFromContext(ctx context.Context) (RequestScope, bool) {
 	return scope, ok
 }
 
-// resolveAttributes reads every declared dimension out of the request. The second
-// return names the first dimension whose source carried nothing, which the caller
-// denies: a declared identifier with no value cannot be matched against anything,
-// and sending it absent would silently ask a narrower question than the route
-// promised.
-func resolveAttributes(req requestView, dims []Dimension) (map[string]string, string) {
-	if len(dims) == 0 {
-		return nil, ""
+// requestValues is what the request carries for the dimensions read outside
+// its body: the distinct values of each dimension, in the order the dimensions
+// are declared, and where each was first read.
+type requestValues struct {
+	names  []string
+	values map[string][]string
+	where  map[string]string
+	// problem is the first carrier found malformed, or the first dimension two
+	// carriers disagree on. It is reported once the caller is authenticated.
+	problem *errBodyScope
+}
+
+// add records the values one carrier names for a dimension. A dimension already
+// read from another carrier must name the same set of values there: when the two
+// disagree the handler may act on either, and no single question checks both.
+func (rv *requestValues) add(dim Dimension, values []string) {
+	if previous, ok := rv.values[dim.name]; ok {
+		if !sameValues(previous, values) && rv.problem == nil {
+			rv.problem = divergence(dim.name, rv.where[dim.name], dim.location())
+		}
+
+		return
 	}
 
-	attributes := make(map[string]string, len(dims))
+	if rv.values == nil {
+		rv.values = make(map[string][]string)
+		rv.where = make(map[string]string)
+	}
+
+	rv.names = append(rv.names, dim.name)
+	rv.values[dim.name] = values
+	rv.where[dim.name] = dim.location()
+}
+
+// sameValues reports whether two lists of distinct values name the same set.
+func sameValues(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	set := make(map[string]struct{}, len(a))
+	for _, v := range a {
+		set[v] = struct{}{}
+	}
+
+	for _, v := range b {
+		if _, ok := set[v]; !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func divergence(name, first, second string) *errBodyScope {
+	return &errBodyScope{message: "scope dimension " + strconv.Quote(name) + " is given different values in " + first + " and " + second}
+}
+
+// resolveAttributes reads every declared dimension outside the body out of the
+// request. The second return names the first required dimension the request
+// does not carry, which the caller denies: a declared identifier with no value
+// cannot be matched against anything, and sending it absent would silently ask
+// a narrower question than the route promised. An optional dimension the request
+// does not carry is left out. A malformed carrier outranks an absent dimension,
+// whatever order the two are declared in: every dimension is read before the
+// absence is reported, and a request that is malformed is answered as such.
+func resolveAttributes(req requestView, dims []Dimension) (requestValues, string) {
+	var (
+		rv      requestValues
+		missing string
+	)
 
 	for _, dim := range dims {
 		// A body dimension is not one value of the request but one per question
-		// the body makes; the body plan reads those.
-		if dim.source == FromBody {
+		// the body makes; the body plan reads those. A form field is read with
+		// the body, only for the callers whose body is read.
+		if dim.source == FromBody || dim.source == FromForm {
 			continue
 		}
 
-		value := req.dimension(dim)
-		if value == "" {
-			return nil, dim.name
-		}
+		values, present, problem := dim.read(req)
 
-		attributes[dim.name] = value
+		switch {
+		case problem != "":
+			if rv.problem == nil {
+				rv.problem = &errBodyScope{message: "scope " + dim.location() + " " + problem}
+			}
+		case !present && dim.optional:
+		case !present:
+			if missing == "" {
+				missing = dim.name
+			}
+		default:
+			rv.add(dim, values)
+		}
 	}
 
-	return attributes, ""
+	if rv.problem == nil && missing != "" {
+		return requestValues{}, missing
+	}
+
+	return rv, ""
 }
 
 // attributesCacheKey folds the attributes into a single deterministic string so
@@ -284,10 +443,17 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 // compileDims validates a route's dimensions, whatever their source, and
 // compiles the ones read from the body. It is the one check every declaration
 // passes — an explicit RequireScope and a manifest route alike.
+//
+// A dimension may be read from several carriers — the path and a header, the
+// query and the body — and the request must then name the same values in each.
+// Reading it twice from the SAME carrier is a mistake, not a wider question.
 func compileDims(dims []Dimension) (*bodyPlan, string) {
 	seen := make(map[string]struct{}, len(dims))
+	sources := make(map[Source]struct{}, len(dims))
 
 	for _, dim := range dims {
+		sources[dim.source] = struct{}{}
+
 		if dim.name == "" {
 			return nil, "scope declaration carries a dimension with no name"
 		}
@@ -300,117 +466,28 @@ func compileDims(dims []Dimension) (*bodyPlan, string) {
 			return nil, "scope dimension " + dim.name + " declares an empty request key"
 		}
 
-		// A body dimension may repeat, read from different arrays; the body plan
-		// checks each question still reads it once.
+		// A body dimension may repeat, read from distinct fields, each asked; the
+		// body plan refuses one field read twice.
 		if dim.source == FromBody {
 			continue
 		}
 
-		// A repeated name is not a wider question, it is a narrower one: the
-		// resolved attributes live in a map, so the last occurrence silently
-		// overwrites every earlier one and the request asks about ONE dimension
-		// while the route declared several.
-		if _, duplicate := seen[dim.name]; duplicate {
-			return nil, "scope dimension " + dim.name + " is declared more than once"
+		key := dim.name + "\x00" + dim.carrier()
+		if _, duplicate := seen[key]; duplicate {
+			return nil, "scope dimension " + dim.name + " is declared more than once from " + dim.location()
 		}
 
-		seen[dim.name] = struct{}{}
+		seen[key] = struct{}{}
 	}
 
-	return compileBodyPlan(dims, seen)
-}
+	_, readsJSON := sources[FromBody]
+	_, readsForm := sources[FromForm]
 
-// SetManifestScope wires the product's scope catalog — the scope section of its
-// declaration manifest — into the client, so Authorize and AuthorizeHTTP can
-// derive each route's dimensions from the route path instead of every route
-// declaring them. Under AuthorizeHTTP the route path is the ServeMux pattern's,
-// its "{name}" segments read as ":name".
-//
-// dims are the catalog in tree order, each read from a path parameter
-// (Dim(name, FromPath).At(param)). The declaration package builds them from the
-// embedded manifest: call declaration.WireScope(auth, manifest) rather than this
-// directly. Call it at boot, BEFORE registering routes: a route registered
-// while its product has no catalog never derives one. A later call reaches the
-// routes already registered on a catalog: they derive from the new one.
-//
-// Once a product has a catalog, every route of that product that passes no
-// RequireScope sends, as attributes, the catalog dimensions whose parameter is a
-// WHOLE segment of the route path (":organization_id"), in catalog order — the
-// same attributes an explicit declaration sends. A route whose path carries none
-// of them behaves as a route that declares nothing. A route that passes
-// RequireScope keeps its declaration, which must then name only catalog
-// dimensions.
-//
-// Calling it with no dims removes the product's catalog, leaving the client
-// exactly as if it had never been called.
-func (auth *AuthClient) SetManifestScope(product string, dims ...Dimension) error {
-	if auth == nil {
-		return errors.New("manifest scope: nil auth client")
+	if readsJSON && readsForm {
+		return nil, "scope declaration reads the request body both as JSON (FromBody) and as a form (FromForm)"
 	}
 
-	if strings.TrimSpace(product) == "" {
-		return errors.New("manifest scope: product must not be empty")
-	}
-
-	names := make(map[string]struct{}, len(dims))
-	keys := make(map[string]struct{}, len(dims))
-
-	for _, dim := range dims {
-		switch {
-		case dim.name == "":
-			return errors.New("manifest scope: a dimension has no name")
-		case dim.source != FromPath:
-			return errors.New("manifest scope: dimension " + dim.name + " must be read from the path")
-		case dim.key == "":
-			return errors.New("manifest scope: dimension " + dim.name + " declares an empty path parameter")
-		}
-
-		if _, dup := names[dim.name]; dup {
-			return errors.New("manifest scope: dimension " + dim.name + " is declared more than once")
-		}
-
-		if _, dup := keys[dim.key]; dup {
-			return errors.New("manifest scope: path parameter " + dim.key + " is declared more than once")
-		}
-
-		names[dim.name] = struct{}{}
-		keys[dim.key] = struct{}{}
-	}
-
-	auth.manifestScopeMu.Lock()
-	defer auth.manifestScopeMu.Unlock()
-
-	// Route body scopes were checked against the catalog being replaced, and
-	// routes already registered must stop using what they derived from it.
-	delete(auth.manifestRouteScopes, product)
-	auth.manifestGen++
-
-	if len(dims) == 0 {
-		delete(auth.manifestScopes, product)
-
-		return nil
-	}
-
-	if auth.manifestScopes == nil {
-		auth.manifestScopes = make(map[string][]Dimension)
-	}
-
-	auth.manifestScopes[product] = append([]Dimension(nil), dims...)
-
-	return nil
-}
-
-// manifestScopeFor returns the product's catalog, or nil when it has none. A nil
-// receiver has none.
-func (auth *AuthClient) manifestScopeFor(product string) []Dimension {
-	if auth == nil {
-		return nil
-	}
-
-	auth.manifestScopeMu.RLock()
-	defer auth.manifestScopeMu.RUnlock()
-
-	return auth.manifestScopes[product]
+	return compileBodyPlan(dims)
 }
 
 // checkAgainstCatalog reports the first dimension of an explicit declaration the
@@ -436,12 +513,15 @@ func checkAgainstCatalog(scope ScopeDeclaration, catalog []Dimension) string {
 	return ""
 }
 
-// deriveRouteDimensions returns the catalog dimensions a route path addresses: a
-// dimension applies when one WHOLE segment of the path is its parameter with the
-// ':' marker. A literal segment spelling the parameter is text, and a segment
-// that merely contains it (":organization_id.json", ":organization_id?") is a
-// different parameter. The result keeps catalog order, whatever the order of the
-// segments, and is empty when the path carries none.
+// deriveRouteDimensions returns the catalog dimensions a route addresses. A
+// path dimension applies when one WHOLE segment of the path is its parameter
+// with the ':' marker. A literal segment spelling the parameter is text, and a
+// segment that merely contains it (":organization_id.json", ":organization_id?")
+// is a different parameter. A dimension read from the query or a header applies
+// to every route — the path cannot say whether a request carries it — and is
+// derived optional: read when the request carries it, left out when it does not.
+// The result keeps catalog order, whatever the order of the segments, and is
+// empty when the route addresses none.
 func deriveRouteDimensions(catalog []Dimension, path string) []Dimension {
 	segments := make(map[string]struct{})
 
@@ -454,6 +534,12 @@ func deriveRouteDimensions(catalog []Dimension, path string) []Dimension {
 	dims := make([]Dimension, 0, len(catalog))
 
 	for _, dim := range catalog {
+		if dim.source != FromPath {
+			dims = append(dims, dim.Optional())
+
+			continue
+		}
+
 		if _, ok := segments[dim.key]; ok {
 			dims = append(dims, dim)
 		}
@@ -462,68 +548,85 @@ func deriveRouteDimensions(catalog []Dimension, path string) []Dimension {
 	return dims
 }
 
-// routeScope derives, and remembers per route path, the declaration of a route
-// that relies on its product's catalog. One handler may be registered on several
-// routes, so the path — not the handler — is the key.
+// routeScope works out, and remembers per route path, the scope of a route on
+// its first request — not when the route is registered — so a catalog wired
+// after the routes reaches them as one wired before does. One handler may be
+// registered on several routes, so the path, not the handler, is the key.
 type routeScope struct {
 	auth    *AuthClient
 	product string
-	byRoute sync.Map // method and route path -> cachedRouteScope
+	// explicit is the route's own declaration, already validated on its own;
+	// nil when the route relies on its product's catalog.
+	explicit *ScopeDeclaration
+	byRoute  sync.Map // method and route path -> cachedRouteScope
 }
 
-// cachedRouteScope is a route's derived declaration together with the manifest
-// generation it was derived from, so a later SetManifestScope or
-// SetManifestRouteScope reaches routes registered before it.
+// cachedRouteScope is a route's scope together with the manifest generation it
+// was worked out from, so a later SetManifestScope or SetManifestRouteScope
+// reaches routes that already served a request. problem is non-empty when the
+// route cannot be honoured on that generation.
 type cachedRouteScope struct {
 	generation uint64
 	scope      ScopeDeclaration
+	problem    string
 }
 
-func (r *routeScope) forRoute(method, path string) ScopeDeclaration {
+// forRoute returns the scope of the route, and a non-empty description of what
+// is wrong when the route cannot be honoured: an explicit declaration naming a
+// dimension its product's catalog does not declare.
+func (r *routeScope) forRoute(method, path string) (ScopeDeclaration, string) {
 	key := routeScopeKey(method, path)
 	generation := r.auth.manifestGeneration()
 
 	if cached, ok := r.byRoute.Load(key); ok {
 		if entry := cached.(cachedRouteScope); entry.generation == generation {
-			return entry.scope
+			return entry.scope, entry.problem
 		}
 	}
 
-	generation, catalog, body, declared := r.auth.manifestRouteScope(r.product, key)
+	generation, catalog, route, declared := r.auth.manifestRouteScope(r.product, key)
+	entry := cachedRouteScope{generation: generation}
 
-	scope := ScopeDeclaration{product: r.product, dims: deriveRouteDimensions(catalog, path)}
-
-	if declared {
-		scope.dims = body.dims
-		scope.body = body.plan
+	switch {
+	case r.explicit != nil:
+		entry.scope = *r.explicit
+		entry.problem = checkAgainstCatalog(*r.explicit, catalog)
+	case declared:
+		entry.scope = ScopeDeclaration{product: r.product, dims: route.dims, body: route.plan}
+	default:
+		entry.scope = ScopeDeclaration{product: r.product, dims: deriveRouteDimensions(catalog, path)}
 	}
 
-	r.byRoute.Store(key, cachedRouteScope{generation: generation, scope: scope})
+	if entry.problem != "" {
+		logErrorf(context.Background(), r.auth.Logger, "Route %s for product %q is misdeclared and will refuse every request: %s", key, r.product, entry.problem)
+	}
 
-	return scope
+	r.byRoute.Store(key, entry)
+
+	return entry.scope, entry.problem
 }
 
-// registerRouteScope resolves a route's scope at registration time: its explicit
-// declaration, validated and — when the product has a manifest scope — checked
-// against that catalog; or, when the route passes none and a catalog exists, the
-// deriver that reads the route's dimensions from its path. A misdeclaration is
+// registerRouteScope validates a route's explicit declaration on its own, at
+// registration time, and returns what works out the route's scope on each
+// request (see routeScope). A declaration that is wrong whatever the catalog is
 // logged here, in the boot log, and not only on the first request it refuses.
-func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclaration) (ScopeDeclaration, *routeScope, string) {
+// A nil client has no catalog, and its routes no scope.
+func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclaration) (*routeScope, string) {
 	scope, declErr := resolveDeclaration(product, scopes)
-
-	catalog := auth.manifestScopeFor(product)
-	if declErr == "" && len(scopes) > 0 {
-		declErr = checkAgainstCatalog(scope, catalog)
+	if auth == nil {
+		return nil, declErr
 	}
 
-	var derived *routeScope
-	if len(scopes) == 0 && len(catalog) > 0 {
-		derived = &routeScope{auth: auth, product: product}
-	}
-
-	if declErr != "" && auth != nil {
+	if declErr != "" {
 		logErrorf(context.Background(), auth.Logger, "Route for product %q is misdeclared and will refuse every request: %s", product, declErr)
+
+		return nil, declErr
 	}
 
-	return scope, derived, declErr
+	route := &routeScope{auth: auth, product: product}
+	if len(scopes) > 0 {
+		route.explicit = &scope
+	}
+
+	return route, ""
 }

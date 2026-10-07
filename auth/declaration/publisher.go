@@ -50,6 +50,7 @@ import (
 	"time"
 
 	"github.com/LerianStudio/lib-auth/v5/auth/endpoint"
+	"github.com/LerianStudio/lib-auth/v5/auth/middleware"
 	"github.com/LerianStudio/lib-auth/v5/auth/obs"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/LerianStudio/lib-observability/v4/runtime"
@@ -122,6 +123,14 @@ type Config struct {
 	// Auth is any TokenMinter — typically the plugin's existing *middleware.AuthClient
 	// (v2 or v3). Its GetApplicationToken mints the M2M token (client_credentials);
 	// the concrete AuthClient also carries the AUTH address. Required.
+	//
+	// When it is a *middleware.AuthClient, New also wires the manifest's scope
+	// section into it (see WireScope): the routes that client authorizes derive
+	// their partner scope from this manifest, whatever the order the routes and
+	// the publisher are built in. New also registers the scope process-wide under
+	// manifest.service (see middleware.SetProductManifestScope), so routes that
+	// authorize that product with another client, one with no catalog of its
+	// own, derive it too.
 	Auth TokenMinter
 	// ClientID / ClientSecret are the plugin's M2M credentials (from manual
 	// provisioning). Required. ClientSecret is NEVER logged.
@@ -158,8 +167,9 @@ type Config struct {
 	// development) and the library reads no environment variable for it.
 	RequireHTTPS bool
 	// ScopeOnly publishes ONLY the manifest's scope section (with its service and
-	// version), leaving the permissions, roles and m2m sections out of the body
-	// so the access manager keeps what it already holds for them.
+	// version), the partner opt-in and the permissions' levels, leaving the
+	// permissions, roles and m2m sections out of the body so the access manager
+	// keeps what it already holds for them.
 	//
 	// The scope catalog is published whenever the product's auth is enabled,
 	// while the permission sections keep their own switch. A product whose
@@ -168,8 +178,8 @@ type Config struct {
 	//
 	//	ScopeOnly: !declarationEnabled
 	//
-	// A manifest without a scope section makes a ScopeOnly publisher a no-op: it
-	// never calls the identity service.
+	// A manifest without a scope section and without the partner opt-in makes a
+	// ScopeOnly publisher a no-op: it never calls the identity service.
 	ScopeOnly bool
 }
 
@@ -277,7 +287,25 @@ func New(cfg Config) (*Publisher, error) {
 		return nil, fmt.Errorf("slug %q must equal manifest.service %q (BOLA: DisplayName==slug==service)", cfg.Slug, manifest.Service)
 	}
 
-	published := manifest
+	// The client that mints the publisher's token is, in a product, the client
+	// its routes authorize with: the manifest's scope goes to it here, so the
+	// routes derive their scope from the same bytes the product publishes,
+	// without a wiring call of their own.
+	if auth, ok := cfg.Auth.(*middleware.AuthClient); ok && auth != nil {
+		if err := wireManifestScope(auth, manifest); err != nil {
+			return nil, fmt.Errorf("wire manifest scope: %w", err)
+		}
+	}
+
+	// A product may authorize its routes with a client other than the one it
+	// hands the publisher. The scope is also registered process-wide under the
+	// manifest's service, and every client with no catalog of its own for that
+	// product uses it.
+	if err := wireManifestScope(productScopes{}, manifest); err != nil {
+		return nil, fmt.Errorf("register manifest scope: %w", err)
+	}
+
+	var published publication = manifest
 	if cfg.ScopeOnly {
 		published = manifest.scopeOnly()
 	}
@@ -311,7 +339,7 @@ func New(cfg Config) (*Publisher, error) {
 		wire:                 wire,
 		hash:                 hash,
 		scopeOnly:            cfg.ScopeOnly,
-		nothing:              cfg.ScopeOnly && manifest.Scope == nil,
+		nothing:              cfg.ScopeOnly && !manifest.hasScopeCatalog(),
 		maxTries:             defaultMaxTries,
 		retryInitialInterval: defaultRetryInitialInterval,
 		retryMaxInterval:     defaultRetryMaxInterval,
@@ -339,6 +367,13 @@ func newHTTPClient(injected *http.Client) *http.Client {
 	}
 
 	return &client
+}
+
+// publication is a body the publisher sends: the full manifest, or its
+// scope-only projection.
+type publication interface {
+	wireJSON() ([]byte, error)
+	CanonicalHash() (string, error)
 }
 
 func validateConfig(cfg Config) error {
@@ -416,7 +451,7 @@ func (p *Publisher) cacheKey() string {
 // returns a typed *PublishError; the caller decides whether that is fatal.
 func (p *Publisher) Publish(ctx context.Context) error {
 	if p.nothing {
-		p.logInfof(ctx, "declaration manifest for slug=%s declares no scope; nothing to publish", p.slug)
+		p.logInfof(ctx, "declaration manifest for slug=%s declares no scope and does not opt in to partners; nothing to publish", p.slug)
 
 		return nil
 	}

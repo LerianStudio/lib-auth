@@ -7,6 +7,51 @@ import (
 	"github.com/gofiber/fiber/v3"
 )
 
+// Denial reasons the authorization service publishes. Only the two that mean
+// "this credential is finished" change the status this layer returns.
+const (
+	reasonSuspended = "suspended"
+	reasonExpired   = "expired"
+)
+
+// denialStatus maps a denial reason to the status the caller is answered with.
+// Unknown and absent reasons keep the 403 every denial returned before reasons
+// existed, so a reason this version does not know never widens or narrows access.
+func denialStatus(reason string) int {
+	switch reason {
+	case reasonSuspended, reasonExpired:
+		return http.StatusUnauthorized
+	default:
+		return http.StatusForbidden
+	}
+}
+
+// partnerDenial is the refusal a credential-finished reason is answered with:
+// the 401 denialStatus picks, carrying a code and message that name the partner
+// as the cause. The codes are the ones the authorization service answers a token
+// request for the same partner with, so a client handles both alike. The token
+// itself is valid — it works again once the partner is honoured — and a refusal
+// that reads as a bad token sends its holder to debug the wrong thing. ok is
+// false for every other reason.
+func partnerDenial(reason string) (response commons.Response, ok bool) {
+	switch reason {
+	case reasonSuspended:
+		return commons.Response{
+			Code:    "AUT-1009",
+			Title:   "Partner Suspended",
+			Message: "the partner of this credential is suspended",
+		}, true
+	case reasonExpired:
+		return commons.Response{
+			Code:    "AUT-1010",
+			Title:   "Partner Outside Its Validity Period",
+			Message: "the partner of this credential is outside its validity period",
+		}, true
+	default:
+		return commons.Response{}, false
+	}
+}
+
 // RefusalError is why an authorization middleware refused a request: the status
 // to answer with and the message to render. AuthorizeHTTP hands it to the
 // HTTPErrorHandler; the Fiber Authorize returns the same refusal as a
@@ -94,4 +139,21 @@ func refusalMessage(response commons.Response, statusCode int) string {
 	}
 
 	return http.StatusText(statusCode)
+}
+
+// accessManagerRefusalFrom builds the error a non-2xx Access Manager answer
+// surfaces as. The STATUS is what makes the answer a refusal; the body only
+// supplies the reason, so a body that is empty, carries no domain code, or is not
+// JSON at all costs the caller the reason text and never the refusal itself. The
+// message is always non-empty, so a caller that logs the error never logs a blank
+// line.
+func accessManagerRefusalFrom(statusCode int, body []byte) commons.Response {
+	response, err := unmarshalErrorResponse(body)
+	if err != nil {
+		response = commons.Response{}
+	}
+
+	response.Message = refusalMessage(response, statusCode)
+
+	return response
 }

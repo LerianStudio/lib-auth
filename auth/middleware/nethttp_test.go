@@ -77,7 +77,7 @@ func appTokenClaims(sub string) jwt.MapClaims {
 }
 
 // bodyOf decodes the last /v1/authorize body the recording server received.
-func bodyOf(t *testing.T, rec *recordingAuthServer) map[string]any {
+func bodyOf(t *testing.T, rec *fakeAuthServer) map[string]any {
 	t.Helper()
 
 	var body map[string]any
@@ -189,7 +189,7 @@ func TestAuthorizeHTTP_Decisions(t *testing.T) {
 				return newRecordingAuthServer(t, AuthResponse{Authorized: false, Reason: reasonSuspended}).URL
 			},
 			wantStatus: http.StatusUnauthorized,
-			wantBody:   "Unauthorized",
+			wantBody:   "the partner of this credential is suspended",
 		},
 		{
 			name: "access_manager_5xx_is_503",
@@ -425,7 +425,7 @@ func TestAuthorizeHTTP_Scope(t *testing.T) {
 		t.Parallel()
 
 		am := newRecordingAuthServer(t, AuthResponse{Authorized: true})
-		auth := &AuthClient{Address: am.URL, Enabled: true, Logger: &testLogger{}}
+		auth := &AuthClient{Address: am.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
 		mw := auth.AuthorizeHTTP("midaz", "accounts", "get",
 			RequireScope("midaz",
 				Dim("organizationId", FromPath).At("org"),
@@ -435,7 +435,7 @@ func TestAuthorizeHTTP_Scope(t *testing.T) {
 
 		rec := serveGated(t, "GET /v1/orgs/{org}/accounts", mw(principalEcho(nil)), func() *http.Request {
 			req := httptest.NewRequest(http.MethodGet, "/v1/orgs/org-1/accounts?portfolio=pf-1", nil)
-			req.Header.Set("Authorization", "Bearer "+createTestJWT(normalUserClaims()))
+			req.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
 			req.Header.Set("X-Ledger-Id", "led-1")
 
 			return req
@@ -451,10 +451,10 @@ func TestAuthorizeHTTP_Scope(t *testing.T) {
 		t.Parallel()
 
 		am := newRecordingAuthServer(t, AuthResponse{Authorized: true})
-		auth := &AuthClient{Address: am.URL, Enabled: true, Logger: &testLogger{}}
+		auth := &AuthClient{Address: am.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
 		mw := auth.AuthorizeHTTP("midaz", "accounts", "get", RequireScope("midaz", Dim("ledgerId", FromHeader).At("X-Ledger-Id")))
 
-		rec := serveGated(t, "GET /x", mw(principalEcho(nil)), getWithBearer(createTestJWT(normalUserClaims())))
+		rec := serveGated(t, "GET /x", mw(principalEcho(nil)), getWithBearer(partnerToken("acme/p1")))
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 		assert.Zero(t, am.hits.Load())
 	})
@@ -463,12 +463,12 @@ func TestAuthorizeHTTP_Scope(t *testing.T) {
 		t.Parallel()
 
 		am := newRecordingAuthServer(t, AuthResponse{Authorized: true})
-		auth := &AuthClient{Address: am.URL, Enabled: true, Logger: &testLogger{}}
+		auth := &AuthClient{Address: am.URL, Enabled: true, Logger: &testLogger{}, M2MInversionEnabled: true}
 		mw := auth.AuthorizeHTTP("midaz", "accounts", "get", RequireScope("midaz", Dim("organizationId", FromPath).At("org")))
 
 		// Served directly, not through a ServeMux pattern: r.PathValue is empty.
 		req := httptest.NewRequest(http.MethodGet, "/v1/orgs/org-1/accounts", nil)
-		req.Header.Set("Authorization", "Bearer "+createTestJWT(normalUserClaims()))
+		req.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
 
 		rec := httptest.NewRecorder()
 		mw(principalEcho(nil)).ServeHTTP(rec, req)
@@ -740,7 +740,7 @@ func TestAuthorizeHTTP_ConcurrentRequestsKeepTheirOwnPrincipal(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, int64(callers), am.hits.Load())
-	assert.Len(t, am.recordedBodies(), callers, "every concurrent authorize body must be recorded")
+	assert.Len(t, am.requests(), callers, "every concurrent authorize body must be recorded")
 }
 
 // The default handler renders exactly what Fiber's default renders for the same

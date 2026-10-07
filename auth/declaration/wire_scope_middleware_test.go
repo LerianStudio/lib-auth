@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -92,11 +93,15 @@ func TestWireScope_ManifestWithoutScopeIsANoop(t *testing.T) {
 	rec := newAuthorizeRecorder(t)
 	auth := middleware.NewAuthClient(rec.URL, true, obs.Nop())
 
-	require.NoError(t, WireScope(auth, []byte(feesJSON)))
+	// A service no other test registers: the process-wide registry has no
+	// catalog for it either.
+	unscoped := strings.Replace(feesJSON, `"service": "plugin-fees"`, `"service": "plugin-fees-unscoped"`, 1)
+	require.Contains(t, unscoped, `"plugin-fees-unscoped"`)
+	require.NoError(t, WireScope(auth, []byte(unscoped)))
 
 	app := fiber.New()
 	app.Get("/v1/organizations/:organization_id",
-		auth.Authorize("plugin-fees", "ledgers", "get"),
+		auth.Authorize("plugin-fees-unscoped", "ledgers", "get"),
 		func(c fiber.Ctx) error { return c.SendString("ok") })
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/organizations/org-1", nil)
@@ -104,8 +109,15 @@ func TestWireScope_ManifestWithoutScopeIsANoop(t *testing.T) {
 
 	resp, err := app.Test(req)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusForbidden, resp.StatusCode,
-		"without a catalog the route declares nothing, and a partner credential is refused as before")
+	assert.Equal(t, http.StatusOK, resp.StatusCode,
+		"without a catalog the route declares nothing, and a partner credential is asked as is")
+
+	rec.mu.Lock()
+	body := rec.last
+	rec.mu.Unlock()
+
+	assert.NotEmpty(t, body, "the partner request reached the authorization service")
+	assert.NotContains(t, body, `"attributes"`)
 }
 
 func TestWireScope_Errors(t *testing.T) {
@@ -115,6 +127,6 @@ func TestWireScope_Errors(t *testing.T) {
 
 	require.Error(t, WireScope(nil, []byte(scopedYAML)), "nil client")
 	require.Error(t, WireScope(auth, nil), "empty manifest")
-	require.Error(t, WireScope(auth, []byte("service: x\nversion: 1\nscope:\n  dimensions:\n    - name: a\n      from: query\n      param: a\n      collection: c\n")),
+	require.Error(t, WireScope(auth, []byte("service: x\nversion: 1\nscope:\n  dimensions:\n    - name: a\n      from: body\n      param: a\n      collection: c\n")),
 		"invalid scope")
 }
