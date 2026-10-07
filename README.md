@@ -689,12 +689,19 @@ app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id", handler)
   registers (`Use` mounts aside) and every `scope.routes` entry of the manifest.
   The route that matches takes its scope from the manifest exactly as if the
   handler were on it, and its path parameters are read from the match.
+* Matching follows the app's own routing: literals compare without regard to
+  letter case unless `fiber.Config.CaseSensitive` is set, and a trailing slash is
+  ignored unless `fiber.Config.StrictRouting` is set — so a request resolves to
+  the route Fiber routes it to.
 * The **most specific** route wins, compared segment by segment from the left:
   a literal over a parameter, a parameter over an optional one, an optional one
   over a wildcard. Two routes equally specific under different paths
   (`/x/:organization_id` and `/x/:org`) leave the request **unresolved**.
 * Two `scope.routes` entries of one method that are the same route under other
   parameter names are a manifest defect, refused when the manifest is wired.
+  The app's routing is not known then, so only entries that are one route under
+  any routing are refused (literals differing in letter case, or in a trailing
+  slash, are left to the runtime rule above).
 * A partner-bound request that resolves to no single route — none matches, or
   two tie — is refused **403 before the round-trip**: its scope cannot be read.
   Every other credential is decided exactly as before, down to the bytes on the

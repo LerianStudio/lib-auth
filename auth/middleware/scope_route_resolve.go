@@ -36,11 +36,26 @@ type templateSegment struct {
 	nonEmpty bool
 }
 
+// routingRules are the app settings that decide which route a path reaches,
+// read from its fiber.Config so a request resolves where Fiber routes it. The
+// zero value is Fiber's default.
+type routingRules struct {
+	// caseSensitive compares literals with letter case (fiber.Config.CaseSensitive).
+	caseSensitive bool
+	// strict makes a trailing slash significant (fiber.Config.StrictRouting).
+	strict bool
+}
+
+// strictestRouting are the rules under which the fewest paths are one route:
+// two routes that are one under them are one under any app's routing.
+var strictestRouting = routingRules{caseSensitive: true, strict: true}
+
 // routeTemplate is one route, method and path as registered, parsed for
-// matching.
+// matching under an app's routing rules.
 type routeTemplate struct {
 	method   string
 	path     string
+	rules    routingRules
 	segments []templateSegment
 }
 
@@ -48,9 +63,9 @@ type routeTemplate struct {
 // path whose syntax it does not read (several parameters in one segment, an
 // optional parameter or a wildcard anywhere but last): such a route is never
 // a candidate, and a request only it would serve resolves to no route.
-func parseRouteTemplate(method, path string) (routeTemplate, bool) {
-	route := routeTemplate{method: method, path: path}
-	parts := pathSegments(path)
+func parseRouteTemplate(method, path string, rules routingRules) (routeTemplate, bool) {
+	route := routeTemplate{method: method, path: path, rules: rules}
+	parts := pathSegments(path, rules)
 
 	for i, part := range parts {
 		segment, ok := parseTemplateSegment(part)
@@ -99,19 +114,19 @@ func parseTemplateSegment(part string) (templateSegment, bool) {
 	}
 }
 
-// pathSegments splits a path into its segments, ignoring a trailing slash as
-// Fiber's default routing does.
-func pathSegments(path string) []string {
-	if len(path) > 1 {
-		path = strings.TrimSuffix(path, "/")
+// pathSegments splits a path into its segments. Unless the routing is strict,
+// trailing slashes are ignored, as Fiber ignores them.
+func pathSegments(path string, rules routingRules) []string {
+	if !rules.strict && len(path) > 1 {
+		path = strings.TrimRight(path, "/")
 	}
 
 	return strings.Split(path, "/")[1:]
 }
 
 // match reads the path parameters of a request, split by pathSegments, the
-// template describes, or returns false. Literals match without regard to
-// letter case, as Fiber's default routing does. Nothing is allocated for a
+// template describes, or returns false. Literals and trailing slashes are
+// compared as the app's routing compares them (routingRules). Nothing is allocated for a
 // template that does not match, which is almost every candidate. On a match
 // the map is never nil, even when the template has no parameter: a nil map
 // reads parameters from Fiber, which has none past the mount prefix.
@@ -140,7 +155,7 @@ func (r *routeTemplate) fits(parts []string) bool {
 			return !segment.nonEmpty || hasNonEmpty(parts[min(i, len(parts)):])
 		case segment.kind == segmentOptional && i == len(parts):
 			return true
-		case !segment.matches(parts[i]):
+		case !segment.matches(parts[i], r.rules):
 			return false
 		}
 	}
@@ -178,8 +193,13 @@ func (r *routeTemplate) fitsLength(n int) bool {
 }
 
 // matches reports whether one request segment fits the template segment: a
-// literal without regard to letter case, a parameter when it is not empty.
-func (s templateSegment) matches(part string) bool {
+// literal when it is the same text — without regard to letter case unless the
+// routing is case-sensitive — and a parameter when it is not empty.
+func (s templateSegment) matches(part string, rules routingRules) bool {
+	if s.kind == segmentLiteral && rules.caseSensitive {
+		return s.text == part
+	}
+
 	if s.kind == segmentLiteral {
 		return strings.EqualFold(s.text, part)
 	}
@@ -216,7 +236,7 @@ func sameShape(a, b routeTemplate) bool {
 			return false
 		}
 
-		if sa.kind == segmentLiteral && !strings.EqualFold(sa.text, sb.text) {
+		if sa.kind == segmentLiteral && !sa.matches(sb.text, a.rules) {
 			return false
 		}
 	}
@@ -237,6 +257,7 @@ type routeTable struct {
 	app        *fiber.App
 	handlers   uint32
 	generation uint64
+	rules      routingRules
 	routes     []routeTemplate
 }
 
@@ -251,7 +272,7 @@ func (t *routeTable) resolve(method, path string) (resolvedRoute, string) {
 		tied      *routeTemplate
 	)
 
-	parts := pathSegments(path)
+	parts := pathSegments(path, t.rules)
 
 	for i := range t.routes {
 		route := &t.routes[i]
@@ -291,7 +312,13 @@ func (t *routeTable) resolve(method, path string) (resolvedRoute, string) {
 // buildRouteTable compiles the app's routes — every route it registers, Use
 // mounts aside — and the routes the product's manifest declares, each once.
 func buildRouteTable(app *fiber.App, generation uint64, declared []string) *routeTable {
-	table := &routeTable{app: app, handlers: app.HandlersCount(), generation: generation}
+	config := app.Config()
+	table := &routeTable{
+		app:        app,
+		handlers:   app.HandlersCount(),
+		generation: generation,
+		rules:      routingRules{caseSensitive: config.CaseSensitive, strict: config.StrictRouting},
+	}
 	seen := make(map[string]struct{})
 
 	add := func(method, path string) {
@@ -302,7 +329,7 @@ func buildRouteTable(app *fiber.App, generation uint64, declared []string) *rout
 
 		seen[key] = struct{}{}
 
-		if route, ok := parseRouteTemplate(method, path); ok {
+		if route, ok := parseRouteTemplate(method, path, table.rules); ok {
 			table.routes = append(table.routes, route)
 		}
 	}

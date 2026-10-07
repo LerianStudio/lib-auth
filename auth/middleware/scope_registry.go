@@ -221,9 +221,12 @@ func (store *manifestScopeStore) setRouteScope(product, method, path string, dim
 // sameRouteUnderAnotherName returns the path of a declared route of the same
 // method that matches exactly the requests path does under other parameter
 // names, or "". A request seen through a mount prefix is resolved among the
-// declared routes, and two names for one route would leave it to a guess.
+// declared routes, and two names for one route would leave it to a guess. The
+// app's routing is not known here, so the routes are compared under the
+// strictest one: only routes that are one route under any routing are refused,
+// and the rest are told apart, or refused, when a request is resolved.
 func sameRouteUnderAnotherName(routes map[string]routeBodyScope, method, path string) string {
-	route, ok := parseRouteTemplate(method, path)
+	route, ok := parseRouteTemplate(method, path, strictestRouting)
 	if !ok {
 		return ""
 	}
@@ -234,7 +237,7 @@ func sameRouteUnderAnotherName(routes map[string]routeBodyScope, method, path st
 			continue
 		}
 
-		if other, ok := parseRouteTemplate(otherMethod, otherPath); ok && sameShape(route, other) {
+		if other, ok := parseRouteTemplate(otherMethod, otherPath, strictestRouting); ok && sameShape(route, other) {
 			return otherPath
 		}
 	}

@@ -393,10 +393,10 @@ func TestRouteTemplate_Match(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			route, ok := parseRouteTemplate(http.MethodGet, tt.template)
+			route, ok := parseRouteTemplate(http.MethodGet, tt.template, routingRules{})
 			require.True(t, ok)
 
-			params, matched := route.match(pathSegments(tt.path))
+			params, matched := route.match(pathSegments(tt.path, routingRules{}))
 			assert.Equal(t, tt.want != nil, matched)
 
 			if tt.want != nil {
@@ -417,7 +417,7 @@ func TestParseRouteTemplate_RefusesWhatItCannotRead(t *testing.T) {
 		"/v1/:a?/x",
 		"/v1/:",
 	} {
-		_, ok := parseRouteTemplate(http.MethodGet, template)
+		_, ok := parseRouteTemplate(http.MethodGet, template, routingRules{})
 		assert.False(t, ok, template)
 	}
 }
@@ -426,7 +426,7 @@ func TestCompareSpecificity(t *testing.T) {
 	t.Parallel()
 
 	parse := func(path string) routeTemplate {
-		route, ok := parseRouteTemplate(http.MethodGet, path)
+		route, ok := parseRouteTemplate(http.MethodGet, path, routingRules{})
 		require.True(t, ok, path)
 
 		return route
@@ -508,5 +508,135 @@ func TestSegmentCount(t *testing.T) {
 		"/:organization_id/abc":  2,
 	} {
 		assert.Equal(t, want, segmentCount(path), path)
+	}
+}
+
+// The route a mounted request resolves to is the one Fiber routes it to: with
+// CaseSensitive, literals differing in letter case are distinct routes.
+func TestAuthorize_MountedHandler_FollowsCaseSensitiveRouting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		caseSensitive bool
+		target        string
+		status        int
+		attributes    string
+	}{
+		{name: "sensitive_lower", caseSensitive: true, target: ledgerPath, status: http.StatusOK, attributes: `{"organizationId":"org-1","ledgerId":"led-1"}`},
+		{name: "sensitive_upper", caseSensitive: true, target: "/v1/organizations/org-1/Ledgers/led-1", status: http.StatusOK, attributes: `{"organizationId":"org-1"}`},
+		// Fiber's default: the two are one route under two names, and the
+		// request cannot be read on either without guessing.
+		{name: "insensitive_tie", caseSensitive: false, target: ledgerPath, status: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+			auth := scopedClient(t, rec)
+
+			app := fiber.New(fiber.Config{CaseSensitive: tt.caseSensitive})
+			app.Use("/v1/organizations", auth.Authorize("midaz", "ledgers", "get"))
+			app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id", ok)
+			app.Get("/v1/organizations/:organization_id/Ledgers/:other", ok)
+
+			assert.Equal(t, tt.status, doGet(t, app, tt.target, partnerToken("acme/p1")))
+
+			if tt.attributes != "" {
+				assert.JSONEq(t, tt.attributes, attributesOf(t, rec.lastBody(t)))
+			} else {
+				assert.Zero(t, rec.hits.Load(), "refused without asking")
+			}
+		})
+	}
+}
+
+// With StrictRouting, a trailing slash makes another route.
+func TestAuthorize_MountedHandler_FollowsStrictRouting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		strict     bool
+		target     string
+		status     int
+		attributes string
+	}{
+		{name: "strict_without_slash", strict: true, target: ledgerPath, status: http.StatusOK, attributes: `{"organizationId":"org-1","ledgerId":"led-1"}`},
+		{name: "strict_with_slash", strict: true, target: ledgerPath + "/", status: http.StatusOK, attributes: `{"organizationId":"org-1"}`},
+		// Fiber's default ignores the trailing slash: one route, two names.
+		{name: "lenient_tie", strict: false, target: ledgerPath, status: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+			auth := scopedClient(t, rec)
+
+			app := fiber.New(fiber.Config{StrictRouting: tt.strict})
+			app.Use("/v1/organizations", auth.Authorize("midaz", "ledgers", "get"))
+			app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id", ok)
+			app.Get("/v1/organizations/:organization_id/ledgers/:other/", ok)
+
+			assert.Equal(t, tt.status, doGet(t, app, tt.target, partnerToken("acme/p1")))
+
+			if tt.attributes != "" {
+				assert.JSONEq(t, tt.attributes, attributesOf(t, rec.lastBody(t)))
+			} else {
+				assert.Zero(t, rec.hits.Load(), "refused without asking")
+			}
+		})
+	}
+}
+
+// At boot the app's routing is unknown: only routes that are one route under
+// any routing are refused. Literals in another letter case are distinct under
+// CaseSensitive, and are left to the runtime rule.
+func TestSetManifestRouteScope_CaseDifferingLiteralsAreDistinct(t *testing.T) {
+	t.Parallel()
+
+	auth := &AuthClient{Logger: &testLogger{}}
+	require.NoError(t, auth.SetManifestScope("midaz", manifestDims()...))
+	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, "/v1/organizations/:organization_id/transfers",
+		Dim("ledgerId", FromBody).At("ledger_id")))
+	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, "/v1/organizations/:org/Transfers",
+		Dim("ledgerId", FromBody).At("ledger_id")))
+}
+
+func TestRouteTemplate_MatchFollowsRoutingRules(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		rules    routingRules
+		template string
+		path     string
+		matched  bool
+	}{
+		{name: "case_insensitive", rules: routingRules{}, template: "/v1/Things/:a", path: "/v1/things/1", matched: true},
+		{name: "case_sensitive_same", rules: routingRules{caseSensitive: true}, template: "/v1/Things/:a", path: "/v1/Things/1", matched: true},
+		{name: "case_sensitive_other", rules: routingRules{caseSensitive: true}, template: "/v1/Things/:a", path: "/v1/things/1", matched: false},
+		{name: "lenient_slashes", rules: routingRules{}, template: "/v1/:a", path: "/v1/1//", matched: true},
+		{name: "strict_slash_route_slash_request", rules: routingRules{strict: true}, template: "/v1/:a/", path: "/v1/1/", matched: true},
+		{name: "strict_slash_route_bare_request", rules: routingRules{strict: true}, template: "/v1/:a/", path: "/v1/1", matched: false},
+		{name: "strict_bare_route_slash_request", rules: routingRules{strict: true}, template: "/v1/:a", path: "/v1/1/", matched: false},
+		{name: "strict_plus_only_empty_segments", rules: routingRules{strict: true}, template: "/v1/+", path: "/v1//", matched: false},
+		{name: "strict_plus_segment", rules: routingRules{strict: true}, template: "/v1/+", path: "/v1//x", matched: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			route, ok := parseRouteTemplate(http.MethodGet, tt.template, tt.rules)
+			require.True(t, ok)
+
+			_, matched := route.match(pathSegments(tt.path, tt.rules))
+			assert.Equal(t, tt.matched, matched)
+		})
 	}
 }
