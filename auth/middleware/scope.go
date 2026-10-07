@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/gofiber/fiber/v3"
@@ -100,10 +101,10 @@ func (d Dimension) Source() Source { return d.source }
 // spaces around an element trimmed, so "?id=a&id=b", "?id=a,b" and two header
 // lines "a" and "b" all name a and b. An element that is empty after trimming
 // names nothing and is malformed. Body dimensions are read by the body plan.
-func (d Dimension) read(c fiber.Ctx) (values []string, present bool, problem string) {
+func (d Dimension) read(c fiber.Ctx, scope ScopeDeclaration) (values []string, present bool, problem string) {
 	switch d.source {
 	case FromPath:
-		value := c.Params(d.key)
+		value := scope.pathParam(c, d.key)
 
 		return []string{value}, value != "", ""
 	case FromHeader:
@@ -230,6 +231,24 @@ type ScopeDeclaration struct {
 	// body is the compiled plan of the dimensions read from the request body, or
 	// nil when the route reads none.
 	body *bodyPlan
+	// route is the route ForRoute states, or nil when the route is the one
+	// Fiber matched.
+	route *routeTemplate
+	// params are the path parameters read for the request in flight on a stated
+	// route; nil reads them from Fiber.
+	params map[string]string
+	// unmatched is non-empty when the stated route does not describe the
+	// request in flight.
+	unmatched string
+}
+
+// pathParam reads a path parameter of the request in flight.
+func (s ScopeDeclaration) pathParam(c fiber.Ctx, key string) string {
+	if s.params != nil {
+		return s.params[key]
+	}
+
+	return c.Params(key)
 }
 
 // RequireScope declares the dimensions a route's requests carry, for the product
@@ -344,13 +363,13 @@ func divergence(name, first, second string) *errBodyScope {
 // does not carry is left out. A malformed carrier outranks an absent dimension,
 // whatever order the two are declared in: every dimension is read before the
 // absence is reported, and a request that is malformed is answered as such.
-func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
+func resolveAttributes(c fiber.Ctx, scope ScopeDeclaration) (requestValues, string) {
 	var (
 		rv      requestValues
 		missing string
 	)
 
-	for _, dim := range dims {
+	for _, dim := range scope.dims {
 		// A body dimension is not one value of the request but one per question
 		// the body makes; the body plan reads those. A form field is read with
 		// the body, only for the callers whose body is read.
@@ -358,7 +377,7 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
 			continue
 		}
 
-		values, present, problem := dim.read(c)
+		values, present, problem := dim.read(c, scope)
 
 		switch {
 		case problem != "":
@@ -443,6 +462,10 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 	if scope.product != product {
 		return ScopeDeclaration{}, "scope declaration names product " + scope.product +
 			", which is not the route's product " + product
+	}
+
+	if scope.route != nil && scope.route.problem != "" {
+		return ScopeDeclaration{}, scope.route.problem
 	}
 
 	plan, problem := compileDims(scope.dims)
@@ -573,7 +596,12 @@ type routeScope struct {
 	// explicit is the route's own declaration, already validated on its own;
 	// nil when the route relies on its product's catalog.
 	explicit *ScopeDeclaration
-	byRoute  sync.Map // method and route path -> cachedRouteScope
+	// stated is the route ForRoute declares, which takes its scope from the
+	// product's catalog in place of the route Fiber matched; nil otherwise.
+	stated  *routeTemplate
+	byRoute sync.Map // method and route path -> cachedRouteScope
+	// warnedPrefix records that the prefix-mount warning was logged.
+	warnedPrefix atomic.Bool
 }
 
 // cachedRouteScope is a route's scope together with the manifest generation it
@@ -638,10 +666,53 @@ func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclara
 		return nil, declErr
 	}
 
-	route := &routeScope{auth: auth, product: product}
-	if len(scopes) > 0 {
+	route := &routeScope{auth: auth, product: product, stated: scope.route}
+	if len(scopes) > 0 && scope.route == nil {
 		route.explicit = &scope
 	}
 
 	return route, ""
+}
+
+// scopeFor returns the scope of the request in flight, and a non-empty
+// description of what is wrong when the route cannot be honoured. The route is
+// the one ForRoute states, when the declaration states one, and the one Fiber
+// matched otherwise.
+func (r *routeScope) scopeFor(c fiber.Ctx) (ScopeDeclaration, string) {
+	if r.stated == nil {
+		r.warnPrefixMount(c)
+
+		return r.forRoute(c.Route().Method, c.Route().Path)
+	}
+
+	scope, problem := r.forRoute(r.stated.method, r.stated.path)
+	if problem != "" {
+		return scope, problem
+	}
+
+	return r.stated.bindRequest(c, scope), ""
+}
+
+// warnPrefixMount logs, once per handler, that a handler mounted with Use on
+// a prefix authorizes a product with a scope catalog without stating its route:
+// Fiber reports the prefix as the route, with no parameters, so the dimensions
+// of the routes it guards are never read and a partner-bound request is asked
+// with none of them. The request is still decided; the warning is what makes
+// the gap visible.
+func (r *routeScope) warnPrefixMount(c fiber.Ctx) {
+	if r.warnedPrefix.Load() || !servedByPrefix(c.Route().Path, c.Path()) {
+		return
+	}
+
+	if _, catalog, _, _ := r.auth.manifestRouteScope(r.product, ""); len(catalog) == 0 {
+		return
+	}
+
+	if r.warnedPrefix.Swap(true) {
+		return
+	}
+
+	logWarnf(context.Background(), r.auth.Logger,
+		"Authorize for product %q is mounted on the prefix %q: Fiber reports the prefix as the route, so the scope dimensions of the routes it guards are never read. State the route with ForRoute.",
+		r.product, c.Route().Path)
 }

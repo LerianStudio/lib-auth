@@ -299,6 +299,14 @@ func logErrorf(ctx context.Context, logger obs.Logger, format string, args ...an
 	logger.Log(ctx, obs.LevelError, fmt.Sprintf(format, args...))
 }
 
+func logWarnf(ctx context.Context, logger obs.Logger, format string, args ...any) {
+	if logger == nil {
+		return
+	}
+
+	logger.Log(ctx, obs.LevelWarn, fmt.Sprintf(format, args...))
+}
+
 func logInfof(ctx context.Context, logger obs.Logger, format string, args ...any) {
 	if logger == nil {
 		return
@@ -537,7 +545,9 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // instances (an organization, a ledger) whose identifiers the authorization
 // service must see to honour a partner-scoped credential. A route that passes
 // none takes its scope from its product's manifest scope, when one is wired
-// (see SetManifestScope), on its first request. The scope is read only for a
+// (see SetManifestScope), on its first request. A handler mounted with Use on
+// a prefix sees the prefix as its route: pass ForRoute to state the route the
+// request is for. The scope is read only for a
 // partner-bound credential: any other credential is decided exactly as on a
 // route with no scope, down to the bytes on the wire. A partner-bound
 // credential on a request that names no scope dimension is asked without
@@ -664,7 +674,7 @@ func (auth *AuthClient) routeScopeOf(ctx context.Context, c fiber.Ctx, route *ro
 
 	problem := declErr
 	if route != nil {
-		scope, problem = route.forRoute(c.Route().Method, c.Route().Path)
+		scope, problem = route.scopeFor(c)
 	}
 
 	if problem == "" {
@@ -765,7 +775,13 @@ func (auth *AuthClient) scopeQuestions(ctx context.Context, c fiber.Ctx, scope S
 		return nil, nil
 	}
 
-	readings, missing := resolveAttributes(c, scope.dims)
+	if scope.unmatched != "" {
+		logErrorf(ctx, auth.Logger, "Scope cannot be read on the stated route: %s; denying (fail closed)", scope.unmatched)
+
+		return nil, auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
+	}
+
+	readings, missing := resolveAttributes(c, scope)
 	if missing != "" {
 		logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
 
