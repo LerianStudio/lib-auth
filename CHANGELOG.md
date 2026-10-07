@@ -1,3 +1,10 @@
+## [5.6.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.6.0-beta.2...v5.6.0-beta.3) (2026-10-07)
+
+
+### Features
+
+* **middleware:** add IsDeclaredSourceService and document SourceService preconditions ([80cacc0](https://github.com/LerianStudio/lib-auth/commit/80cacc063ab2ab0bc15c25ef7683e4f4f0871445))
+
 ## [5.6.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.6.0-beta.1...v5.6.0-beta.2) (2026-10-07)
 
 
