@@ -1,3 +1,10 @@
+## [5.6.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.5.0...v5.6.0-beta.1) (2026-10-07)
+
+
+### Features
+
+* **middleware:** expose the verified sourceService claim on Principal ([284f232](https://github.com/LerianStudio/lib-auth/commit/284f2323c325e401c1556c9dcefbf8fb76c37b37))
+
 ## [5.5.0](https://github.com/LerianStudio/lib-auth/compare/v5.4.2...v5.5.0) (2026-10-06)
 
 
