@@ -56,8 +56,36 @@ type Principal struct {
 	// affect authorization or PrincipalFromContext's validity rules. Marker values
 	// the issuer writes for "no declared source" (for example "undeclared") are
 	// published as-is: the consumer decides whether such a value may identify
-	// anyone, and an identity decision should refuse an empty or marker value.
+	// anyone, and an identity decision should refuse an empty or marker value,
+	// which IsDeclaredSourceService reports.
+	//
+	// It is published only when the authorization model is inversion
+	// (AUTH_M2M_INVERSION_ENABLED=true) or PrincipalRequiredWhenDisabled is set.
+	// Under the legacy model (inversion off) an application token publishes no
+	// Principal at all, so a service that needs this field must run with
+	// inversion on. A credential issued before the issuer started stamping the
+	// claim carries none and reads as empty until it is rotated.
 	SourceService string
+}
+
+// UndeclaredSourceService is the marker the credential issuer writes into the
+// sourceService claim of an application created without a source. It names nobody.
+const UndeclaredSourceService = "undeclared"
+
+// IsDeclaredSourceService reports whether v names a service: it is false for the
+// empty string, for a whitespace-only value and for UndeclaredSourceService
+// (compared after trimming and ignoring case, so the helper only ever errs toward
+// refusing). A consumer that uses Principal.SourceService as an identity must
+// refuse the Principal when this returns false, instead of carrying its own copy
+// of the marker.
+//
+// It is a shape check, not authentication: it says nothing about whether the
+// value is trustworthy (see the trust-boundary note on Principal.SourceService)
+// and it does not change what Principal publishes, which stays verbatim.
+func IsDeclaredSourceService(v string) bool {
+	v = strings.TrimSpace(v)
+
+	return v != "" && !strings.EqualFold(v, UndeclaredSourceService)
 }
 
 // principalContextKey is the unexported, typed key under which Authorize stores

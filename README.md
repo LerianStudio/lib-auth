@@ -364,7 +364,19 @@ as an identity in that mode (see the trust-boundary warning under
 It never affects authorization or whether `PrincipalFromContext` reports a
 principal. The library does not validate it: an issuer may write a marker such as
 `undeclared` for a credential created without a source, and a service that uses the
-value as an identity must refuse an empty or marker value.
+value as an identity must refuse an empty or marker value. Do not copy the marker:
+`middleware.IsDeclaredSourceService(p.SourceService)` is false for an empty,
+whitespace-only or `undeclared` value (`middleware.UndeclaredSourceService`), and
+that is the refusal to apply.
+
+The field exists only where an application `Principal` is published, which requires
+`AUTH_M2M_INVERSION_ENABLED=true` (or `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED`). Under
+the legacy model an application token publishes no `Principal`, so a service that
+identifies its callers by `SourceService` must refuse to start with inversion off.
+A machine credential issued before the issuer stamped the claim carries none and
+reads as empty until it is rotated or recreated; the helper refuses it like any
+other undeclared value. The field is read from the HTTP `Authorize` path only: the
+gRPC interceptors do not publish a `Principal`.
 
 Publication covers the authorized decision, a decision-cache hit, and the
 `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` path below. A denied request publishes
