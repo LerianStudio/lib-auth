@@ -370,7 +370,10 @@ whitespace-only or `undeclared` value (`middleware.UndeclaredSourceService`), an
 that is the refusal to apply.
 
 The field exists only where an application `Principal` is published, which requires
-`AUTH_M2M_INVERSION_ENABLED=true` (or `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED`). Under
+`AUTH_M2M_INVERSION_ENABLED=true`. When authorization is disabled,
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=true` is required in addition to inversion:
+that flag alone does not publish an application `Principal`, because the no-round-trip
+path rejects application tokens while inversion is off. Under
 the legacy model an application token publishes no `Principal`, so a service that
 identifies its callers by `SourceService` must refuse to start with inversion off.
 A machine credential issued before the issuer stamped the claim carries none and

@@ -60,10 +60,12 @@ type Principal struct {
 	// which IsDeclaredSourceService reports.
 	//
 	// It is published only when the authorization model is inversion
-	// (AUTH_M2M_INVERSION_ENABLED=true) or PrincipalRequiredWhenDisabled is set.
-	// Under the legacy model (inversion off) an application token publishes no
-	// Principal at all, so a service that needs this field must run with
-	// inversion on. A credential issued before the issuer started stamping the
+	// (AUTH_M2M_INVERSION_ENABLED=true); when authorization is disabled,
+	// PrincipalRequiredWhenDisabled must be set in addition to inversion, since
+	// that flag alone does not publish an application Principal (the
+	// no-round-trip path rejects it while inversion is off). Under the legacy
+	// model (inversion off) an application token publishes no Principal at all,
+	// so a service that needs this field must run with inversion on. A credential issued before the issuer started stamping the
 	// claim carries none and reads as empty until it is rotated.
 	SourceService string
 }
