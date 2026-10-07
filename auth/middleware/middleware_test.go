@@ -871,14 +871,15 @@ func TestAuthorize_ForwardsClientIP(t *testing.T) {
 	// newApp builds a Fiber app carrying the trusted-proxy config a correctly
 	// configured service sets. The middleware no longer reads it — it derives the
 	// caller IP from its own TRUSTED_PROXIES list (testPeerCIDR below, matching the
-	// in-memory test connection's 0.0.0.0 peer) — but keeping it here shows the two
+	// testPeerIP peer useTestPeer sets) — but keeping it here shows the two
 	// agree when the service IS configured.
 	newApp := func(auth *AuthClient) *fiber.App {
 		app := fiber.New(fiber.Config{
 			TrustProxy:       true,
-			TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"0.0.0.0"}},
+			TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{testPeerIP}},
 			ProxyHeader:      fiber.HeaderXForwardedFor,
 		})
+		useTestPeer(app)
 		app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
 			return c.SendString("reached handler")
 		})
@@ -941,8 +942,8 @@ func TestAuthorize_ForwardsClientIP(t *testing.T) {
 
 		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, trustedProxies: mustPrefixes(t, testPeerCIDR)}
 
-		// No X-Forwarded-For header: the only hop is the test connection's
-		// 0.0.0.0, which the client lists as a trusted proxy, so the walk skips it
+		// No X-Forwarded-For header: the only hop is the test peer
+		// (testPeerIP), which the client lists as a trusted proxy, so the walk skips it
 		// and no untrusted address remains -> the derived IP is "" -> key
 		// omitted. This is not a harness quirk: it mirrors fully-internal
 		// traffic, where every hop is a trusted proxy and no caller IP can be
@@ -973,15 +974,16 @@ func TestAuthorize_DecisionCache_ScopedByClientIP(t *testing.T) {
 		blockedIP = "198.51.100.9"
 	)
 
-	// newApp builds a Fiber app fronted by a trusted proxy (the in-memory test
-	// connection's 0.0.0.0 peer, listed in the client's TRUSTED_PROXIES fixture),
+	// newApp builds a Fiber app fronted by a trusted proxy (the testPeerIP peer
+	// useTestPeer sets, listed in the client's TRUSTED_PROXIES fixture),
 	// so a test can drive a known client IP through X-Forwarded-For.
 	newApp := func(auth *AuthClient) *fiber.App {
 		app := fiber.New(fiber.Config{
 			TrustProxy:       true,
-			TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"0.0.0.0"}},
+			TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{testPeerIP}},
 			ProxyHeader:      fiber.HeaderXForwardedFor,
 		})
+		useTestPeer(app)
 		app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
 			return c.SendString("reached handler")
 		})
@@ -1097,9 +1099,10 @@ func TestAuthorize_DoesNotTraceClientIP(t *testing.T) {
 
 	app := fiber.New(fiber.Config{
 		TrustProxy:       true,
-		TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"0.0.0.0"}},
+		TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{testPeerIP}},
 		ProxyHeader:      fiber.HeaderXForwardedFor,
 	})
+	useTestPeer(app)
 
 	// Seed the tracer the middleware recovers from the request context.
 	app.Use(func(c fiber.Ctx) error {

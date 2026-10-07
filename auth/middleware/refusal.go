@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/LerianStudio/lib-commons/v7/commons"
@@ -53,50 +52,68 @@ func partnerDenial(reason string) (response commons.Response, ok bool) {
 	}
 }
 
-// refusalFor is the error a resolution refuses the request with, or nil when it
-// allows it.
-func (auth *AuthClient) refusalFor(c fiber.Ctx, resolution authzResolution) error {
-	// checkResult, not legacyResult: an Access Manager that never produced an
-	// answer must be refused as 503, not rendered as a 403 the caller reads as
-	// "you are Forbidden" or a 500 that names the wrong subsystem. Fail-closed
-	// is unchanged — the request is still refused — only the word is corrected,
-	// which is what puts the outage in the rail's 5xx alarms.
-	authorized, statusCode, err := resolution.checkResult()
-	if err != nil {
-		var commonsErr commons.Response
-		if errors.As(err, &commonsErr) {
-			return auth.authorizeCommonsRefusal(c, statusCode, commonsErr)
-		}
-
-		return auth.authorizeRefusal(c, statusCode, http.StatusText(statusCode))
-	}
-
-	if !authorized {
-		// The denial reason, not the transport status, picks the word: a
-		// credential the authorization service called finished is answered 401
-		// so its holder re-issues it, while every other denial stays the 403 it
-		// has always been.
-		status := denialStatus(resolution.reason)
-
-		if response, ok := partnerDenial(resolution.reason); ok {
-			return auth.authorizeCommonsRefusal(c, status, response)
-		}
-
-		return auth.authorizeRefusal(c, status, http.StatusText(status))
-	}
-
-	return nil
+// RefusalError is why an authorization middleware refused a request: the status
+// to answer with and the message to render. AuthorizeHTTP hands it to the
+// HTTPErrorHandler; the Fiber Authorize returns the same refusal as a
+// *fiber.Error, with the same status and message.
+type RefusalError struct {
+	// Status is the HTTP status the caller must be answered with: 401, 403, 503,
+	// or the status the Access Manager itself refused with.
+	Status int
+	// Message is the text to render: the status text, "Missing Token", or the
+	// reason the Access Manager wrote.
+	Message string
+	// Response is the Access Manager's decoded refusal body when it sent one, else
+	// nil. It is also reachable with errors.As into a commons.Response.
+	Response *commons.Response
 }
 
-func (auth *AuthClient) authorizeRefusal(_ fiber.Ctx, status int, message string) error {
-	return fiber.NewError(status, message)
+// Error returns the message, as a *fiber.Error does. A nil receiver is safe.
+func (e *RefusalError) Error() string {
+	if e == nil {
+		return ""
+	}
+
+	return e.Message
 }
 
-func (auth *AuthClient) authorizeCommonsRefusal(_ fiber.Ctx, status int, response commons.Response) error {
-	return accessManagerRefusal{
-		fiberErr: fiber.NewError(status, refusalMessage(response, status)),
-		response: response,
+// Unwrap returns the Access Manager's refusal, so errors.As into a
+// commons.Response recovers it exactly as it does on the Fiber path. It is nil
+// when the refusal was decided locally. A nil receiver is safe.
+func (e *RefusalError) Unwrap() error {
+	if e == nil || e.Response == nil {
+		return nil
 	}
+
+	return *e.Response
+}
+
+// newRefusal is a locally decided refusal.
+func newRefusal(status int, message string) *RefusalError {
+	return &RefusalError{Status: status, Message: message}
+}
+
+// statusRefusal is a locally decided refusal rendered as the status text.
+func statusRefusal(status int) *RefusalError {
+	return newRefusal(status, http.StatusText(status))
+}
+
+// accessManagerRefusalAt is the Access Manager's own refusal, kept at the status it
+// answered and rendered as the reason it wrote.
+func accessManagerRefusalAt(status int, response commons.Response) *RefusalError {
+	return &RefusalError{Status: status, Message: refusalMessage(response, status), Response: &response}
+}
+
+// fiberError is the refusal as the Fiber adapter returns it: a *fiber.Error for
+// the application's ErrorHandler, which also unwraps to the Access Manager's
+// commons.Response when there is one.
+func (e *RefusalError) fiberError() error {
+	fe := fiber.NewError(e.Status, e.Message)
+	if e.Response == nil {
+		return fe
+	}
+
+	return accessManagerRefusal{fiberErr: fe, response: *e.Response}
 }
 
 type accessManagerRefusal struct {

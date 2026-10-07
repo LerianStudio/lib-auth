@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/LerianStudio/lib-auth/v5/auth/internal/principalctx"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -38,12 +38,13 @@ type Principal struct {
 	TenantID string
 }
 
-// principalContextKey is the unexported, typed key under which Authorize stores
-// the Principal on the request context. A dedicated type (rather than a string)
-// keeps the entry unreachable and uncollidable from outside this package.
-type principalContextKey struct{}
+// principalContextKey is the typed key under which Authorize stores the
+// Principal on the request context. It aliases an internal type, so the entry
+// stays unreachable and uncollidable from outside lib-auth; within the module,
+// auth/authtest writes the same key to stand in for Authorize in tests.
+type principalContextKey = principalctx.Key
 
-// PrincipalFromContext returns the Principal Authorize stored on the request Go
+// PrincipalFromContext returns the Principal Authorize or AuthorizeHTTP stored on the request Go
 // context, or (zero, false) when absent or when the stored value does not describe
 // one of the real identities this API promises. In particular, a legacy
 // non-inversion M2M authorization uses a fabricated role as Subject; even when that
@@ -138,6 +139,13 @@ func (auth *AuthClient) derivePrincipalWithClaims(ctx context.Context, span trac
 // Access Manager is not available to anchor trust. An explicitly configured static
 // key source that failed to load must not degrade this path to ParseUnverified.
 func (auth *AuthClient) derivePrincipalWithoutRoundTrip(ctx context.Context, span trace.Span, accessToken, product string) (Principal, int, error) {
+	if err := auth.insecureKeySource(); err != nil {
+		logErrorf(ctx, auth.Logger, "Local JWT verification refused (fail closed): %v", err)
+		tracing.HandleSpanError(span, "Key source allows plaintext", err)
+
+		return Principal{}, http.StatusServiceUnavailable, err
+	}
+
 	if auth.staticVerificationConfigured && len(auth.verifyKeys) == 0 && auth.source == nil {
 		err := errors.New("local JWT verification is configured but unavailable")
 		tracing.HandleSpanError(span, "Local JWT verification unavailable", err)
@@ -169,18 +177,6 @@ func (auth *AuthClient) derivePrincipalWithoutRoundTrip(ctx context.Context, spa
 	}
 
 	return principal, http.StatusOK, nil
-}
-
-// publishPrincipal stores the derived caller identity on the request Go context —
-// derived from c.Context(), NOT the tracing ctx, so it adds only the identity value
-// without altering span topology — and records only the principal TYPE on the span.
-// Neither the bearer token nor any identifier of the caller (Owner, Sub, Subject,
-// ClientID) reaches a span attribute or a log line: the type says what kind of
-// caller this was, the request id correlates it with the service's own audit trail.
-func publishPrincipal(c fiber.Ctx, span trace.Span, p Principal) {
-	c.SetContext(context.WithValue(c.Context(), principalContextKey{}, p))
-
-	span.SetAttributes(attribute.String("app.auth.principal.type", p.Type))
 }
 
 // RequireHuman rejects any request whose published Principal.Type is not

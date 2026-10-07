@@ -181,9 +181,9 @@ AUTH_RETRY_MAX=0
 # value leaves the service starting with no address to forward, and announces
 # that in ONE wording at two levels. At construction it is an INFO disclosure,
 # in every NewAuthClient. It becomes an ERROR — once per client — only when
-# Authorize is mounted on a client configured to call the authorization service
-# (auth enabled and an address set), because that is the only path in this
-# library that resolves a caller IP. A token-only or gRPC-only client never
+# Authorize or AuthorizeHTTP is mounted on a client configured to call the
+# authorization service (auth enabled and an address set), because those are the
+# only paths in this library that resolve a caller IP. A token-only or gRPC-only client never
 # reaches it and is not paged for a feature it does not use.
 #
 # LEAVING IT UNSET CAN LOCK YOUR CALLERS OUT. With no trusted proxies the derived
@@ -259,7 +259,7 @@ The `Authorize` function:
 
 * Receives the `sub` (user), `resource` (resource), and `action` (desired action).
 * Sends a POST request to the authorization service.
-* On the Fiber path, derives the caller's client IP from `TRUSTED_PROXIES` and the socket peer — not from Fiber's `c.IP()` or `c.IPs()` — and sends it as the optional `clientIp` field, omitting it when no caller IP is attributable (see [Client IP forwarding](#-client-ip-forwarding)).
+* On the Fiber and `net/http` paths, derives the caller's client IP from `TRUSTED_PROXIES` and the socket peer — not from Fiber's `c.IP()` or `c.IPs()` — and sends it as the optional `clientIp` field, omitting it when no caller IP is attributable (see [Client IP forwarding](#-client-ip-forwarding)).
 * Checks if the response indicates that the user is authorized.
 * Allows the normal application flow or refuses the request.
 
@@ -464,6 +464,85 @@ it against.
 outage (see the refusal paragraph under **How It Works** above), so a rail's alarms
 can key on 503 across both surfaces.
 
+### 🧪 Testing with an authenticated principal
+
+Package `auth/authtest` lets a service write an end-to-end test of a route that
+requires a principal without contacting the authorization service. **It is
+test-only: never import it from production wiring.** Every helper that publishes
+a principal or issues a token (`WithPrincipal`, `Fiber`, `HTTP`, `NewIssuer`,
+`Issuer.Token`) takes a `testing.TB`; `User` and `App` only build a `Principal`
+value. There is no global switch, and lib-auth's own guard test fails if
+any non-test file in the module imports it.
+
+Pick the helper by what the test exercises:
+
+* **The handler, not the middleware.** `authtest.Fiber(t, p)` and
+  `authtest.HTTP(t, p)` publish `p` exactly as `Authorize` and `AuthorizeHTTP` do;
+  mount them where those would be. `authtest.WithPrincipal(t, ctx, p)` does the
+  same on a bare context. `RequireHuman`, `RequireApplication` and
+  `PrincipalFromContext` behind them see an identified caller.
+* **The real `Authorize` chain.** `authtest.NewIssuer(t, iss)` generates an RSA
+  key inside the test process and signs RS256 tokens with it. Wire its key with
+  `client.WithKeySource(issuer.KeySource())`, or set
+  `t.Setenv("AUTH_JWT_VERIFY_CERT", issuer.PublicKeyPEM())` before
+  `NewAuthClient`, and its tokens pass `Authorize` with signature verification
+  on. A token from any other key is refused with 401. This is the required path
+  when the service pins `PrincipalRequiredWhenDisabled`.
+
+`Authorize` never reads a principal already on the request context. Whenever it
+can identify a caller (an enabled client, or `PrincipalRequiredWhenDisabled`), it
+refuses a request without a valid bearer token before the handler runs, and
+publishes the principal it derived from that token over anything the context
+held. A context-only helper therefore cannot reach a handler mounted behind the
+real `Authorize`; use `Issuer` there. This library has no switch that makes
+`Authorize` accept an injected principal, by design.
+
+```go
+p := authtest.User("acme-org", "user-1") // or authtest.App("acme-org/settlement-bot")
+p.TenantID = "tenant-a"
+
+// Handler test.
+app.Post("/v1/emissions/:id/approve",
+    authtest.Fiber(t, p),
+    authMiddleware.RequireHuman(),
+    emissionHandler.Approve)
+
+// Real Authorize, auth off, bearer still required (nothing is dialled).
+issuer := authtest.NewIssuer(t, "") // set iss to the client's AUTH_JWT_ISSUER, if any
+client := authMiddleware.NewAuthClient("", false, nil)
+client.PrincipalRequiredWhenDisabled = true
+client.M2MInversionEnabled = true // needed for application principals on this path
+client.WithKeySource(issuer.KeySource())
+
+req := httptest.NewRequest(http.MethodPost, "/v1/emissions/em-1/approve", nil)
+req.Header.Set("Authorization", "Bearer "+issuer.Token(t, p))
+```
+
+A principal that `PrincipalFromContext` would report as absent (a blank `Sub`, a
+`normal-user` without `Owner`, a `Subject` inconsistent with `Owner` and `Sub`, an
+unknown `Type`) fails the test when the helper is called, on the test goroutine.
+The handlers built by `Fiber` and `HTTP` never touch `t` while serving and are
+safe for concurrent requests. Tokens expire five minutes after they are issued.
+
+`authtest` does not fake the authorization service: testing a denial (403) or an
+outage (503) still needs a local stand-in for it.
+
+To keep `authtest` out of a service's production code, add a depguard rule that
+applies to non-test files only:
+
+```yaml
+linters:
+  settings:
+    depguard:
+      rules:
+        no-authtest-in-production:
+          files:
+            - "!$test"
+          deny:
+            - pkg: github.com/LerianStudio/lib-auth/v5/auth/authtest
+              desc: test-only; it publishes a principal without authorization
+```
+
 ## 📥 Example Request to Auth
 
 ```http
@@ -479,11 +558,11 @@ Authorization: Bearer your_token_here
 }
 ```
 
-The `clientIp` field is optional *in the schema* — the request is well-formed without it — but omitting it is not free: the authorization service uses it to enforce the per-tenant IP allowlist, and for a protected tenant an omitted address can be denied. On the Fiber path the middleware derives it from `TRUSTED_PROXIES` (see below) and omits it only when no caller IP can be attributed; see [Client IP forwarding](#-client-ip-forwarding) for what follows from that.
+The `clientIp` field is optional *in the schema* — the request is well-formed without it — but omitting it is not free: the authorization service uses it to enforce the per-tenant IP allowlist, and for a protected tenant an omitted address can be denied. On the Fiber and `net/http` paths the middleware derives it from `TRUSTED_PROXIES` (see below) and omits it only when no caller IP can be attributed; see [Client IP forwarding](#-client-ip-forwarding) for what follows from that.
 
 ## 🌐 Client IP forwarding
 
-On the Fiber path, `Authorize` sends `clientIp` to `POST /v1/authorize`, enabling the access manager to enforce a per-tenant IP allowlist downstream.
+On the Fiber and `net/http` paths, `Authorize` and `AuthorizeHTTP` send `clientIp` to `POST /v1/authorize`, enabling the access manager to enforce a per-tenant IP allowlist downstream.
 
 * **The library derives the IP itself — it does NOT call `c.IP()`.** Fiber v3 only walks the `X-Forwarded-For` chain right-to-left when the consuming service sets *all four* of `TrustProxy`, `TrustProxyConfig{Proxies}`, `ProxyHeader` and `EnableIPValidation` on the `fiber.App` it built. Miss the last one and `c.IP()` returns the **raw header** — a value the caller supplies about itself. This library cannot enforce a config it does not own, so it stops depending on it: it reads its own `TRUSTED_PROXIES` list and derives the caller IP from the forwarded header plus the real socket peer.
 * **Set `TRUSTED_PROXIES`.** Comma-separated CIDRs of every proxy/ingress in front of the service, e.g. `TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. A bare address is rejected outright — it is *not* silently widened to a `/32` or `/128`, so write the prefix you mean. So is any range broader than `/8` (IPv4) or `/48` (IPv6) — measured on the range as stored (see the next bullet) — which includes the catch-alls `0.0.0.0/0` and `::/0`. An unusable entry is logged at ERROR and dropped; startup never fails on it, and if *every* entry is unusable the result is identical to leaving the variable unset (no trusted proxies, no address forwarded).
@@ -1086,6 +1165,138 @@ Notes:
 - When `SubResolver` returns an empty string, the subject is derived from token claims.
  - If you already use multiple interceptors, prefer `grpc.ChainUnaryInterceptor(...)` and include the auth interceptor alongside telemetry/logging.
  - The interceptors do not forward a client IP in this version, so a gRPC-authorized call carries no address for the per-tenant IP allowlist to match, and takes whatever outcome the authorization service gives an addressless request. See [Client IP forwarding](#-client-ip-forwarding).
+
+## 🧩 net/http usage
+
+For a service that does not run Fiber, like a plain `net/http` sidecar, mount `AuthorizeHTTP`. It runs the same authorization flow as `Authorize` and publishes the same `Principal` and `RequestScope`. It reads the same `AUTH_*` and `TRUSTED_PROXIES` settings. You do not need to parse the bearer token yourself.
+
+```go
+import (
+    "errors"
+    "net/http"
+
+    "github.com/LerianStudio/lib-auth/v5/auth/middleware"
+)
+
+authClient := middleware.NewAuthClient(cfg.Address, cfg.Enabled, logger).
+    // Optional: render refusals in your own envelope. Set it before serving.
+    WithHTTPErrorHandler(func(w http.ResponseWriter, r *http.Request, err error) {
+        var refusal *middleware.RefusalError
+        if errors.As(err, &refusal) {
+            writeProblem(w, refusal.Status, refusal.Message) // your renderer
+        }
+    })
+
+mux := http.NewServeMux()
+mux.Handle("GET /v1/organizations/{org}/accounts",
+    authClient.AuthorizeHTTP("midaz", "accounts", "get",
+        middleware.RequireScope("midaz", middleware.Dim("organizationId", middleware.FromPath).At("org")),
+    )(accountsHandler))
+
+// Inside accountsHandler:
+//   p, ok := middleware.PrincipalFromContext(r.Context())
+```
+
+### Bearer rules
+
+`AuthorizeHTTP` reads the credential through `auth/bearer`, a small package that uses only the standard library. You can also call `bearer.FromRequest` or `bearer.Parse` on their own. A request is accepted only when:
+
+- It has exactly one `Authorization` header. Two header lines are refused.
+- The header is `Bearer <token>`. The scheme is case-insensitive and one or more spaces may follow it. A bare token, another scheme, or two tokens are refused.
+- The token is at most `bearer.MaxTokenBytes` (8 KiB). The size is checked before any decoding.
+- The header has no control bytes (including TAB, CR and LF) and no bytes outside printable ASCII.
+- The token has exactly three non-empty segments separated by dots, each unpadded base64url. `=` padding and the standard `+` and `/` alphabet are refused.
+
+A missing or blank header answers `401 Missing Token`. Any other refusal answers `401 Unauthorized`. Neither calls the Access Manager.
+
+An empty signature segment is refused too, so an unsigned (`alg=none`) token never leaves the service. This is stricter than the copy the br-sfn `slc` mqbridge carried, which accepted an empty signature and a bare token.
+
+### What differs from `Authorize`
+
+- **`FromPath` reads `r.PathValue`,** which the Go 1.22+ `http.ServeMux` fills in from a `{name}` pattern. Under another router a path dimension resolves empty unless that router populates it with `r.SetPathValue`; an empty one refuses a partner-bound credential with 403. It is never sent without the dimension. `FromHeader`, `FromQuery` and `FromForm` work under any router, and read every occurrence and comma-separated value exactly as `Authorize` does.
+- **A route that relies on the manifest scope** (no `RequireScope`, after `declaration.WireScope`) derives its dimensions from the `http.ServeMux` pattern that matched the request (`r.Pattern`): every `{name}` or `{name...}` segment is the `:name` parameter the catalog is declared in, and a `scope.routes` entry is looked up by the request method and that path (`GET /v1/organizations/{organization_id}/accounts` is `GET /v1/organizations/:organization_id/accounts`). Under another router there is no pattern unless that router sets `r.Pattern` in the same form, so the route derives no path dimension: a partner-bound credential is asked without them, as on any undeclared route, and the authorization service decides.
+- **A body-scoped route (`FromBody`, `FromForm`) reads at most 4 MiB** of the body, Fiber's default `BodyLimit`, and only for a partner-bound credential. A larger body answers `413 Request Entity Too Large`, with no authorization call and no handler call. A body that is read is put back on the request, so the handler reads exactly the bytes the caller sent.
+- **Refusals go to an `HTTPErrorHandler`,** not to a returned error. `err` is always a `*middleware.RefusalError`, which carries `Status`, `Message`, and `Response`. `Response` is the Access Manager's decoded refusal body, when it sent one. `errors.As(err, &commons.Response{})` also recovers that body, as on the Fiber path. The handler must write the response. The default writes `Message` as plain text with `Status`, the same way Fiber's default handler renders the `*fiber.Error` from `Authorize`.
+- **The client IP** comes from `r.RemoteAddr` and every `X-Forwarded-For` line, read in order and walked against `TRUSTED_PROXIES` exactly as on the Fiber path. If `RemoteAddr` is not an address and port, as behind a unix socket, or its address is unspecified (`0.0.0.0`, `::`), no IP is forwarded; the Fiber path forwards none either for a connection with no IP peer, which fasthttp reports as `0.0.0.0`.
+- **A nil `*AuthClient`** passes every request through, as `Authorize` does. A nil `next` handler answers 500 instead of panicking.
+
+Everything else is shared:
+
+- `AUTH_REQUIRED`
+- `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED`
+- M2M inversion (`AUTH_M2M_INVERSION_ENABLED`) and product forwarding
+- the decision cache, retry, and breaker
+- local JWT verification
+- the 401/403/503 mapping
+- the manifest scope and the body scope: the same questions, the same single timeout, the same 400 naming the field
+
+The Fiber `Authorize` and the gRPC interceptors keep their existing, more lenient token extraction. `Authorize`, for example, still accepts a bare token without the `Bearer` prefix. Moving them onto `auth/bearer` would refuse requests existing consumers send today, so that change would be a separate, opt-in step.
+
+## 📣 Permission declaration publisher
+
+`auth/declaration` publishes a plugin's own permissions manifest to the identity service at boot. It sends `PUT {IDP_HOST}/v1/declarations/{slug}` with an M2M bearer. Most plugins wire it in one line from the fixed `IDP_*` environment contract:
+
+```go
+stop, err := declaration.WireFromEnv(ctx, declaration.WireInput{
+    Slug:     "plugin-fees",
+    Manifest: permissionsYAML, // //go:embed permissions.yaml
+    Logger:   logger,
+    // Optional: your own client, e.g. for a proxy, a custom CA or mTLS.
+    HTTPClient: myHTTPClient,
+})
+defer stop()
+```
+
+`declaration.Config.HTTPClient` is the same option when you build the publisher with `declaration.New`. If you leave it nil, the publisher uses a client with a 30s timeout.
+
+### Redirects are never followed
+
+The PUT carries the M2M credential and the manifest, so the publisher never follows a redirect. It refuses a redirect the same way the auth client refuses one on the token path. Following one would:
+
+- replay the credential and the manifest to the host in `Location` on 307 and 308. Go keeps the `Authorization` header on a same-host, subdomain or https-to-http hop.
+- turn the PUT into a GET on 301, 302 and 303. The redirect target's 200 would then be logged as "declaration published" when nothing was stored.
+
+Any 3xx from the identity service fails the publish with a deterministic `*declaration.PublishError` that carries the 3xx status. It is not retried and not cached, and it is logged at ERROR. The log never includes the `Location`. The fix is configuration: point `IDP_HOST` at the identity service itself, not at a hop that redirects.
+
+An injected client cannot turn redirect-following back on. The publisher takes a shallow copy of your client, so your client is never changed, and sets the copy's redirect policy to refuse. If your client has no `Timeout`, the copy gets the 30s default, so a `FailFast` boot cannot hang. Minting the M2M token does not use this client. It goes through the auth client, which already refuses redirects.
+
+## 🔐 Requiring https to the Access Manager
+
+By default the library talks to whatever address you give it, `http` included. You can make it refuse anything but `https` for every outbound call it makes to the Access Manager and the identity provider. The requirement is opt-in, and existing callers are unaffected: `NewAuthClient` behaves exactly as before.
+
+```go
+// Your service decides the posture; the library reads no ENV_NAME for it.
+requireHTTPS := !isDevelopment
+
+authClient, err := middleware.NewAuthClientWithOptions(address, enabled, logger,
+    middleware.WithRequireHTTPS(requireHTTPS))
+if err != nil {
+    return err // *endpoint.InsecureError: the address is not https
+}
+
+stop, err := declaration.WireFromEnv(ctx, declaration.WireInput{
+    Slug:         "plugin-fees",
+    Manifest:     manifest,
+    Logger:       logger,
+    RequireHTTPS: requireHTTPS,
+})
+```
+
+With the requirement on, an address passes only when it is an absolute `https` URL with a host. `http` in any letter case is refused, loopback included, and so are a missing scheme, any other scheme, a missing host and an address that does not parse. The address is checked exactly as it will be dialled, without trimming.
+
+| Outbound call | How you turn it on | What happens to a non-https address |
+|---|---|---|
+| Authorization client: health check at construction | `NewAuthClientWithOptions(..., WithRequireHTTPS(true))` | Construction fails before anything is dialled. An empty address is accepted, because it never dials. |
+| Authorization: Fiber `Authorize`, `AuthorizeHTTP`, `Check`, gRPC unary and stream interceptors | Same option | `Address` is re-checked on every call, because it is an exported field. A changed address is answered `503` (gRPC `Unavailable`) without a call, a retry, a breaker failure or a cache write. |
+| Token minting, `GetApplicationToken` | Same option | Returns the typed error before the request is built, so the client secret never travels over `http`. |
+| Declaration publisher, `IdentityAddr` | `declaration.Config.RequireHTTPS` | `New` fails. It also refuses an `Auth` that declares it allows plaintext (an `AuthClient` built without the option). A `TokenMinter` that declares no posture is accepted, and its transport is your responsibility. |
+| `WireFromEnv` | `WireInput.RequireHTTPS` | Fails before anything is dialled, naming `IDP_HOST` or `PLUGIN_AUTH_HOST` (alias `PLUGIN_AUTH_ADDRESS`). There is no environment variable for the requirement. |
+| JWKS key source | `JWKSConfig.RequireHTTPS` | `NewJWKSKeySource` fails, loopback `http` included. Every redirect hop must be `https` too. Setting it together with `AllowInsecureURL` is a construction error. |
+| JWKS key source attached to the authorization client | `WithRequireHTTPS(true)` on the client, plus `JWKSConfig.RequireHTTPS` on the source | The client never consults a source built without `JWKSConfig.RequireHTTPS`: attaching it with `WithKeySource` is logged at ERROR, and every authorization, the no-round-trip path included, is answered `503` (gRPC `Unavailable`) with the typed error. It cannot stop a source you built from fetching on its own, so build the source with the requirement too. A source that declares no posture, such as `StaticKeySource`, fetches nothing and is accepted. |
+
+Every refusal is an `*endpoint.InsecureError` that matches `endpoint.ErrInsecure` with `errors.Is`. It carries the component that refused, the reason, the parsed scheme and the address with any userinfo password masked and the query and fragment dropped. The address is not echoed at all when a secret could hide in it: when it does not parse, when it has no `//` (Go reads `admin:pass@am.example` as scheme `admin` followed by plain text), or when its path contains `@`.
+
+A redirect cannot downgrade an `https` address. The authorization client and the declaration publisher never follow a redirect, and the JWKS source checks every hop against the same rule.
 
 ## 🚧 Error Handling
 

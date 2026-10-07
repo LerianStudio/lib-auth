@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -19,11 +20,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testPeerCIDR is the in-memory Fiber test connection's peer address (0.0.0.0)
-// as a host CIDR. Listing it as a trusted proxy is what lets a test drive a
-// known client IP through the forwarded header deterministically — the same
-// role the ingress subnet plays in production.
-const testPeerCIDR = "0.0.0.0/32"
+// testPeerIP is the socket peer useTestPeer gives every request of a Fiber test
+// app. The in-memory test connection has no IP peer of its own (fasthttp
+// answers 0.0.0.0, which the middleware refuses as an anchor), so the tests set
+// a real one. Listing it as a trusted proxy (testPeerCIDR) is what lets a test
+// drive a known client IP through the forwarded header deterministically — the
+// same role the ingress subnet plays in production.
+const (
+	testPeerIP   = "192.0.2.10"
+	testPeerCIDR = testPeerIP + "/32"
+)
+
+// useTestPeer makes testPeerIP the socket peer of every request app serves. It
+// must be registered before the routes it applies to.
+func useTestPeer(app *fiber.App) {
+	app.Use(func(c fiber.Ctx) error {
+		c.RequestCtx().SetRemoteAddr(&net.TCPAddr{IP: net.ParseIP(testPeerIP), Port: 40000})
+
+		return c.Next()
+	})
+}
 
 // mustPrefixes builds a trusted-proxy list the way production builds it — by
 // running the CIDRs through parseTrustedProxies — so no test can be green
@@ -939,7 +955,7 @@ func misconfiguredProxyApp(auth *AuthClient) *fiber.App {
 func misconfiguredProxyConfig() fiber.Config {
 	return fiber.Config{
 		TrustProxy:       true,
-		TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{"0.0.0.0"}},
+		TrustProxyConfig: fiber.TrustProxyConfig{Proxies: []string{testPeerIP}},
 		ProxyHeader:      fiber.HeaderXForwardedFor,
 	}
 }
@@ -947,6 +963,7 @@ func misconfiguredProxyConfig() fiber.Config {
 // clientIPApp mounts Authorize on an app built from cfg.
 func clientIPApp(auth *AuthClient, cfg fiber.Config) *fiber.App {
 	app := fiber.New(cfg)
+	useTestPeer(app)
 	app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
 		return c.SendString("reached handler")
 	})
@@ -1032,8 +1049,8 @@ func getThroughApp(t *testing.T, app *fiber.App, xffValues ...string) *http.Resp
 }
 
 // TestAuthorize_ClientIP_SpoofedHeaderIsIgnoredWhenPeerUntrusted is the pentest
-// case (Taura, 2026-08-19). The socket peer (the in-memory test connection,
-// 0.0.0.0) is NOT in the trusted-proxy list, so the forwarded header cannot be
+// case (Taura, 2026-08-19). The socket peer (testPeerIP) is NOT in the
+// trusted-proxy list, so the forwarded header cannot be
 // believed: the attacker's chosen value must not reach the auth service. Under
 // the pre-fix code (clientIP := c.IP()) this app hands the raw header straight
 // through and the assertion fails.
@@ -1056,8 +1073,53 @@ func TestAuthorize_ClientIP_SpoofedHeaderIsIgnoredWhenPeerUntrusted(t *testing.T
 
 	assert.NotEqual(t, "203.0.113.7", capturedBody["clientIp"],
 		"a forwarded header from an UNTRUSTED peer must never become the client IP")
-	assert.Equal(t, "0.0.0.0", capturedBody["clientIp"],
+	assert.Equal(t, testPeerIP, capturedBody["clientIp"],
 		"the real socket peer is the only trustworthy hop here")
+}
+
+// TestAuthorize_ClientIP_PeerWithoutAnAddressForwardsNothing covers a Fiber
+// request whose connection has no IP peer: fasthttp's RemoteIP answers 0.0.0.0
+// for any non-TCP connection (a unix socket, an in-memory pipe). That is a
+// placeholder, not a caller, so there is no anchor for the walk and nothing is
+// forwarded, exactly as the net/http adapter does for a RemoteAddr that is not
+// an address and port. Trusting 0.0.0.0 must not turn such a connection into a
+// trusted proxy whose forwarded header is believed.
+func TestAuthorize_ClientIP_PeerWithoutAnAddressForwardsNothing(t *testing.T) {
+	t.Parallel()
+
+	peers := map[string]func(fiber.Ctx) error{
+		"in_memory_pipe": func(c fiber.Ctx) error { return c.Next() },
+		"unix_socket": func(c fiber.Ctx) error {
+			c.RequestCtx().SetRemoteAddr(&net.UnixAddr{Name: "/run/svc.sock", Net: "unix"})
+
+			return c.Next()
+		},
+	}
+
+	for name, setPeer := range peers {
+		for _, trusted := range [][]string{{"10.0.0.0/8"}, {"0.0.0.0/32", "10.0.0.0/8"}} {
+			t.Run(name+"/"+strings.Join(trusted, "+"), func(t *testing.T) {
+				t.Parallel()
+
+				var capturedBody map[string]string
+
+				server := bodyCapturingAuthServer(t, &capturedBody)
+				auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}, trustedProxies: mustPrefixes(t, trusted...)}
+
+				app := fiber.New()
+				app.Use(setPeer)
+				app.Get("/x", auth.Authorize("midaz", "resource", "get"), func(c fiber.Ctx) error {
+					return c.SendString("reached handler")
+				})
+
+				resp := getThroughApp(t, app, "203.0.113.7")
+				require.Equal(t, http.StatusOK, resp.StatusCode)
+
+				got, present := capturedBody["clientIp"]
+				assert.False(t, present, "a peer without an address must forward no client IP, got %q", got)
+			})
+		}
+	}
 }
 
 // TestAuthorize_ClientIP_WalksChainRightToLeft proves lib-auth parses the chain
@@ -1120,7 +1182,7 @@ func TestAuthorize_ClientIP_AllHopsTrustedOmitsField(t *testing.T) {
 // token unvalidated) and that the parse guard in clientip.go is load-bearing
 // rather than dead code.
 //
-// Chain: 203.0.113.7, garbage, 10.1.2.3 + the 0.0.0.0 peer. Walking right to
+// Chain: 203.0.113.7, garbage, 10.1.2.3 + the test peer. Walking right to
 // left the peer and 10.1.2.3 are trusted, then "garbage" cannot be shown to be a
 // trusted proxy — so the walk stops and no caller IP is attributed, rather than
 // crediting the 203.0.113.7 sitting behind it.

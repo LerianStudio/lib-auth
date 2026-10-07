@@ -7,8 +7,6 @@ import (
 	"strings"
 	"sync"
 	"unicode"
-
-	"github.com/gofiber/fiber/v3"
 )
 
 // PartnerLocalsKey is the fiber.Locals key under which Authorize records the
@@ -29,7 +27,8 @@ const (
 	// SourceUnset is the zero value and reads nothing. A dimension left at this
 	// source is a misdeclaration, refused when the declaration is validated.
 	SourceUnset Source = iota
-	// FromPath reads a path parameter (fiber.Ctx.Params).
+	// FromPath reads a path parameter (fiber.Ctx.Params under Authorize,
+	// http.Request.PathValue under AuthorizeHTTP).
 	FromPath
 	// FromHeader reads a request header, its name compared without regard to
 	// letter case. A header repeated, or a value listing several separated by
@@ -100,38 +99,24 @@ func (d Dimension) Source() Source { return d.source }
 // spaces around an element trimmed, so "?id=a&id=b", "?id=a,b" and two header
 // lines "a" and "b" all name a and b. An element that is empty after trimming
 // names nothing and is malformed. Body dimensions are read by the body plan.
-func (d Dimension) read(c fiber.Ctx) (values []string, present bool, problem string) {
+func (d Dimension) read(req requestView) (values []string, present bool, problem string) {
 	switch d.source {
 	case FromPath:
-		value := c.Params(d.key)
+		value := req.pathParam(d.key)
 
 		return []string{value}, value != "", ""
 	case FromHeader:
-		var raw []string
-
 		// Compared without regard to letter case, whatever the app's header
 		// normalization: the header the handler reads is the header checked.
-		for k, v := range c.Request().Header.All() {
-			if strings.EqualFold(string(k), d.key) {
-				raw = append(raw, string(v))
-			}
-		}
-
-		return splitValues(raw)
+		return splitValues(req.headerValues(d.key))
 	case FromQuery:
-		var raw []string
-
 		// Only the exact key carries the dimension. A key differing from it only
 		// in letter case is refused rather than ignored or read: whether a handler
 		// binds it depends on the handler, and the scope must check the key the
 		// handler acts on.
-		for k, v := range c.Request().URI().QueryArgs().All() {
-			switch key := string(k); {
-			case key == d.key:
-				raw = append(raw, string(v))
-			case strings.EqualFold(key, d.key):
-				return nil, true, "must be named exactly " + strconv.Quote(d.key) + "; a key differing only in letter case is refused"
-			}
+		raw, caseVariant := req.queryValues(d.key)
+		if caseVariant {
+			return nil, true, "must be named exactly " + strconv.Quote(d.key) + "; a key differing only in letter case is refused"
 		}
 
 		return splitValues(raw)
@@ -242,7 +227,7 @@ func RequireScope(product string, dims ...Dimension) ScopeDeclaration {
 	return ScopeDeclaration{product: product, dims: dims}
 }
 
-// RequestScope is what Authorize resolved for the request in flight: the partner
+// RequestScope is what Authorize or AuthorizeHTTP resolved for the request in flight: the partner
 // the credential is bound to, and the instance identifiers that were sent as
 // attributes. Read it with ScopeFromContext to apply the same scope inside the
 // request body, where the route's declaration cannot reach.
@@ -269,7 +254,7 @@ type RequestScope struct {
 // context value.
 type requestScopeContextKey struct{}
 
-// ScopeFromContext returns the scope Authorize resolved for the request, and
+// ScopeFromContext returns the scope Authorize or AuthorizeHTTP resolved for the request, and
 // whether there was one. The second return is false for every credential that is
 // not partner-bound, and for a context that never passed through Authorize.
 func ScopeFromContext(ctx context.Context) (RequestScope, bool) {
@@ -344,7 +329,7 @@ func divergence(name, first, second string) *errBodyScope {
 // does not carry is left out. A malformed carrier outranks an absent dimension,
 // whatever order the two are declared in: every dimension is read before the
 // absence is reported, and a request that is malformed is answered as such.
-func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
+func resolveAttributes(req requestView, dims []Dimension) (requestValues, string) {
 	var (
 		rv      requestValues
 		missing string
@@ -358,7 +343,7 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
 			continue
 		}
 
-		values, present, problem := dim.read(c)
+		values, present, problem := dim.read(req)
 
 		switch {
 		case problem != "":

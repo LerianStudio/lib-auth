@@ -27,8 +27,10 @@ type manifestScopeStore struct {
 var productScopes manifestScopeStore
 
 // SetManifestScope wires the product's scope catalog — the scope section of its
-// declaration manifest — into the client, so Authorize can derive each route's
-// dimensions from the route path instead of every route declaring them.
+// declaration manifest — into the client, so Authorize and AuthorizeHTTP can
+// derive each route's dimensions from the route path instead of every route
+// declaring them. Under AuthorizeHTTP the route path is the ServeMux pattern's,
+// its "{name}" segments read as ":name".
 //
 // dims are the catalog in tree order, each read from a path parameter
 // (Dim(name, FromPath).At(param)), a query parameter (FromQuery) or a header

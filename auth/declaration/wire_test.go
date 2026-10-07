@@ -260,6 +260,36 @@ func TestWireFromEnv_HappyPath(t *testing.T) {
 	}
 }
 
+// TestWireFromEnv_InjectedHTTPClientReachesThePublisher pins the caller-injection
+// lane through the one-line wiring: WireInput.HTTPClient is the client the
+// background PUT goes through.
+func TestWireFromEnv_InjectedHTTPClientReachesThePublisher(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(identity.Close)
+
+	setWireEnv(t, identity.URL, auth.URL, true)
+
+	transport := &countingTransport{}
+	in := wireInput()
+	in.HTTPClient = &http.Client{Transport: transport}
+
+	stop, err := WireFromEnv(context.Background(), in)
+	require.NoError(t, err)
+	require.NotNil(t, stop)
+	t.Cleanup(stop)
+
+	select {
+	case <-identity.puts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a background declaration PUT")
+	}
+
+	assert.Equal(t, int64(1), transport.calls.Load(), "the background PUT must go through WireInput.HTTPClient")
+}
+
 // TestWireFromEnv_HappyPath_IdentityUnreachable asserts Start's fail-open contract
 // survives the wire: even with an unreachable identity host, WireFromEnv returns a
 // non-nil stop and nil error (serving is never blocked by the access-manager).

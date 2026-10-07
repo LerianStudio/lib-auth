@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"mime"
 	"net/url"
-
-	"github.com/gofiber/fiber/v3"
 )
 
 // FromForm reads a field of an application/x-www-form-urlencoded request body.
@@ -29,7 +27,7 @@ const formMediaType = "application/x-www-form-urlencoded"
 // readForm reads the route's form dimensions into readings, which the values
 // read from the path, the query and headers are already in: a form field naming
 // a dimension one of those names too must name the same values.
-func readForm(c fiber.Ctx, dims []Dimension, readings requestValues) requestValues {
+func readForm(req requestView, dims []Dimension, readings requestValues) requestValues {
 	var (
 		form   url.Values
 		parsed bool
@@ -43,7 +41,14 @@ func readForm(c fiber.Ctx, dims []Dimension, readings requestValues) requestValu
 		if !parsed {
 			var problem string
 
-			form, problem = parseForm(c)
+			body, unreadable := req.body()
+			if unreadable != nil {
+				readings.problem = unreadable
+
+				continue
+			}
+
+			form, problem = parseForm(body, req.contentType())
 			parsed = true
 
 			if problem != "" {
@@ -73,13 +78,12 @@ func readForm(c fiber.Ctx, dims []Dimension, readings requestValues) requestValu
 // cannot. A body the standard parser refuses is refused here rather than read
 // leniently, so the value checked is never one a stricter or looser reader
 // would see differently.
-func parseForm(c fiber.Ctx) (url.Values, string) {
-	body := c.Body()
+func parseForm(body []byte, contentType string) (url.Values, string) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return url.Values{}, ""
 	}
 
-	mediaType, _, err := mime.ParseMediaType(c.Get(fiber.HeaderContentType))
+	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil || mediaType != formMediaType {
 		return nil, "the request body is not " + formMediaType
 	}
