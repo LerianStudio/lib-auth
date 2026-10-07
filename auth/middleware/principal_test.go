@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
@@ -835,4 +836,87 @@ func TestAuthorize_RefusalPublishesNoSourceService(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, status)
 	assert.Equal(t, sourceServiceEcho{}, got)
+}
+
+// TestIsDeclaredSourceService pins the refusal rule a consumer applies before using
+// Principal.SourceService as an identity: empty, whitespace-only and the issuer's
+// marker (any case, any edge whitespace) name nobody; everything else does.
+func TestIsDeclaredSourceService(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "empty", in: "", want: false},
+		{name: "whitespace_only", in: " \t\n", want: false},
+		{name: "marker", in: UndeclaredSourceService, want: false},
+		{name: "marker_upper", in: "UNDECLARED", want: false},
+		{name: "marker_padded", in: "  undeclared ", want: false},
+		{name: "declared", in: "pix-jd", want: true},
+		{name: "declared_padded", in: " Pix-JD ", want: true},
+		{name: "marker_prefix_is_a_name", in: "undeclared-svc", want: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, IsDeclaredSourceService(tc.in))
+		})
+	}
+}
+
+// TestAuthorize_DecisionCacheHitPublishesSourceService proves the Principal is
+// derived from the request's own token even when the authorization decision is
+// served from the decision cache: the second request never reaches the
+// authorization service, yet its SourceService is its own, not the first
+// request's, and a user token on the same cached path still exposes none.
+func TestAuthorize_DecisionCacheHitPublishesSourceService(t *testing.T) {
+	t.Parallel()
+
+	server, hits := countingAuthServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
+		writeAuthorized(w, true)
+	})
+
+	auth := &AuthClient{
+		Address:             server.URL,
+		Enabled:             true,
+		M2MInversionEnabled: true,
+		Logger:              &testLogger{},
+		cache:               newDecisionCache(time.Minute),
+	}
+	app := newSourceServiceEchoApp(auth)
+
+	appClaims := func(source string) jwt.MapClaims {
+		return jwt.MapClaims{"type": application, "sub": "admin/robot", "azp": "cid", "sourceService": source}
+	}
+
+	status, got := sourceServiceEchoRequest(t, app, appClaims("pix-jd"))
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "pix-jd", got.SourceService)
+	require.Equal(t, int64(1), hits.Load(), "the first request is a cache miss")
+
+	status, got = sourceServiceEchoRequest(t, app, appClaims("pix-jd"))
+	assert.Equal(t, http.StatusOK, status)
+	assert.True(t, got.Found)
+	assert.Equal(t, "pix-jd", got.SourceService, "a cache hit must still publish the claim")
+	assert.Equal(t, int64(1), hits.Load(), "the repeat request must be served from the decision cache")
+
+	// A different token for the same sub misses (the key digests the token) and
+	// carries its own claim.
+	status, got = sourceServiceEchoRequest(t, app, appClaims("pix-btg"))
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "pix-btg", got.SourceService, "the claim comes from this request's token, never from a cached one")
+
+	// A cached application decision never lends its claim to a normal-user token.
+	userClaims := jwt.MapClaims{"type": normalUser, "owner": "acme-org", "sub": "user123", "sourceService": "pix-jd"}
+
+	for range 2 {
+		status, got = sourceServiceEchoRequest(t, app, userClaims)
+		assert.Equal(t, http.StatusOK, status)
+		assert.True(t, got.Found)
+		assert.Empty(t, got.SourceService)
+	}
 }
