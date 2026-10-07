@@ -421,4 +421,26 @@ func TestJWKSKeySource_RequireHTTPS(t *testing.T) {
 		_, err = validateJWKSURL("http://127.0.0.1:8000/jwks", false, false)
 		require.NoError(t, err, "without the requirement loopback http stays allowed")
 	})
+
+	t.Run("a fetch redirected to loopback http never reaches it", func(t *testing.T) {
+		t.Parallel()
+
+		plaintext := newCountingServer(t, false)
+
+		redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, plaintext.URL+"/jwks", http.StatusFound)
+		}))
+		t.Cleanup(redirector.Close)
+
+		src, err := newJWKSKeySource(JWKSConfig{
+			URL:          redirector.URL + "/jwks",
+			RequireHTTPS: true,
+			HTTPClient:   redirector.Client(),
+		})
+		require.NoError(t, err)
+
+		_, _, err = src.fetch(context.Background())
+		require.ErrorIs(t, err, endpoint.ErrInsecure)
+		assert.Zero(t, plaintext.conns.Load(), "the plaintext loopback target must not even be dialled")
+	})
 }
