@@ -76,8 +76,20 @@ func TestAuthorize_MountedHandler_UnreadScopeIsNeverResolved(t *testing.T) {
 	own := benchApp(t, false)
 	mounted := benchApp(t, true)
 
-	ownAllocs := testing.AllocsPerRun(100, func() { serveOnce(t, own, &ctx) })
-	mountedAllocs := testing.AllocsPerRun(100, func() { serveOnce(t, mounted, &ctx) })
+	// AllocsPerRun counts every allocation in the process, so another
+	// goroutine can only add to a run: the least of several runs is the
+	// request's own cost.
+	leastAllocs := func(h fasthttp.RequestHandler) float64 {
+		least := testing.AllocsPerRun(100, func() { serveOnce(t, h, &ctx) })
+		for range 4 {
+			least = min(least, testing.AllocsPerRun(100, func() { serveOnce(t, h, &ctx) }))
+		}
+
+		return least
+	}
+
+	ownAllocs := leastAllocs(own)
+	mountedAllocs := leastAllocs(mounted)
 
 	if mountedAllocs > ownAllocs {
 		t.Fatalf("mounted handler allocates %.0f per request, own route %.0f", mountedAllocs, ownAllocs)

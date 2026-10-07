@@ -693,17 +693,24 @@ app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id", handler)
   letter case unless `fiber.Config.CaseSensitive` is set, and a trailing slash is
   ignored unless `fiber.Config.StrictRouting` is set — so a request resolves to
   the route Fiber routes it to.
-* The **most specific** route wins, compared segment by segment from the left:
-  a literal over a parameter, a parameter over an optional one, an optional one
-  over a wildcard. Two routes equally specific under different paths
-  (`/x/:organization_id` and `/x/:org`) leave the request **unresolved**.
+* The scope read is that of the **route Fiber serves**: the app's routes are
+  tried in the order Fiber tries them, and the first that matches wins, even
+  when a more specific route is registered after it — the handler that runs is
+  the one whose scope is checked. A route whose path the matcher cannot read
+  (a constrained parameter `:id<int>`, several parameters in one segment) and
+  that could serve the request leaves it **unresolved**.
+* Only a request no registered route serves is resolved among the routes the
+  manifest alone declares, where the **most specific** wins, compared segment
+  by segment from the left: a literal over a parameter, a parameter over an
+  optional one, an optional one over a wildcard. Two declared routes equally
+  specific under different paths leave the request **unresolved**.
 * Two `scope.routes` entries of one method that are the same route under other
   parameter names are a manifest defect, refused when the manifest is wired.
   The app's routing is not known then, so only entries that are one route under
   any routing are refused (literals differing in letter case, or in a trailing
   slash, are left to the runtime rule above).
-* A partner-bound request that resolves to no single route — none matches, or
-  two tie — is refused **403 before the round-trip**: its scope cannot be read.
+* A partner-bound request that resolves to no single route — none matches, two
+  declared routes tie, or an unreadable route may serve it — is refused **403 before the round-trip**: its scope cannot be read.
   Every other credential is decided exactly as before, down to the bytes on the
   wire.
 * Nothing changes for a handler on its own route (`app.Get(path, auth.Authorize(...), h)`),

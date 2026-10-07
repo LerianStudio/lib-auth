@@ -128,24 +128,6 @@ func TestAuthorize_MountedHandler_TakesTheManifestRouteScope(t *testing.T) {
 	assert.Equal(t, calls, rec.hits.Load(), "refused without asking")
 }
 
-// A route the manifest declares is a candidate even when the app serves it
-// through a route the handler cannot name (a wildcard here).
-func TestAuthorize_MountedHandler_ResolvesADeclaredRoute(t *testing.T) {
-	t.Parallel()
-
-	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
-	auth := scopedClient(t, rec)
-	require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, "/v1/organizations/:organization_id/transfers",
-		Dim("ledgerId", FromBody).At("ledger_id")))
-
-	app := fiber.New()
-	app.Use("/v1/organizations", auth.Authorize("midaz", "transfers", "post"))
-	app.Post("/v1/organizations/*", ok)
-
-	assert.Equal(t, http.StatusOK, doPost(t, app, "/v1/organizations/org-1/transfers", partnerToken("acme/p1"), `{"ledger_id":"led-9"}`).status)
-	assert.JSONEq(t, `{"organizationId":"org-1","ledgerId":"led-9"}`, attributesOf(t, rec.lastBody(t)))
-}
-
 // An explicit declaration on a mounted handler reads its path dimensions on
 // the route that serves the request.
 func TestAuthorize_MountedHandler_ExplicitDeclarationReadsTheServingRoute(t *testing.T) {
@@ -163,27 +145,6 @@ func TestAuthorize_MountedHandler_ExplicitDeclarationReadsTheServingRoute(t *tes
 	assert.JSONEq(t, `{"ledgerId":"led-1"}`, attributesOf(t, rec.lastBody(t)))
 }
 
-// The most specific route wins: a literal segment over a parameter, a
-// parameter over a wildcard — whatever order the routes are registered in.
-func TestAuthorize_MountedHandler_MostSpecificRouteWins(t *testing.T) {
-	t.Parallel()
-
-	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
-	auth := scopedClient(t, rec)
-
-	app := fiber.New()
-	app.Use("/v1/organizations", auth.Authorize("midaz", "ledgers", "get"))
-	app.Get("/v1/organizations/*", ok)
-	app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id", ok)
-	app.Get("/v1/organizations/:organization_id/ledgers/summary", ok)
-
-	assert.Equal(t, http.StatusOK, doGet(t, app, "/v1/organizations/org-1/ledgers/summary", partnerToken("acme/p1")))
-	assert.JSONEq(t, `{"organizationId":"org-1"}`, attributesOf(t, rec.lastBody(t)))
-
-	assert.Equal(t, http.StatusOK, doGet(t, app, ledgerPath, partnerToken("acme/p1")))
-	assert.JSONEq(t, `{"organizationId":"org-1","ledgerId":"led-1"}`, attributesOf(t, rec.lastBody(t)))
-}
-
 // A request no single route describes cannot have its scope read: a partner
 // is refused before the round-trip, and every other credential is decided as
 // before.
@@ -195,10 +156,10 @@ func TestAuthorize_MountedHandler_UnresolvedIsRefusedForAPartner(t *testing.T) {
 		routes []string
 		target string
 	}{
-		// Two routes, equally specific, naming the same place differently.
-		{name: "ambiguous", routes: []string{
+		// A route whose path cannot be read, and that could serve the request.
+		{name: "unreadable_route_may_serve", routes: []string{
+			"/v1/organizations/:organization_id<guid>/ledgers/:ledger_id",
 			"/v1/organizations/:organization_id/ledgers/:ledger_id",
-			"/v1/organizations/:org/ledgers/:ledger_id",
 		}, target: ledgerPath},
 		// No route serves the request at all.
 		{name: "no_route", routes: []string{"/v1/organizations/:organization_id"}, target: ledgerPath},
@@ -374,7 +335,6 @@ func TestRouteTemplate_Match(t *testing.T) {
 		{name: "params", template: "/v1/:a/x/:b", path: "/v1/1/x/2", want: map[string]string{"a": "1", "b": "2"}},
 		{name: "literal_case", template: "/v1/Things/:a", path: "/V1/things/1", want: map[string]string{"a": "1"}},
 		{name: "trailing_slash", template: "/v1/:a", path: "/v1/1/", want: map[string]string{"a": "1"}},
-		{name: "constraint", template: "/v1/:a<int>", path: "/v1/7", want: map[string]string{"a": "7"}},
 		{name: "optional_present", template: "/v1/:a?", path: "/v1/1", want: map[string]string{"a": "1"}},
 		{name: "optional_absent", template: "/v1/:a?", path: "/v1", want: map[string]string{}},
 		{name: "wildcard", template: "/v1/*", path: "/v1/a/b", want: map[string]string{}},
@@ -411,6 +371,7 @@ func TestParseRouteTemplate_RefusesWhatItCannotRead(t *testing.T) {
 
 	for _, template := range []string{
 		"/v1/:a-:b",
+		"/v1/:a<int>",
 		"/v1/:a.:b",
 		"/v1/file.:ext",
 		"/v1/*/x",
@@ -525,9 +486,8 @@ func TestAuthorize_MountedHandler_FollowsCaseSensitiveRouting(t *testing.T) {
 	}{
 		{name: "sensitive_lower", caseSensitive: true, target: ledgerPath, status: http.StatusOK, attributes: `{"organizationId":"org-1","ledgerId":"led-1"}`},
 		{name: "sensitive_upper", caseSensitive: true, target: "/v1/organizations/org-1/Ledgers/led-1", status: http.StatusOK, attributes: `{"organizationId":"org-1"}`},
-		// Fiber's default: the two are one route under two names, and the
-		// request cannot be read on either without guessing.
-		{name: "insensitive_tie", caseSensitive: false, target: ledgerPath, status: http.StatusForbidden},
+		// Fiber's default: both match, and the first registered is served.
+		{name: "insensitive_first_registered", caseSensitive: false, target: "/v1/organizations/org-1/LEDGERS/led-1", status: http.StatusOK, attributes: `{"organizationId":"org-1","ledgerId":"led-1"}`},
 	}
 
 	for _, tt := range tests {
@@ -566,8 +526,9 @@ func TestAuthorize_MountedHandler_FollowsStrictRouting(t *testing.T) {
 	}{
 		{name: "strict_without_slash", strict: true, target: ledgerPath, status: http.StatusOK, attributes: `{"organizationId":"org-1","ledgerId":"led-1"}`},
 		{name: "strict_with_slash", strict: true, target: ledgerPath + "/", status: http.StatusOK, attributes: `{"organizationId":"org-1"}`},
-		// Fiber's default ignores the trailing slash: one route, two names.
-		{name: "lenient_tie", strict: false, target: ledgerPath, status: http.StatusForbidden},
+		// Fiber's default ignores the trailing slash: both match, and the
+		// first registered is served.
+		{name: "lenient_first_registered", strict: false, target: ledgerPath + "/", status: http.StatusOK, attributes: `{"organizationId":"org-1","ledgerId":"led-1"}`},
 	}
 
 	for _, tt := range tests {
@@ -639,4 +600,215 @@ func TestRouteTemplate_MatchFollowsRoutingRules(t *testing.T) {
 			assert.Equal(t, tt.matched, matched)
 		})
 	}
+}
+
+// The scope read is that of the route Fiber serves: the first registered route
+// that matches, whatever a more specific route registered later would say.
+func TestAuthorize_MountedHandler_ReadsTheRouteFiberServes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		routes     []string
+		target     string
+		attributes string
+	}{
+		{name: "param_before_literal", routes: []string{
+			"/v1/organizations/:organization_id/ledgers/:ledger_id",
+			"/v1/organizations/:organization_id/ledgers/summary",
+		}, target: "/v1/organizations/org-1/ledgers/summary", attributes: `{"organizationId":"org-1","ledgerId":"summary"}`},
+		{name: "literal_before_param", routes: []string{
+			"/v1/organizations/:organization_id/ledgers/summary",
+			"/v1/organizations/:organization_id/ledgers/:ledger_id",
+		}, target: "/v1/organizations/org-1/ledgers/summary", attributes: `{"organizationId":"org-1"}`},
+		{name: "wildcard_first", routes: []string{
+			"/v1/organizations/*",
+			"/v1/organizations/:organization_id/ledgers/:ledger_id",
+		}, target: ledgerPath, attributes: ""},
+		{name: "same_route_other_names", routes: []string{
+			"/v1/organizations/:org/ledgers/:other",
+			"/v1/organizations/:organization_id/ledgers/:ledger_id",
+		}, target: ledgerPath, attributes: ""},
+		// A route that cannot be read is no obstacle when it cannot serve.
+		{name: "unreadable_route_elsewhere", routes: []string{
+			"/v1/organizations/:organization_id/files/:id<int>",
+			"/v1/organizations/:organization_id/ledgers/:ledger_id",
+		}, target: ledgerPath, attributes: `{"organizationId":"org-1","ledgerId":"led-1"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+			auth := scopedClient(t, rec)
+
+			app := fiber.New()
+			app.Use("/v1/organizations", auth.Authorize("midaz", "ledgers", "get"))
+
+			for _, route := range tt.routes {
+				app.Get(route, ok)
+			}
+
+			assert.Equal(t, http.StatusOK, doGet(t, app, tt.target, partnerToken("acme/p1")))
+
+			if tt.attributes == "" {
+				assert.Equal(t, `{"action":"get","product":"midaz","resource":"ledgers","sub":"acme/app"}`, rec.lastBody(t))
+			} else {
+				assert.JSONEq(t, tt.attributes, attributesOf(t, rec.lastBody(t)))
+			}
+		})
+	}
+}
+
+// A request no registered route serves is resolved among the routes only the
+// manifest declares: the most specific wins, and two equally specific under
+// different paths leave it unresolved.
+func TestAuthorize_MountedHandler_ResolvesDeclaredRoutes(t *testing.T) {
+	t.Parallel()
+
+	newApp := func(t *testing.T, routes ...string) (*fiber.App, *fakeAuthServer) {
+		t.Helper()
+
+		rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+		auth := scopedClient(t, rec)
+
+		for _, route := range routes {
+			require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, route,
+				Dim("ledgerId", FromBody).At("ledger_id")))
+		}
+
+		app := fiber.New()
+		app.Use("/v1/organizations", auth.Authorize("midaz", "transfers", "post"))
+
+		return app, rec
+	}
+
+	t.Run("declared_route", func(t *testing.T) {
+		t.Parallel()
+
+		app, rec := newApp(t, "/v1/organizations/:organization_id/transfers")
+
+		doPost(t, app, "/v1/organizations/org-1/transfers", partnerToken("acme/p1"), `{"ledger_id":"led-9"}`)
+		assert.JSONEq(t, `{"organizationId":"org-1","ledgerId":"led-9"}`, attributesOf(t, rec.lastBody(t)))
+	})
+
+	t.Run("most_specific", func(t *testing.T) {
+		t.Parallel()
+
+		app, rec := newApp(t, "/v1/organizations/:organization_id/transfers", "/v1/organizations/main/transfers")
+
+		doPost(t, app, "/v1/organizations/main/transfers", partnerToken("acme/p1"), `{"ledger_id":"led-9"}`)
+		assert.JSONEq(t, `{"ledgerId":"led-9"}`, attributesOf(t, rec.lastBody(t)))
+	})
+
+	t.Run("tie", func(t *testing.T) {
+		t.Parallel()
+
+		// Distinct under case-sensitive routing, so accepted at boot; one route
+		// under this app's default routing.
+		app, rec := newApp(t, "/v1/organizations/:organization_id/transfers", "/v1/organizations/:org/Transfers")
+
+		assert.Equal(t, http.StatusForbidden,
+			doPost(t, app, "/v1/organizations/org-1/transfers", partnerToken("acme/p1"), `{"ledger_id":"led-9"}`).status)
+		assert.Zero(t, rec.hits.Load(), "refused without asking")
+	})
+
+	t.Run("app_routing_case_sensitive", func(t *testing.T) {
+		t.Parallel()
+
+		rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+		auth := scopedClient(t, rec)
+		require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, "/v1/organizations/:organization_id/Transfers",
+			Dim("ledgerId", FromBody).At("ledger_id")))
+
+		app := fiber.New(fiber.Config{CaseSensitive: true})
+		app.Use("/v1/organizations", auth.Authorize("midaz", "transfers", "post"))
+
+		assert.Equal(t, http.StatusForbidden,
+			doPost(t, app, "/v1/organizations/org-1/transfers", partnerToken("acme/p1"), `{"ledger_id":"led-9"}`).status)
+		assert.Zero(t, rec.hits.Load(), "no declared route in this letter case")
+
+		doPost(t, app, "/v1/organizations/org-1/Transfers", partnerToken("acme/p1"), `{"ledger_id":"led-9"}`)
+		assert.JSONEq(t, `{"organizationId":"org-1","ledgerId":"led-9"}`, attributesOf(t, rec.lastBody(t)))
+	})
+
+	t.Run("registered_route_first", func(t *testing.T) {
+		t.Parallel()
+
+		app, rec := newApp(t, "/v1/organizations/:organization_id/transfers")
+		app.Post("/v1/organizations/*", ok)
+
+		// Fiber serves the wildcard, which reads no scope.
+		assert.Equal(t, http.StatusOK, doPost(t, app, "/v1/organizations/org-1/transfers", partnerToken("acme/p1"), `{}`).status)
+		assert.Equal(t, `{"action":"post","product":"midaz","resource":"transfers","sub":"acme/app"}`, rec.lastBody(t))
+	})
+}
+
+func TestRouteOutline_MayServe(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		route string
+		path  string
+		want  bool
+	}{
+		{name: "fixed_same_literals", route: "/v1/:id<int>/x", path: "/v1/7/x", want: true},
+		{name: "fixed_other_literal", route: "/v1/:id<int>/x", path: "/v1/7/y", want: false},
+		{name: "fixed_longer", route: "/v1/:id<int>", path: "/v1/7/x", want: false},
+		{name: "fixed_shorter", route: "/v1/:id<int>/x", path: "/v1/7", want: false},
+		{name: "variable_longer", route: "/v1/:a-:b/*", path: "/v1/a-b/c/d", want: true},
+		{name: "variable_other_literal", route: "/v2/:a-:b/*", path: "/v1/a-b/c", want: false},
+		{name: "variable_shorter", route: "/v1/x/:a<int>/*", path: "/v1/x", want: false},
+		{name: "literal_case_folded", route: "/V1/:id<int>", path: "/v1/7", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			parts := pathSegments(tt.path, routingRules{})
+			assert.Equal(t, tt.want, outlineRoute(tt.route, routingRules{}).mayServe(parts, routingRules{}))
+		})
+	}
+}
+
+// Only a route of the request's method serves it, registered or declared.
+func TestAuthorize_MountedHandler_OnlyRoutesOfTheMethod(t *testing.T) {
+	t.Parallel()
+
+	t.Run("registered", func(t *testing.T) {
+		t.Parallel()
+
+		rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+		auth := scopedClient(t, rec)
+
+		app := fiber.New()
+		app.Use("/v1/organizations", auth.Authorize("midaz", "transfers", "post"))
+		// Fiber tries the GET routes before the POST ones.
+		app.Get("/v1/organizations/:org/transfers", ok)
+		app.Post("/v1/organizations/:organization_id/transfers", ok)
+
+		assert.Equal(t, http.StatusOK, doPost(t, app, "/v1/organizations/org-1/transfers", partnerToken("acme/p1"), `{}`).status)
+		assert.JSONEq(t, `{"organizationId":"org-1"}`, attributesOf(t, rec.lastBody(t)))
+	})
+
+	t.Run("declared", func(t *testing.T) {
+		t.Parallel()
+
+		rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+		auth := scopedClient(t, rec)
+		require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPost, "/v1/organizations/:organization_id/transfers",
+			Dim("ledgerId", FromBody).At("ledger_id")))
+		// More specific, but another method's.
+		require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodPut, "/v1/organizations/main/transfers",
+			Dim("ledgerId", FromBody).At("ledger_id")))
+
+		app := fiber.New()
+		app.Use("/v1/organizations", auth.Authorize("midaz", "transfers", "post"))
+
+		doPost(t, app, "/v1/organizations/main/transfers", partnerToken("acme/p1"), `{"ledger_id":"led-9"}`)
+		assert.JSONEq(t, `{"organizationId":"main","ledgerId":"led-9"}`, attributesOf(t, rec.lastBody(t)))
+	})
 }

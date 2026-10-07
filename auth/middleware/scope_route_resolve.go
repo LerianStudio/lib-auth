@@ -15,235 +15,6 @@ import (
 // and the routes the product's manifest declares, so a product authorizing in
 // prefix middleware needs no code of its own.
 
-// segmentKind orders the kinds of template segment from the least specific to
-// the most: a request segment a literal matches is more precisely described by
-// it than by a parameter, and so on.
-type segmentKind int
-
-const (
-	segmentWildcard segmentKind = iota
-	segmentOptional
-	segmentParam
-	segmentLiteral
-)
-
-// templateSegment is one '/'-separated segment of a route template.
-type templateSegment struct {
-	kind segmentKind
-	// text is the literal, or the parameter's name.
-	text string
-	// nonEmpty is set on a '+' wildcard, which must match at least one segment.
-	nonEmpty bool
-}
-
-// routingRules are the app settings that decide which route a path reaches,
-// read from its fiber.Config so a request resolves where Fiber routes it. The
-// zero value is Fiber's default.
-type routingRules struct {
-	// caseSensitive compares literals with letter case (fiber.Config.CaseSensitive).
-	caseSensitive bool
-	// strict makes a trailing slash significant (fiber.Config.StrictRouting).
-	strict bool
-}
-
-// strictestRouting are the rules under which the fewest paths are one route:
-// two routes that are one under them are one under any app's routing.
-var strictestRouting = routingRules{caseSensitive: true, strict: true}
-
-// routeTemplate is one route, method and path as registered, parsed for
-// matching under an app's routing rules.
-type routeTemplate struct {
-	method   string
-	path     string
-	rules    routingRules
-	segments []templateSegment
-}
-
-// parseRouteTemplate parses a registered route path. It returns false for a
-// path whose syntax it does not read (several parameters in one segment, an
-// optional parameter or a wildcard anywhere but last): such a route is never
-// a candidate, and a request only it would serve resolves to no route.
-func parseRouteTemplate(method, path string, rules routingRules) (routeTemplate, bool) {
-	route := routeTemplate{method: method, path: path, rules: rules}
-	parts := pathSegments(path, rules)
-
-	for i, part := range parts {
-		segment, ok := parseTemplateSegment(part)
-		if !ok {
-			return routeTemplate{}, false
-		}
-
-		if segment.kind < segmentParam && i != len(parts)-1 {
-			return routeTemplate{}, false
-		}
-
-		route.segments = append(route.segments, segment)
-	}
-
-	return route, true
-}
-
-// parseTemplateSegment reads one segment in Fiber syntax: ":name", ":name?",
-// ":name<constraint>", "*" or "+", or a literal free of route syntax.
-func parseTemplateSegment(part string) (templateSegment, bool) {
-	switch {
-	case part == "*":
-		return templateSegment{kind: segmentWildcard}, true
-	case part == "+":
-		return templateSegment{kind: segmentWildcard, nonEmpty: true}, true
-	case strings.HasPrefix(part, ":"):
-		name, kind := part[1:], segmentParam
-
-		if trimmed, optional := strings.CutSuffix(name, "?"); optional {
-			name, kind = trimmed, segmentOptional
-		}
-
-		if open := strings.IndexByte(name, '<'); open > 0 && strings.HasSuffix(name, ">") {
-			name = name[:open]
-		}
-
-		if name == "" || strings.ContainsAny(name, ":*+?<>.-") {
-			return templateSegment{}, false
-		}
-
-		return templateSegment{kind: kind, text: name}, true
-	case strings.ContainsAny(part, ":*+?<>"):
-		return templateSegment{}, false
-	default:
-		return templateSegment{kind: segmentLiteral, text: part}, true
-	}
-}
-
-// pathSegments splits a path into its segments. Unless the routing is strict,
-// trailing slashes are ignored, as Fiber ignores them.
-func pathSegments(path string, rules routingRules) []string {
-	if !rules.strict && len(path) > 1 {
-		path = strings.TrimRight(path, "/")
-	}
-
-	return strings.Split(path, "/")[1:]
-}
-
-// match reads the path parameters of a request, split by pathSegments, the
-// template describes, or returns false. Literals and trailing slashes are
-// compared as the app's routing compares them (routingRules). Nothing is allocated for a
-// template that does not match, which is almost every candidate. On a match
-// the map is never nil, even when the template has no parameter: a nil map
-// reads parameters from Fiber, which has none past the mount prefix.
-func (r *routeTemplate) match(parts []string) (map[string]string, bool) {
-	if !r.fitsLength(len(parts)) || !r.fits(parts) {
-		return nil, false
-	}
-
-	params := make(map[string]string, len(r.segments))
-
-	for i, segment := range r.segments {
-		if i < len(parts) && (segment.kind == segmentParam || segment.kind == segmentOptional) {
-			params[segment.text] = parts[i]
-		}
-	}
-
-	return params, true
-}
-
-// fits reports whether the request segments fit the template's, given a
-// length fitsLength accepted.
-func (r *routeTemplate) fits(parts []string) bool {
-	for i, segment := range r.segments {
-		switch {
-		case segment.kind == segmentWildcard:
-			return !segment.nonEmpty || hasNonEmpty(parts[min(i, len(parts)):])
-		case segment.kind == segmentOptional && i == len(parts):
-			return true
-		case !segment.matches(parts[i], r.rules):
-			return false
-		}
-	}
-
-	return true
-}
-
-// hasNonEmpty reports whether any of the segments is not empty.
-func hasNonEmpty(parts []string) bool {
-	for _, part := range parts {
-		if part != "" {
-			return true
-		}
-	}
-
-	return false
-}
-
-// fitsLength reports whether a request of n segments can match the template,
-// checked before anything is allocated: most candidates fail here.
-func (r *routeTemplate) fitsLength(n int) bool {
-	// A path always has at least one segment ("/" is one empty segment).
-	count := len(r.segments)
-
-	switch r.segments[count-1].kind {
-	case segmentWildcard:
-		return n >= count-1
-	case segmentOptional:
-		return n == count || n == count-1
-	case segmentParam, segmentLiteral:
-		return n == count
-	default:
-		return n == count
-	}
-}
-
-// matches reports whether one request segment fits the template segment: a
-// literal when it is the same text — without regard to letter case unless the
-// routing is case-sensitive — and a parameter when it is not empty.
-func (s templateSegment) matches(part string, rules routingRules) bool {
-	if s.kind == segmentLiteral && rules.caseSensitive {
-		return s.text == part
-	}
-
-	if s.kind == segmentLiteral {
-		return strings.EqualFold(s.text, part)
-	}
-
-	return part != ""
-}
-
-// compareSpecificity orders two templates matching the same request: positive
-// when a describes it more precisely than b, negative when b does, and zero
-// when neither does. Segments are compared from the left, the first that
-// differs in kind deciding; a template that ends first, all before equal, is
-// the more precise.
-func compareSpecificity(a, b routeTemplate) int {
-	for i := 0; i < len(a.segments) && i < len(b.segments); i++ {
-		if diff := int(a.segments[i].kind) - int(b.segments[i].kind); diff != 0 {
-			return diff
-		}
-	}
-
-	return len(b.segments) - len(a.segments)
-}
-
-// sameShape reports whether two templates match exactly the same requests and
-// read the same parameters at the same places under possibly other names —
-// which makes them two names for one route.
-func sameShape(a, b routeTemplate) bool {
-	if len(a.segments) != len(b.segments) {
-		return false
-	}
-
-	for i, sa := range a.segments {
-		sb := b.segments[i]
-		if sa.kind != sb.kind || sa.nonEmpty != sb.nonEmpty {
-			return false
-		}
-
-		if sa.kind == segmentLiteral && !sa.matches(sb.text, a.rules) {
-			return false
-		}
-	}
-
-	return true
-}
-
 // resolvedRoute is the route a request was resolved to, with its parameters.
 type resolvedRoute struct {
 	method string
@@ -258,24 +29,69 @@ type routeTable struct {
 	handlers   uint32
 	generation uint64
 	rules      routingRules
-	routes     []routeTemplate
+	// registered are the routes the app registers, in the order Fiber tries
+	// them.
+	registered []registeredRoute
+	// declared are the routes only the manifest declares.
+	declared []routeTemplate
 }
 
-// resolve returns the most specific candidate route describing the request,
-// or a description of why none does: no candidate matches, or two equally
-// specific ones under different paths do and the request cannot be read on
-// either without guessing.
+// registeredRoute is a route the app registers. For a route whose path the
+// matcher cannot read, its outline is kept: enough to tell that it cannot
+// serve a request.
+type registeredRoute struct {
+	template routeTemplate
+	readable bool
+	method   string
+	path     string
+	outline  routeOutline
+}
+
+// resolve returns the route that serves the request, or a description of why
+// none can be named. The app's routes are tried in the order Fiber tries them,
+// and the first that matches is the one Fiber serves, whatever a more specific
+// route registered later would say: the scope read must be that of the
+// handler that runs. A route the matcher cannot read that could serve the
+// request ends the search unresolved. Only when no route the app registers
+// serves it is it resolved among the routes the manifest alone declares, the
+// most specific winning, and two equally specific under different paths
+// leaving it unresolved.
 func (t *routeTable) resolve(method, path string) (resolvedRoute, string) {
+	parts := pathSegments(path, t.rules)
+
+	for i := range t.registered {
+		route := &t.registered[i]
+		if route.method != method {
+			continue
+		}
+
+		if !route.readable {
+			if route.outline.mayServe(parts, t.rules) {
+				return resolvedRoute{}, "cannot tell whether " + method + " " + route.path + " serves " + path
+			}
+
+			continue
+		}
+
+		if params, ok := route.template.match(parts); ok {
+			return resolvedRoute{method: method, path: route.path, params: params}, ""
+		}
+	}
+
+	return t.resolveDeclared(method, path, parts)
+}
+
+// resolveDeclared resolves a request no registered route serves among the
+// routes the manifest alone declares.
+func (t *routeTable) resolveDeclared(method, path string, parts []string) (resolvedRoute, string) {
 	var (
 		best      *routeTemplate
 		bestParam map[string]string
 		tied      *routeTemplate
 	)
 
-	parts := pathSegments(path, t.rules)
-
-	for i := range t.routes {
-		route := &t.routes[i]
+	for i := range t.declared {
+		route := &t.declared[i]
 		if route.method != method {
 			continue
 		}
@@ -303,14 +119,15 @@ func (t *routeTable) resolve(method, path string) (resolvedRoute, string) {
 	case best == nil:
 		return resolvedRoute{}, "no registered or declared route serves " + method + " " + path
 	case tied != nil:
-		return resolvedRoute{}, method + " " + path + " is served equally by " + best.path + " and " + tied.path
+		return resolvedRoute{}, method + " " + path + " is served equally by the declared routes " + best.path + " and " + tied.path
 	}
 
 	return resolvedRoute{method: best.method, path: best.path, params: bestParam}, ""
 }
 
 // buildRouteTable compiles the app's routes — every route it registers, Use
-// mounts aside — and the routes the product's manifest declares, each once.
+// mounts aside, in its order — and the routes only the product's manifest
+// declares.
 func buildRouteTable(app *fiber.App, generation uint64, declared []string) *routeTable {
 	config := app.Config()
 	table := &routeTable{
@@ -321,26 +138,28 @@ func buildRouteTable(app *fiber.App, generation uint64, declared []string) *rout
 	}
 	seen := make(map[string]struct{})
 
-	add := func(method, path string) {
-		key := routeScopeKey(method, path)
-		if _, dup := seen[key]; dup {
-			return
-		}
-
-		seen[key] = struct{}{}
-
-		if route, ok := parseRouteTemplate(method, path, table.rules); ok {
-			table.routes = append(table.routes, route)
-		}
-	}
-
 	for _, route := range app.GetRoutes(true) {
-		add(route.Method, route.Path)
+		seen[routeScopeKey(route.Method, route.Path)] = struct{}{}
+
+		template, readable := parseRouteTemplate(route.Method, route.Path, table.rules)
+		table.registered = append(table.registered, registeredRoute{
+			template: template,
+			readable: readable,
+			method:   route.Method,
+			path:     route.Path,
+			outline:  outlineRoute(route.Path, table.rules),
+		})
 	}
 
 	for _, key := range declared {
+		if _, registered := seen[key]; registered {
+			continue
+		}
+
 		method, path, _ := strings.Cut(key, " ")
-		add(method, path)
+		if template, ok := parseRouteTemplate(method, path, table.rules); ok {
+			table.declared = append(table.declared, template)
+		}
 	}
 
 	return table
