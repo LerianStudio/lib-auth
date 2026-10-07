@@ -67,35 +67,6 @@ func serveOnce(tb testing.TB, h fasthttp.RequestHandler, ctx *fasthttp.RequestCt
 	}
 }
 
-// A request no scope is read for is never resolved: a mounted handler costs it
-// no more allocations than a handler on its own route, however many routes the
-// app registers.
-func TestAuthorize_MountedHandler_UnreadScopeIsNeverResolved(t *testing.T) {
-	var ctx fasthttp.RequestCtx
-
-	own := benchApp(t, false)
-	mounted := benchApp(t, true)
-
-	// AllocsPerRun counts every allocation in the process, so another
-	// goroutine can only add to a run: the least of several runs is the
-	// request's own cost.
-	leastAllocs := func(h fasthttp.RequestHandler) float64 {
-		least := testing.AllocsPerRun(100, func() { serveOnce(t, h, &ctx) })
-		for range 4 {
-			least = min(least, testing.AllocsPerRun(100, func() { serveOnce(t, h, &ctx) }))
-		}
-
-		return least
-	}
-
-	ownAllocs := leastAllocs(own)
-	mountedAllocs := leastAllocs(mounted)
-
-	if mountedAllocs > ownAllocs {
-		t.Fatalf("mounted handler allocates %.0f per request, own route %.0f", mountedAllocs, ownAllocs)
-	}
-}
-
 // BenchmarkAuthorize_NonPartnerOverhead measures what a request costs when no
 // scope is read for it: a handler on its own route against one mounted on a
 // prefix in front of benchRoutes routes.

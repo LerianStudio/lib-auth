@@ -15,6 +15,11 @@ import (
 // and the routes the product's manifest declares, so a product authorizing in
 // prefix middleware needs no code of its own.
 
+// mountedResolutions counts the requests resolved to the route that serves
+// them, process-wide. Only a request whose scope is read is resolved; the count
+// is what lets that be checked.
+var mountedResolutions atomic.Uint64
+
 // resolvedRoute is the route a request was resolved to, with its parameters.
 type resolvedRoute struct {
 	method string
@@ -223,6 +228,8 @@ func (s ScopeDeclaration) readOnServingRoute(c fiber.Ctx) (ScopeDeclaration, str
 	if r == nil || !r.hasScope() {
 		return s, ""
 	}
+
+	mountedResolutions.Add(1)
 
 	resolved, unresolved := r.table(c.App()).resolve(c.Method(), c.Path())
 	if unresolved != "" {

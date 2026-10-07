@@ -812,3 +812,69 @@ func TestAuthorize_MountedHandler_OnlyRoutesOfTheMethod(t *testing.T) {
 		assert.JSONEq(t, `{"organizationId":"main","ledgerId":"led-9"}`, attributesOf(t, rec.lastBody(t)))
 	})
 }
+
+// A route at the root, however it is spelled, is one segment and never a
+// template with none: resolving a mounted request against it must not panic.
+func TestAuthorize_MountedHandler_RootRoutes(t *testing.T) {
+	t.Parallel()
+
+	for _, root := range []string{"/", "//"} {
+		t.Run(root, func(t *testing.T) {
+			t.Parallel()
+
+			rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+			auth := scopedClient(t, rec)
+			require.NoError(t, auth.SetManifestRouteScope("midaz", http.MethodGet, root,
+				Dim("ledgerId", FromHeader).At("X-Ledger-Id")))
+
+			app := fiber.New()
+			app.Use("/v1/organizations", auth.Authorize("midaz", "ledgers", "get"))
+			app.Get(root, ok)
+			app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id", ok)
+
+			assert.Equal(t, http.StatusOK, doGet(t, app, ledgerPath, partnerToken("acme/p1")))
+			assert.JSONEq(t, `{"organizationId":"org-1","ledgerId":"led-1"}`, attributesOf(t, rec.lastBody(t)))
+
+			// No registered route serves it: resolved among the declared ones,
+			// the root among them.
+			assert.Equal(t, http.StatusForbidden, doGet(t, app, "/v1/organizations/org-1/other", partnerToken("acme/p1")))
+		})
+	}
+}
+
+func TestParseRouteTemplate_NeverYieldsNoSegment(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"/", "//", "///"} {
+		for _, rules := range []routingRules{{}, {strict: true}, {caseSensitive: true}} {
+			route, ok := parseRouteTemplate(http.MethodGet, path, rules)
+			require.True(t, ok, path)
+			assert.NotEmpty(t, route.segments, "%q under %+v", path, rules)
+		}
+	}
+
+	// A path that does not start at the root is no route.
+	_, ok := parseRouteTemplate(http.MethodGet, "", routingRules{})
+	assert.False(t, ok)
+}
+
+// A request no scope is read for is never resolved: only a partner-bound
+// caller pays for finding the route that serves it. Not parallel: the count
+// is process-wide, and no parallel test runs alongside a serial one.
+func TestAuthorize_MountedHandler_UnreadScopeIsNeverResolved(t *testing.T) {
+	rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+	auth := scopedClient(t, rec)
+	app := mountedApps(auth.Authorize("midaz", "ledgers", "get"))["prefix_use"]
+
+	before := mountedResolutions.Load()
+
+	for range 3 {
+		assert.Equal(t, http.StatusOK, doGet(t, app, ledgerPath, userToken()))
+	}
+
+	assert.Equal(t, before, mountedResolutions.Load(), "a non-partner request is never resolved")
+
+	// Positive control: the same route, a partner-bound caller.
+	assert.Equal(t, http.StatusOK, doGet(t, app, ledgerPath, partnerToken("acme/p1")))
+	assert.Equal(t, before+1, mountedResolutions.Load())
+}

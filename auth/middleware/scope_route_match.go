@@ -56,6 +56,10 @@ type routeTemplate struct {
 // optional parameter or a wildcard anywhere but last): such a route is never
 // a candidate, and a request only it would serve resolves to no route.
 func parseRouteTemplate(method, path string, rules routingRules) (routeTemplate, bool) {
+	if !strings.HasPrefix(path, "/") {
+		return routeTemplate{}, false
+	}
+
 	route := routeTemplate{method: method, path: path, rules: rules}
 	parts := pathSegments(path, rules)
 
@@ -108,7 +112,11 @@ func parseTemplateSegment(part string) (templateSegment, bool) {
 // trailing slashes are ignored, as Fiber ignores them.
 func pathSegments(path string, rules routingRules) []string {
 	if !rules.strict && len(path) > 1 {
-		path = strings.TrimRight(path, "/")
+		// "//" trims to nothing, which is still the root: one empty segment,
+		// never none, so a template always has a last segment to inspect.
+		if path = strings.TrimRight(path, "/"); path == "" {
+			path = "/"
+		}
 	}
 
 	return strings.Split(path, "/")[1:]
