@@ -691,6 +691,51 @@ Any other client takes it with `declaration.WireScope(auth, embeddedManifest)`.
   moving a dimension from the path to a header is a change the access manager
   receives.
 
+#### Authorizing in middleware (`Use`, groups, mounted apps)
+
+A handler mounted with `Use` — on the app, on a group, or inside a mounted
+sub-app — does not see the route a request is for: Fiber reports the **mount
+prefix** as its route and reads no path parameter past it. `Authorize` then
+resolves the request **itself**, with no product code:
+
+```go
+app.Use("/v1/organizations", auth.Authorize("midaz", "ledgers", "get"))
+app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id", handler)
+// a partner request to /v1/organizations/org-1/ledgers/led-1 sends
+// {"organizationId":"org-1","ledgerId":"led-1"}, as on the route itself
+```
+
+* The request's method and path are matched against every route the app
+  registers (`Use` mounts aside) and every `scope.routes` entry of the manifest.
+  The route that matches takes its scope from the manifest exactly as if the
+  handler were on it, and its path parameters are read from the match.
+* Matching follows the app's own routing: literals compare without regard to
+  letter case unless `fiber.Config.CaseSensitive` is set, and a trailing slash is
+  ignored unless `fiber.Config.StrictRouting` is set — so a request resolves to
+  the route Fiber routes it to.
+* The scope read is that of the **route Fiber serves**: the app's routes are
+  tried in the order Fiber tries them, and the first that matches wins, even
+  when a more specific route is registered after it — the handler that runs is
+  the one whose scope is checked. A route whose path the matcher cannot read
+  (a constrained parameter `:id<int>`, several parameters in one segment) and
+  that could serve the request leaves it **unresolved**.
+* Only a request no registered route serves is resolved among the routes the
+  manifest alone declares, where the **most specific** wins, compared segment
+  by segment from the left: a literal over a parameter, a parameter over an
+  optional one, an optional one over a wildcard. Two declared routes equally
+  specific under different paths leave the request **unresolved**.
+* Two `scope.routes` entries of one method that are the same route under other
+  parameter names are a manifest defect, refused when the manifest is wired.
+  The app's routing is not known then, so only entries that are one route under
+  any routing are refused (literals differing in letter case, or in a trailing
+  slash, are left to the runtime rule above).
+* A partner-bound request that resolves to no single route — none matches, two
+  declared routes tie, or an unreadable route may serve it — is refused **403 before the round-trip**: its scope cannot be read.
+  Every other credential is decided exactly as before, down to the bytes on the
+  wire.
+* Nothing changes for a handler on its own route (`app.Get(path, auth.Authorize(...), h)`),
+  nor for a product with no scope catalog and no `RequireScope`.
+
 #### Confining related collections (`covers`)
 
 A dimension's `collection` is where its instances live. A partner scoped on the

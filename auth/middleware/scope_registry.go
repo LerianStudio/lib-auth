@@ -208,10 +208,41 @@ func (store *manifestScopeStore) setRouteScope(product, method, path string, dim
 		store.routes[product] = make(map[string]routeBodyScope)
 	}
 
+	if other := sameRouteUnderAnotherName(store.routes[product], method, path); other != "" {
+		return errors.New("manifest route scope: " + method + " " + path + " and " + other + " name the same route; a request to it could not be told apart")
+	}
+
 	store.routes[product][routeScopeKey(method, path)] = routeBodyScope{dims: routeDims, plan: plan}
 	store.gen++
 
 	return nil
+}
+
+// sameRouteUnderAnotherName returns the path of a declared route of the same
+// method that matches exactly the requests path does under other parameter
+// names, or "". A request seen through a mount prefix is resolved among the
+// declared routes, and two names for one route would leave it to a guess. The
+// app's routing is not known here, so the routes are compared under the
+// strictest one: only routes that are one route under any routing are refused,
+// and the rest are told apart, or refused, when a request is resolved.
+func sameRouteUnderAnotherName(routes map[string]routeBodyScope, method, path string) string {
+	route, ok := parseRouteTemplate(method, path, strictestRouting)
+	if !ok {
+		return ""
+	}
+
+	for key := range routes {
+		otherMethod, otherPath, _ := strings.Cut(key, " ")
+		if otherMethod != method || otherPath == path {
+			continue
+		}
+
+		if other, ok := parseRouteTemplate(otherMethod, otherPath, strictestRouting); ok && sameShape(route, other) {
+			return otherPath
+		}
+	}
+
+	return ""
 }
 
 // routeTarget checks the route SetManifestRouteScope addresses, and returns its
@@ -268,6 +299,45 @@ func (auth *AuthClient) manifestRouteScope(product, key string) (uint64, []Dimen
 	}
 
 	return gen + sharedGen, sharedCatalog, sharedBody, sharedDeclared
+}
+
+// hasManifestScope reports whether the product has a catalog, the client's own
+// or the process-wide one.
+func (auth *AuthClient) hasManifestScope(product string) bool {
+	return auth.manifestScope.hasScope(product) || productScopes.hasScope(product)
+}
+
+func (store *manifestScopeStore) hasScope(product string) bool {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	return len(store.scopes[product]) > 0
+}
+
+// manifestRouteKeys returns the method and path of every route the manifest
+// declares for the product, from the same store manifestRouteScope reads.
+func (auth *AuthClient) manifestRouteKeys(product string) []string {
+	if keys, own := auth.manifestScope.routeKeys(product); own {
+		return keys
+	}
+
+	keys, _ := productScopes.routeKeys(product)
+
+	return keys
+}
+
+// routeKeys returns the product's declared route keys, and whether the store
+// has a catalog for the product.
+func (store *manifestScopeStore) routeKeys(product string) ([]string, bool) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	keys := make([]string, 0, len(store.routes[product]))
+	for key := range store.routes[product] {
+		keys = append(keys, key)
+	}
+
+	return keys, len(store.scopes[product]) > 0
 }
 
 func (store *manifestScopeStore) generation() uint64 {
