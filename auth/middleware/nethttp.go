@@ -52,9 +52,10 @@ func (auth *AuthClient) WithHTTPErrorHandler(h HTTPErrorHandler) *AuthClient {
 //     bearer.MaxTokenBytes and three non-empty base64url segments, no control
 //     bytes. A missing credential is 401 "Missing Token", any other malformed
 //     one 401 "Unauthorized"; neither reaches the Access Manager.
-//   - A FromPath dimension reads r.PathValue, which only the Go 1.22+ ServeMux
-//     populates. Under another router it resolves empty, and a partner-bound
-//     credential is refused with 403.
+//   - A FromPath dimension reads r.PathValue, which the Go 1.22+ ServeMux
+//     populates. Under another router it resolves empty unless that router
+//     calls r.SetPathValue, and an empty one refuses a partner-bound credential
+//     with 403.
 //   - A route that relies on its product's manifest scope (no RequireScope, see
 //     SetManifestScope and SetManifestRouteScope) is the request method and the
 //     path of r.Pattern, its "{name}" and "{name...}" segments read as ":name".
@@ -146,9 +147,9 @@ func (v netHTTPRequest) clientIP(auth *AuthClient) string {
 	return auth.resolveClientIPHTTP(v.r)
 }
 
-// pathParam reads r.PathValue, which only the Go 1.22+ ServeMux populates:
-// under any other router a path dimension resolves empty and the request is
-// refused, never sent unscoped.
+// pathParam reads r.PathValue, which the Go 1.22+ ServeMux populates; another
+// router leaves it empty unless it calls r.SetPathValue, and an empty path
+// dimension is refused, never sent unscoped.
 func (v netHTTPRequest) pathParam(key string) string {
 	return v.r.PathValue(key)
 }

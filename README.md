@@ -468,8 +468,10 @@ can key on 503 across both surfaces.
 
 Package `auth/authtest` lets a service write an end-to-end test of a route that
 requires a principal without contacting the authorization service. **It is
-test-only: never import it from production wiring.** Every entry point takes a
-`testing.TB`, there is no global switch, and lib-auth's own guard test fails if
+test-only: never import it from production wiring.** Every helper that publishes
+a principal or issues a token (`WithPrincipal`, `Fiber`, `HTTP`, `NewIssuer`,
+`Issuer.Token`) takes a `testing.TB`; `User` and `App` only build a `Principal`
+value. There is no global switch, and lib-auth's own guard test fails if
 any non-test file in the module imports it.
 
 Pick the helper by what the test exercises:
@@ -512,6 +514,7 @@ client.PrincipalRequiredWhenDisabled = true
 client.M2MInversionEnabled = true // needed for application principals on this path
 client.WithKeySource(issuer.KeySource())
 
+req := httptest.NewRequest(http.MethodPost, "/v1/emissions/em-1/approve", nil)
 req.Header.Set("Authorization", "Bearer "+issuer.Token(t, p))
 ```
 
@@ -1210,8 +1213,8 @@ An empty signature segment is refused too, so an unsigned (`alg=none`) token nev
 
 ### What differs from `Authorize`
 
-- **`FromPath` reads `r.PathValue`,** which only the Go 1.22+ `http.ServeMux` fills in from a `{name}` pattern. Under another router a path dimension resolves empty, and a partner-bound credential is refused with 403. It is never sent without the dimension. `FromHeader`, `FromQuery` and `FromForm` work under any router, and read every occurrence and comma-separated value exactly as `Authorize` does.
-- **A route that relies on the manifest scope** (no `RequireScope`, after `declaration.WireScope`) derives its dimensions from the `http.ServeMux` pattern that matched the request (`r.Pattern`): every `{name}` or `{name...}` segment is the `:name` parameter the catalog is declared in, and a `scope.routes` entry is looked up by the request method and that path (`GET /v1/organizations/{organization_id}/accounts` is `GET /v1/organizations/:organization_id/accounts`). Under another router there is no pattern, so the route derives no path dimension: a partner-bound credential is asked without them, as on any undeclared route, and the authorization service decides.
+- **`FromPath` reads `r.PathValue`,** which the Go 1.22+ `http.ServeMux` fills in from a `{name}` pattern. Under another router a path dimension resolves empty unless that router populates it with `r.SetPathValue`; an empty one refuses a partner-bound credential with 403. It is never sent without the dimension. `FromHeader`, `FromQuery` and `FromForm` work under any router, and read every occurrence and comma-separated value exactly as `Authorize` does.
+- **A route that relies on the manifest scope** (no `RequireScope`, after `declaration.WireScope`) derives its dimensions from the `http.ServeMux` pattern that matched the request (`r.Pattern`): every `{name}` or `{name...}` segment is the `:name` parameter the catalog is declared in, and a `scope.routes` entry is looked up by the request method and that path (`GET /v1/organizations/{organization_id}/accounts` is `GET /v1/organizations/:organization_id/accounts`). Under another router there is no pattern unless that router sets `r.Pattern` in the same form, so the route derives no path dimension: a partner-bound credential is asked without them, as on any undeclared route, and the authorization service decides.
 - **A body-scoped route (`FromBody`, `FromForm`) reads at most 4 MiB** of the body, Fiber's default `BodyLimit`, and only for a partner-bound credential. A larger body answers `413 Request Entity Too Large`, with no authorization call and no handler call. A body that is read is put back on the request, so the handler reads exactly the bytes the caller sent.
 - **Refusals go to an `HTTPErrorHandler`,** not to a returned error. `err` is always a `*middleware.RefusalError`, which carries `Status`, `Message`, and `Response`. `Response` is the Access Manager's decoded refusal body, when it sent one. `errors.As(err, &commons.Response{})` also recovers that body, as on the Fiber path. The handler must write the response. The default writes `Message` as plain text with `Status`, the same way Fiber's default handler renders the `*fiber.Error` from `Authorize`.
 - **The client IP** comes from `r.RemoteAddr` and every `X-Forwarded-For` line, read in order and walked against `TRUSTED_PROXIES` exactly as on the Fiber path. If `RemoteAddr` is not an address and port, as behind a unix socket, or its address is unspecified (`0.0.0.0`, `::`), no IP is forwarded; the Fiber path forwards none either for a connection with no IP peer, which fasthttp reports as `0.0.0.0`.
