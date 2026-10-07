@@ -381,6 +381,7 @@ func TestRouteTemplate_Match(t *testing.T) {
 		{name: "wildcard_empty", template: "/v1/*", path: "/v1", want: map[string]string{}},
 		{name: "plus", template: "/v1/+", path: "/v1/a", want: map[string]string{}},
 		{name: "plus_empty", template: "/v1/+", path: "/v1", want: nil},
+		{name: "plus_only_empty_segments", template: "/v1/+", path: "/v1//", want: nil},
 		{name: "longer", template: "/v1/:a", path: "/v1/1/2", want: nil},
 		{name: "shorter", template: "/v1/:a/x", path: "/v1/1", want: nil},
 		{name: "other_literal", template: "/v1/x/:a", path: "/v1/y/1", want: nil},
@@ -395,7 +396,7 @@ func TestRouteTemplate_Match(t *testing.T) {
 			route, ok := parseRouteTemplate(http.MethodGet, tt.template)
 			require.True(t, ok)
 
-			params, matched := route.match(tt.path)
+			params, matched := route.match(pathSegments(tt.path))
 			assert.Equal(t, tt.want != nil, matched)
 
 			if tt.want != nil {
@@ -492,4 +493,20 @@ func TestAuthorize_MountedHandler_Head(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.JSONEq(t, `{"organizationId":"org-1","ledgerId":"led-1"}`, attributesOf(t, rec.lastBody(t)))
+}
+
+func TestSegmentCount(t *testing.T) {
+	t.Parallel()
+
+	for path, want := range map[string]int{
+		"":                       0,
+		"/":                      0,
+		"/v1":                    1,
+		"/v1/":                   1,
+		"/v1/organizations/org1": 3,
+		"//v1//x/":               2,
+		"/:organization_id/abc":  2,
+	} {
+		assert.Equal(t, want, segmentCount(path), path)
+	}
 }

@@ -109,27 +109,72 @@ func pathSegments(path string) []string {
 	return strings.Split(path, "/")[1:]
 }
 
-// match reads the path parameters of a request path the template describes,
-// or returns false. Literals match without regard to letter case, as Fiber's
-// default routing does.
-func (r *routeTemplate) match(path string) (map[string]string, bool) {
-	parts := pathSegments(path)
+// match reads the path parameters of a request, split by pathSegments, the
+// template describes, or returns false. Literals match without regard to
+// letter case, as Fiber's default routing does. Nothing is allocated for a
+// template that does not match, which is almost every candidate. On a match
+// the map is never nil, even when the template has no parameter: a nil map
+// reads parameters from Fiber, which has none past the mount prefix.
+func (r *routeTemplate) match(parts []string) (map[string]string, bool) {
+	if !r.fitsLength(len(parts)) || !r.fits(parts) {
+		return nil, false
+	}
+
 	params := make(map[string]string, len(r.segments))
 
 	for i, segment := range r.segments {
-		switch {
-		case segment.kind == segmentWildcard:
-			return params, !segment.nonEmpty || strings.Join(parts[min(i, len(parts)):], "") != ""
-		case segment.kind == segmentOptional && i == len(parts):
-			return params, true
-		case i >= len(parts) || !segment.matches(parts[i]):
-			return nil, false
-		case segment.kind != segmentLiteral:
+		if i < len(parts) && (segment.kind == segmentParam || segment.kind == segmentOptional) {
 			params[segment.text] = parts[i]
 		}
 	}
 
-	return params, len(parts) == len(r.segments)
+	return params, true
+}
+
+// fits reports whether the request segments fit the template's, given a
+// length fitsLength accepted.
+func (r *routeTemplate) fits(parts []string) bool {
+	for i, segment := range r.segments {
+		switch {
+		case segment.kind == segmentWildcard:
+			return !segment.nonEmpty || hasNonEmpty(parts[min(i, len(parts)):])
+		case segment.kind == segmentOptional && i == len(parts):
+			return true
+		case !segment.matches(parts[i]):
+			return false
+		}
+	}
+
+	return true
+}
+
+// hasNonEmpty reports whether any of the segments is not empty.
+func hasNonEmpty(parts []string) bool {
+	for _, part := range parts {
+		if part != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// fitsLength reports whether a request of n segments can match the template,
+// checked before anything is allocated: most candidates fail here.
+func (r *routeTemplate) fitsLength(n int) bool {
+	// A path always has at least one segment ("/" is one empty segment).
+	count := len(r.segments)
+
+	switch r.segments[count-1].kind {
+	case segmentWildcard:
+		return n >= count-1
+	case segmentOptional:
+		return n == count || n == count-1
+	case segmentParam, segmentLiteral:
+		return n == count
+	default:
+		return n == count
+	}
 }
 
 // matches reports whether one request segment fits the template segment: a
@@ -206,13 +251,15 @@ func (t *routeTable) resolve(method, path string) (resolvedRoute, string) {
 		tied      *routeTemplate
 	)
 
+	parts := pathSegments(path)
+
 	for i := range t.routes {
 		route := &t.routes[i]
 		if route.method != method {
 			continue
 		}
 
-		params, ok := route.match(path)
+		params, ok := route.match(parts)
 		if !ok {
 			continue
 		}
@@ -290,12 +337,13 @@ func servedByPrefix(routePath, requestPath string) bool {
 	return segmentCount(routePath) < segmentCount(requestPath)
 }
 
-// segmentCount counts the non-empty '/'-separated segments of a path.
+// segmentCount counts the non-empty '/'-separated segments of a path, without
+// allocating: it runs on every request a mounted handler sees.
 func segmentCount(path string) int {
 	count := 0
 
-	for _, segment := range strings.Split(path, "/") {
-		if segment != "" {
+	for i := 0; i < len(path); i++ {
+		if path[i] != '/' && (i == 0 || path[i-1] == '/') {
 			count++
 		}
 	}
@@ -303,26 +351,49 @@ func segmentCount(path string) int {
 	return count
 }
 
-// scopeFor returns the scope of the request in flight, and a non-empty
-// description of what is wrong when the route cannot be honoured. A request
-// served on its own route takes that route's scope, exactly as before. A
-// request seen through a mount prefix, for a route that has a scope to read,
-// is resolved to the route that serves it.
+// scopeFor returns the scope of the route Fiber names for the request in
+// flight, and a non-empty description of what is wrong when the route cannot
+// be honoured. A request seen through a mount prefix is marked to be read on
+// the route that serves it; that route is resolved only when a scope is read
+// (readOnServingRoute), so a request no scope is read for — any caller that is
+// not partner-bound — costs no more than on its own route.
 func (r *routeScope) scopeFor(c fiber.Ctx) (ScopeDeclaration, string) {
 	route := c.Route()
-	if !servedByPrefix(route.Path, c.Path()) || !r.hasScope() {
-		return r.forRoute(route.Method, route.Path)
+
+	scope, problem := r.forRoute(route.Method, route.Path)
+	if problem == "" && servedByPrefix(route.Path, c.Path()) {
+		scope.mounted = r
+	}
+
+	return scope, problem
+}
+
+// readOnServingRoute returns the scope of a request seen through a mount
+// prefix, read on the route that serves it, or a non-empty description of why
+// no single route does. A route with no scope to read — no catalog for its
+// product and no declaration of its own — keeps the one it has, as before.
+func (s ScopeDeclaration) readOnServingRoute(c fiber.Ctx) (ScopeDeclaration, string) {
+	r := s.mounted
+	if r == nil || !r.hasScope() {
+		return s, ""
 	}
 
 	resolved, unresolved := r.table(c.App()).resolve(c.Method(), c.Path())
 	if unresolved != "" {
-		return ScopeDeclaration{product: r.product, unresolved: unresolved}, ""
+		return ScopeDeclaration{}, unresolved
 	}
 
+	// A declaration's problem does not depend on the route and was refused in
+	// scopeFor; it can reappear here only if the manifest was rewired between
+	// the two reads, and is then refused all the same.
 	scope, problem := r.forRoute(resolved.method, resolved.path)
+	if problem != "" {
+		return ScopeDeclaration{}, problem
+	}
+
 	scope.params = resolved.params
 
-	return scope, problem
+	return scope, ""
 }
 
 // hasScope reports whether the route has a scope to read: its own

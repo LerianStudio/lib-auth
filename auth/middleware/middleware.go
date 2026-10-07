@@ -769,8 +769,9 @@ func (auth *AuthClient) scopeQuestions(ctx context.Context, c fiber.Ctx, scope S
 		return nil, nil
 	}
 
-	if scope.unresolved != "" {
-		logErrorf(ctx, auth.Logger, "Scope cannot be read for a request seen through a mount prefix: %s; denying (fail closed)", scope.unresolved)
+	scope, unresolved := scope.readOnServingRoute(c)
+	if unresolved != "" {
+		logErrorf(ctx, auth.Logger, "Scope cannot be read for a request seen through a mount prefix: %s; denying (fail closed)", unresolved)
 
 		return nil, auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
 	}

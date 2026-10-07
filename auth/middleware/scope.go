@@ -233,9 +233,10 @@ type ScopeDeclaration struct {
 	// params are the path parameters of the request in flight, read on the
 	// route it was resolved to; nil reads them from Fiber.
 	params map[string]string
-	// unresolved is non-empty when the request was seen through a mount prefix
-	// and no single route could be found to read its scope on.
-	unresolved string
+	// mounted is set when the request was seen through a mount prefix: its
+	// scope is read on the route that serves it, resolved only when a scope is
+	// read at all (see readOnServingRoute).
+	mounted *routeScope
 }
 
 // pathParam reads a path parameter of the request in flight.
