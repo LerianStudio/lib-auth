@@ -216,7 +216,7 @@ func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorize
 
 // authorizeRequest decides one request: it derives the caller once, works out
 // the questions the request makes, and asks them in order under ONE deadline for
-// the whole request, stopping at the first that is not allowed. It returns the
+// all of them, stopping at the first that is not allowed. It returns the
 // last resolution and the questions asked, or the refusal.
 //
 // The scope is read only for a partner-bound credential. The authorization
@@ -239,19 +239,26 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, req requestView, p
 		return authzResolution{}, Principal{}, nil, refusalFor(*refused)
 	}
 
-	// One budget for the whole request, however many questions it makes.
-	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
-	defer cancel()
+	deriveCtx, cancelDerive := context.WithTimeout(ctx, auth.requestTimeout())
+	caller, failure := auth.deriveCaller(deriveCtx, span, params.accessToken, params.product)
 
-	caller, failure := auth.deriveCaller(ctx, span, params.accessToken, params.product)
+	cancelDerive()
+
 	if failure != nil {
 		return authzResolution{}, Principal{}, nil, refusalFor(*failure)
 	}
 
+	// The scope is read before the questions' budget starts: under AuthorizeHTTP
+	// it may read the body from the client, and a slow upload must not spend the
+	// Access Manager's time, be answered 503, or count as its failure.
 	questions, refusal := auth.scopeQuestions(ctx, req, scope, caller)
 	if refusal != nil {
 		return authzResolution{}, Principal{}, nil, refusal
 	}
+
+	// One budget for every question the request makes, however many.
+	ctx, cancel := context.WithTimeout(ctx, auth.requestTimeout())
+	defer cancel()
 
 	asked := questions
 	if len(asked) == 0 {

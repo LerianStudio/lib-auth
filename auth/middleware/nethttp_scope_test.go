@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -206,4 +207,45 @@ func TestServeMuxRoutePath(t *testing.T) {
 	} {
 		assert.Equal(t, want, serveMuxRoutePath(pattern), pattern)
 	}
+}
+
+// slowBody hands its bytes over only after a delay, as a client uploading
+// slowly does.
+type slowBody struct {
+	delay time.Duration
+	r     io.Reader
+	slept bool
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	if !b.slept {
+		time.Sleep(b.delay)
+
+		b.slept = true
+	}
+
+	return b.r.Read(p)
+}
+
+// Reading the body of a slow upload must not spend the Access Manager's
+// budget: the questions are asked under a full timeout of their own, so a slow
+// client is not answered 503 and never counts as an Access Manager failure.
+func TestAuthorizeHTTP_BodyScope_SlowUploadKeepsTheAuthorizationBudget(t *testing.T) {
+	t.Parallel()
+
+	srv := newDecidingAuthServer(t)
+	auth := bodyScopedClient(t, srv.URL, http.MethodPost, directPath,
+		Dim("ledgerId", FromBody).At("ledgerId"))
+	auth.timeout = 100 * time.Millisecond
+
+	got := serveGated(t, "POST "+directPath, auth.AuthorizeHTTP("midaz", "transactions", "post")(principalEcho(nil)), func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, directPath, &slowBody{delay: 250 * time.Millisecond, r: strings.NewReader(`{"ledgerId":"led-1"}`)})
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+partnerToken("acme/p1"))
+
+		return req
+	})
+
+	require.Equal(t, http.StatusOK, got.Code, got.Body.String())
+	assert.Equal(t, []map[string]string{{"ledgerId": "led-1"}}, srv.attributeCalls())
 }
