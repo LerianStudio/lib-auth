@@ -354,11 +354,17 @@ machine credential acts on behalf of — copied verbatim and published only for
 absent or not a string. Where `Sub` differs per credential, `SourceService` is the
 same on every credential one service holds, so a multi-tenant producer that is
 issued one application per tenant keeps a single `SourceService`. The credential
-issuer stamps it and the caller cannot set it. It never affects authorization or
-whether `PrincipalFromContext` reports a principal. The library does not validate
-it: an issuer may write a marker such as `undeclared` for a credential created
-without a source, and a service that uses the value as an identity must refuse an
-empty or marker value.
+issuer stamps it, but the library gives it the same provenance as every other claim
+on the `Principal`. When the authorization service vouches for the token, or local
+signature verification is configured, a caller cannot choose its value. With
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` and no verification keys the claim is
+**self-asserted**: any caller can present any value, so a service must not use it
+as an identity in that mode (see the trust-boundary warning under
+[Bearer required while auth is disabled](#bearer-required-while-auth-is-disabled)).
+It never affects authorization or whether `PrincipalFromContext` reports a
+principal. The library does not validate it: an issuer may write a marker such as
+`undeclared` for a credential created without a source, and a service that uses the
+value as an identity must refuse an empty or marker value.
 
 Publication covers the authorized decision, a decision-cache hit, and the
 `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` path below. A denied request publishes

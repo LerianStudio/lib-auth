@@ -43,7 +43,14 @@ type Principal struct {
 	// machine credential acts on behalf of, and unlike Sub it is identical across
 	// every credential that service holds, so a multi-tenant producer served by
 	// one application per tenant keeps one SourceService where it has many Subs.
-	// The credential issuer stamps it; a caller can neither set it nor change it.
+	// The credential issuer stamps it, but this library publishes it with the same
+	// provenance as every other claim on the Principal, and that depends on the
+	// mode: when the authorization service vouches for the token, or when local
+	// signature verification is configured, a caller cannot choose its value. With
+	// PrincipalRequiredWhenDisabled and no verification keys there is no trust
+	// anchor, the claim is SELF-ASSERTED, and any caller can present any value (see
+	// the trust-boundary warning in the README). A consumer that uses it as an
+	// identity must not rely on it in that mode.
 	//
 	// The library never trims, lower-cases or validates it, and never lets it
 	// affect authorization or PrincipalFromContext's validity rules. Marker values
