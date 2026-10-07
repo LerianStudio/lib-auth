@@ -299,14 +299,6 @@ func logErrorf(ctx context.Context, logger obs.Logger, format string, args ...an
 	logger.Log(ctx, obs.LevelError, fmt.Sprintf(format, args...))
 }
 
-func logWarnf(ctx context.Context, logger obs.Logger, format string, args ...any) {
-	if logger == nil {
-		return
-	}
-
-	logger.Log(ctx, obs.LevelWarn, fmt.Sprintf(format, args...))
-}
-
 func logInfof(ctx context.Context, logger obs.Logger, format string, args ...any) {
 	if logger == nil {
 		return
@@ -545,9 +537,11 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // instances (an organization, a ledger) whose identifiers the authorization
 // service must see to honour a partner-scoped credential. A route that passes
 // none takes its scope from its product's manifest scope, when one is wired
-// (see SetManifestScope), on its first request. A handler mounted with Use on
-// a prefix sees the prefix as its route: pass ForRoute to state the route the
-// request is for. The scope is read only for a
+// (see SetManifestScope), on its first request. A handler mounted with Use —
+// on the app, a group or a mounted sub-app — sees the mount prefix as its
+// route; the request is then resolved to the route that serves it, among the
+// routes the app registers and those the manifest declares, and its scope read
+// there. The scope is read only for a
 // partner-bound credential: any other credential is decided exactly as on a
 // route with no scope, down to the bytes on the wire. A partner-bound
 // credential on a request that names no scope dimension is asked without
@@ -775,8 +769,8 @@ func (auth *AuthClient) scopeQuestions(ctx context.Context, c fiber.Ctx, scope S
 		return nil, nil
 	}
 
-	if scope.unmatched != "" {
-		logErrorf(ctx, auth.Logger, "Scope cannot be read on the stated route: %s; denying (fail closed)", scope.unmatched)
+	if scope.unresolved != "" {
+		logErrorf(ctx, auth.Logger, "Scope cannot be read for a request seen through a mount prefix: %s; denying (fail closed)", scope.unresolved)
 
 		return nil, auth.authorizeRefusal(c, http.StatusForbidden, "Forbidden")
 	}

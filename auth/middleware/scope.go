@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"unicode"
 
 	"github.com/gofiber/fiber/v3"
@@ -231,15 +230,12 @@ type ScopeDeclaration struct {
 	// body is the compiled plan of the dimensions read from the request body, or
 	// nil when the route reads none.
 	body *bodyPlan
-	// route is the route ForRoute states, or nil when the route is the one
-	// Fiber matched.
-	route *routeTemplate
-	// params are the path parameters read for the request in flight on a stated
-	// route; nil reads them from Fiber.
+	// params are the path parameters of the request in flight, read on the
+	// route it was resolved to; nil reads them from Fiber.
 	params map[string]string
-	// unmatched is non-empty when the stated route does not describe the
-	// request in flight.
-	unmatched string
+	// unresolved is non-empty when the request was seen through a mount prefix
+	// and no single route could be found to read its scope on.
+	unresolved string
 }
 
 // pathParam reads a path parameter of the request in flight.
@@ -464,10 +460,6 @@ func resolveDeclaration(product string, scopes []ScopeDeclaration) (ScopeDeclara
 			", which is not the route's product " + product
 	}
 
-	if scope.route != nil && scope.route.problem != "" {
-		return ScopeDeclaration{}, scope.route.problem
-	}
-
 	plan, problem := compileDims(scope.dims)
 	if problem != "" {
 		return ScopeDeclaration{}, problem
@@ -596,12 +588,10 @@ type routeScope struct {
 	// explicit is the route's own declaration, already validated on its own;
 	// nil when the route relies on its product's catalog.
 	explicit *ScopeDeclaration
-	// stated is the route ForRoute declares, which takes its scope from the
-	// product's catalog in place of the route Fiber matched; nil otherwise.
-	stated  *routeTemplate
-	byRoute sync.Map // method and route path -> cachedRouteScope
-	// warnedPrefix records that the prefix-mount warning was logged.
-	warnedPrefix atomic.Bool
+	byRoute  sync.Map // method and route path -> cachedRouteScope
+	// tables holds the routes a request seen through a mount prefix is
+	// resolved against (see scopeFor).
+	tables routeTableCache
 }
 
 // cachedRouteScope is a route's scope together with the manifest generation it
@@ -666,53 +656,10 @@ func (auth *AuthClient) registerRouteScope(product string, scopes []ScopeDeclara
 		return nil, declErr
 	}
 
-	route := &routeScope{auth: auth, product: product, stated: scope.route}
-	if len(scopes) > 0 && scope.route == nil {
+	route := &routeScope{auth: auth, product: product}
+	if len(scopes) > 0 {
 		route.explicit = &scope
 	}
 
 	return route, ""
-}
-
-// scopeFor returns the scope of the request in flight, and a non-empty
-// description of what is wrong when the route cannot be honoured. The route is
-// the one ForRoute states, when the declaration states one, and the one Fiber
-// matched otherwise.
-func (r *routeScope) scopeFor(c fiber.Ctx) (ScopeDeclaration, string) {
-	if r.stated == nil {
-		r.warnPrefixMount(c)
-
-		return r.forRoute(c.Route().Method, c.Route().Path)
-	}
-
-	scope, problem := r.forRoute(r.stated.method, r.stated.path)
-	if problem != "" {
-		return scope, problem
-	}
-
-	return r.stated.bindRequest(c, scope), ""
-}
-
-// warnPrefixMount logs, once per handler, that a handler mounted with Use on
-// a prefix authorizes a product with a scope catalog without stating its route:
-// Fiber reports the prefix as the route, with no parameters, so the dimensions
-// of the routes it guards are never read and a partner-bound request is asked
-// with none of them. The request is still decided; the warning is what makes
-// the gap visible.
-func (r *routeScope) warnPrefixMount(c fiber.Ctx) {
-	if r.warnedPrefix.Load() || !servedByPrefix(c.Route().Path, c.Path()) {
-		return
-	}
-
-	if _, catalog, _, _ := r.auth.manifestRouteScope(r.product, ""); len(catalog) == 0 {
-		return
-	}
-
-	if r.warnedPrefix.Swap(true) {
-		return
-	}
-
-	logWarnf(context.Background(), r.auth.Logger,
-		"Authorize for product %q is mounted on the prefix %q: Fiber reports the prefix as the route, so the scope dimensions of the routes it guards are never read. State the route with ForRoute.",
-		r.product, c.Route().Path)
 }

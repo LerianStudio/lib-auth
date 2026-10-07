@@ -671,41 +671,36 @@ Any other client takes it with `declaration.WireScope(auth, embeddedManifest)`.
   moving a dimension from the path to a header is a change the access manager
   receives.
 
-#### Authorizing in prefix middleware (`ForRoute`)
+#### Authorizing in middleware (`Use`, groups, mounted apps)
 
-A handler mounted with `Use` on a prefix does not see the route the request is
-for: Fiber reports the **prefix** as its route and reads **no path parameter**
-there. The route's manifest scope is looked up by the route, so a partner-bound
-request authorized on a prefix would be asked with none of the route's
-dimensions, and the route's `scope.routes` entry would never apply. State the
-route instead, in place of `RequireScope`:
+A handler mounted with `Use` — on the app, on a group, or inside a mounted
+sub-app — does not see the route a request is for: Fiber reports the **mount
+prefix** as its route and reads no path parameter past it. `Authorize` then
+resolves the request **itself**, with no product code:
 
 ```go
-app.Use("/v1/organizations", auth.Authorize("midaz", "ledgers", "get",
-    authMiddleware.ForRoute("midaz", http.MethodGet, "/v1/organizations/{organization_id}/ledgers/{ledger_id}")))
+app.Use("/v1/organizations", auth.Authorize("midaz", "ledgers", "get"))
+app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id", handler)
+// a partner request to /v1/organizations/org-1/ledgers/led-1 sends
+// {"organizationId":"org-1","ledgerId":"led-1"}, as on the route itself
 ```
 
-* The stated route takes its scope from the manifest exactly as if Fiber had
-  matched it: the `from: path` dimensions its template carries, the `query` and
-  `header` ones, and its `scope.routes` entry. The manifest stays the only place
-  the scope is declared.
-* The template is the route as registered, each parameter a **whole** segment in
-  Huma (`{organization_id}`) or Fiber (`:organization_id`) syntax. Path
-  parameters are read by matching the template against the request path, as
-  Fiber's default router does: literals without regard to letter case, a
-  trailing slash ignored, each parameter one non-empty segment, a `HEAD` request
-  served by a `GET` route.
-* A partner-bound request the stated route does not describe — another method,
-  or a path the template does not match — is refused **403 before the
-  round-trip**: its scope cannot be read. Every other credential is decided
-  exactly as on a route with no scope, down to the bytes on the wire.
-* A template that cannot be read (no method, a relative path, a parameter that is
-  not a whole segment, an optional parameter, a wildcard, a parameter named
-  twice) or a `product` other than the route's is a misdeclaration: every
-  request is refused and the route is logged at ERROR.
-* A handler mounted on a prefix that authorizes a product with a scope catalog
-  **without** `ForRoute` is logged once at WARN. Its requests are decided as
-  before; the warning is what makes the missing scope visible.
+* The request's method and path are matched against every route the app
+  registers (`Use` mounts aside) and every `scope.routes` entry of the manifest.
+  The route that matches takes its scope from the manifest exactly as if the
+  handler were on it, and its path parameters are read from the match.
+* The **most specific** route wins, compared segment by segment from the left:
+  a literal over a parameter, a parameter over an optional one, an optional one
+  over a wildcard. Two routes equally specific under different paths
+  (`/x/:organization_id` and `/x/:org`) leave the request **unresolved**.
+* Two `scope.routes` entries of one method that are the same route under other
+  parameter names are a manifest defect, refused when the manifest is wired.
+* A partner-bound request that resolves to no single route — none matches, or
+  two tie — is refused **403 before the round-trip**: its scope cannot be read.
+  Every other credential is decided exactly as before, down to the bytes on the
+  wire.
+* Nothing changes for a handler on its own route (`app.Get(path, auth.Authorize(...), h)`),
+  nor for a product with no scope catalog and no `RequireScope`.
 
 #### Confining related collections (`covers`)
 
