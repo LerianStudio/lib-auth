@@ -1,3 +1,11 @@
+## [5.6.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v5.6.0-beta.3...v5.6.0-beta.4) (2026-10-08)
+
+
+### Features
+
+* **declaration:** accept the service's AuthClient in WireFromEnv ([12d7071](https://github.com/LerianStudio/lib-auth/commit/12d7071c29793be8634996749b53327bc4ebc0b6)), closes [#5160](https://github.com/LerianStudio/lib-auth/issues/5160)
+* **declaration:** let a manifest name the roles its M2M callers assume ([13c9a0e](https://github.com/LerianStudio/lib-auth/commit/13c9a0eae129dc76341bffd2757137b11ab73cb8))
+
 ## [5.6.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.6.0-beta.2...v5.6.0-beta.3) (2026-10-07)
 
 
