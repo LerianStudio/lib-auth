@@ -1021,6 +1021,36 @@ pub, err := declaration.New(declaration.Config{
 a `scope` section nor `partners: true` publishes nothing in that mode. A scope that cannot be published
 (missing configuration, access manager down) is logged and never fails the boot.
 
+### Reusing the service's `AuthClient` in `WireFromEnv`
+
+`WireFromEnv` builds its own `*middleware.AuthClient` from `PLUGIN_AUTH_HOST`
+and `PLUGIN_AUTH_ENABLED` unless it is handed one. A service that already has
+the client its routes authorize with passes it in `WireInput.AuthClient`:
+
+```go
+auth := middleware.NewAuthClient(cfg.AuthHost, cfg.AuthEnabled, logger)
+
+stop, err := declaration.WireFromEnv(ctx, declaration.WireInput{
+    Slug:       "plugin-fees",
+    Manifest:   embeddedManifest,
+    Logger:     logger,
+    AuthClient: auth,
+})
+if err != nil {
+    return err // configuration error: fail the boot
+}
+defer stop()
+```
+
+With the client injected, `WireFromEnv` mints the publisher's token with it,
+wires the manifest's scope into it, and reads neither the auth host nor
+`PLUGIN_AUTH_ENABLED`, so the process keeps one client and the service keeps
+its own variable names for it. The `IDP_*` variables are read and validated as
+before. When the declaration is on, a client with an empty `Address` or with
+`Enabled` false fails the boot with an error naming the field; when it is off,
+the client's `Enabled` decides whether the scope alone is published. Leaving
+`AuthClient` nil keeps the behavior described above.
+
 ### Opting in to partners (`partners`)
 
 A product accepts partner-bound credentials only when its manifest says so:
