@@ -32,6 +32,7 @@ func (m *DeclarationManifest) Validate() error {
 	declaredRoles, roleViolations := m.validateRoles()
 	violations = append(violations, roleViolations...)
 	violations = append(violations, m.validatePermissions(declaredRoles)...)
+	violations = append(violations, m.validateM2MRoles(declaredRoles)...)
 	violations = append(violations, m.validateScope()...)
 	violations = append(violations, m.validateLevels()...)
 
@@ -135,6 +136,41 @@ func (m *DeclarationManifest) validatePermissions(declaredRoles map[string]struc
 				violations = append(violations, fmt.Sprintf("permissions[%d]: permission names %q and %q derive the same Casdoor-safe name %q", i, first, composed, kebab))
 			} else {
 				seenKebab[kebab] = composed
+			}
+		}
+	}
+
+	return violations
+}
+
+// validateM2MRoles validates m2m.roles: every entry names a declared role, none
+// repeats another, and the section is exposed — the roles are the ones an M2M
+// caller of this service assumes, so a service nobody may call has none to name.
+// An absent m2m section or an empty m2m.roles is valid.
+func (m *DeclarationManifest) validateM2MRoles(declaredRoles map[string]struct{}) []string {
+	if m.M2M == nil || len(m.M2M.Roles) == 0 {
+		return nil
+	}
+
+	var violations []string
+
+	if !m.M2M.Exposed {
+		violations = append(violations, "m2m.roles requires m2m.exposed: true (they are the roles an M2M caller of this service assumes)")
+	}
+
+	seen := make(map[string]struct{}, len(m.M2M.Roles))
+
+	for i, name := range m.M2M.Roles {
+		switch _, dup := seen[name]; {
+		case strings.TrimSpace(name) == "":
+			violations = append(violations, fmt.Sprintf("m2m.roles[%d]: role name must not be empty", i))
+		case dup:
+			violations = append(violations, fmt.Sprintf("m2m.roles[%d]: duplicate role %q", i, name))
+		default:
+			seen[name] = struct{}{}
+
+			if _, ok := declaredRoles[name]; !ok {
+				violations = append(violations, fmt.Sprintf("m2m.roles[%d]: references undeclared role %q", i, name))
 			}
 		}
 	}

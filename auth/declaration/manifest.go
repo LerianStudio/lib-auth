@@ -214,6 +214,23 @@ type DeclarationGrant struct {
 type DeclarationM2M struct {
 	Exposed bool     `json:"exposed,omitempty" yaml:"exposed,omitempty"`
 	Needs   []string `json:"needs,omitempty" yaml:"needs,omitempty"`
+	// Roles names the declared roles an M2M caller of this service assumes: the
+	// roles the access manager writes into the service's governing permission
+	// ("{service}-m2m-permission"). Each entry is the bare name of a role in
+	// Roles, and the field requires Exposed.
+	//
+	// It is what lets a manifest say two things the rest of the schema cannot:
+	// which tier the machine identity holds, instead of the access manager
+	// guessing one, and a permission held by that identity ALONE — grant the
+	// permission to a role that binds no group and name the role here. Such a
+	// role has no human holder: the reconciler converges every declared role's
+	// groups to its granted_to, so a group bound to it by hand is cleared on the
+	// next apply.
+	//
+	// Optional. Left out, the access manager keeps its previous behaviour. It is
+	// the LAST member and omitted when empty, so a manifest that declares none
+	// publishes the same bytes and hash as before the field existed.
+	Roles []string `json:"roles,omitempty" yaml:"roles,omitempty"`
 }
 
 // canonicalManifest is the deterministic, hashable projection of a manifest. It
