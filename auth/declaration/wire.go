@@ -108,6 +108,10 @@ func lookupWithDeprecatedAlias(canonical, deprecated string, logger obs.Logger) 
 	return ""
 }
 
+// newAuthClient builds the token minter WireFromEnv owns when the service
+// injects none. A variable so tests can prove an injected client is the only one.
+var newAuthClient = middleware.NewAuthClient
+
 // WireInput carries the ONLY per-plugin values; everything else comes from the
 // fixed env contract above.
 type WireInput struct {
@@ -119,6 +123,30 @@ type WireInput struct {
 	Manifest []byte
 	// Logger receives structured logs. Optional; nil => a no-op logger.
 	Logger obs.Logger
+	// AuthClient is the client the service already authorizes its routes with.
+	// Optional. When set, WireFromEnv mints the publisher's token with it and
+	// wires the manifest's scope into it, and reads neither PLUGIN_AUTH_HOST (nor
+	// its alias PLUGIN_AUTH_ADDRESS) nor PLUGIN_AUTH_ENABLED: the client's own
+	// Address and Enabled stand in for them, so the service keeps a single
+	// AuthClient and its own env names for it. With the declaration on, a client
+	// that is disabled or has no Address fails the boot by name, as the env pair
+	// does. When nil, WireFromEnv builds its own client from the env, as before.
+	AuthClient *middleware.AuthClient
+}
+
+// injectedAuthError reports why an injected client cannot mint the publisher's
+// token, or nil when it can.
+func injectedAuthError(c *middleware.AuthClient) error {
+	switch {
+	case strings.TrimSpace(c.Address) == "":
+		return fmt.Errorf("WireInput.AuthClient.Address is required when %s=true: the identity declaration endpoint is M2M-guarded and no token can be minted without it",
+			envDeclarationEnabled)
+	case !c.Enabled:
+		return fmt.Errorf("WireInput.AuthClient.Enabled must be true when %s=true: the identity declaration endpoint is M2M-guarded and the minter yields an empty token while auth is off",
+			envDeclarationEnabled)
+	}
+
+	return nil
 }
 
 // wireScopeOnly publishes the manifest's scope section and partner opt-in alone,
@@ -133,7 +161,12 @@ type WireInput struct {
 func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 	noop := func() {}
 
-	if os.Getenv(envAuthEnabled) != "true" {
+	authOn := os.Getenv(envAuthEnabled) == "true"
+	if in.AuthClient != nil {
+		authOn = in.AuthClient.Enabled
+	}
+
+	if !authOn {
 		return noop, nil
 	}
 
@@ -159,7 +192,15 @@ func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 	identityHost := lookupWithDeprecatedAlias(envIdentityHost, envIdentityHostDeprecated, in.Logger)
 	clientID := lookupWithDeprecatedAlias(envM2MClientID, envM2MClientIDDeprecated, in.Logger)
 	clientSecret := lookupWithDeprecatedAlias(envM2MClientSecret, envM2MClientSecretDeprecated, in.Logger)
-	authHost := lookupWithDeprecatedAlias(envAuthHost, envAuthHostDeprecated, in.Logger)
+	// An injected client's Address stands in for the env auth host, which is
+	// then not read.
+	var authHost, authHostName, authSwitch string
+	if in.AuthClient != nil {
+		authHost, authHostName, authSwitch = strings.TrimSpace(in.AuthClient.Address), "WireInput.AuthClient.Address", "WireInput.AuthClient.Enabled"
+	} else {
+		authHost = lookupWithDeprecatedAlias(envAuthHost, envAuthHostDeprecated, in.Logger)
+		authHostName, authSwitch = envAuthHost+" (or its alias "+envAuthHostDeprecated+")", envAuthEnabled
+	}
 
 	missing := ""
 
@@ -171,21 +212,26 @@ func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 	case clientSecret == "":
 		missing = envM2MClientSecret
 	case authHost == "":
-		missing = envAuthHost + " (or its alias " + envAuthHostDeprecated + ")"
+		missing = authHostName
 	}
 
 	if missing != "" {
 		logError("scope catalog for slug=%s not published: %s is required when %s=true; partner scopes for this product cannot be validated until it is",
-			in.Slug, missing, envAuthEnabled)
+			in.Slug, missing, authSwitch)
 
 		return noop, nil
+	}
+
+	auth := in.AuthClient
+	if auth == nil {
+		auth = newAuthClient(authHost, true, in.Logger)
 	}
 
 	pub, err := New(Config{
 		Slug:         in.Slug,
 		Manifest:     in.Manifest,
 		IdentityAddr: identityHost,
-		Auth:         middleware.NewAuthClient(authHost, true, in.Logger),
+		Auth:         auth,
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		Logger:       in.Logger,
@@ -205,6 +251,28 @@ func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 	}
 
 	return stop, nil
+}
+
+// authClientFromEnv builds the token minter from the env auth pair, the one
+// WireFromEnv owns when the service injects none. Both are required: the
+// identity declaration endpoint is M2M-guarded, and a blank host or auth off
+// yields an empty token. The order of the checks, after the identity config,
+// keeps the error a deployment sees the same as before the client was injectable.
+func authClientFromEnv(logger obs.Logger) (*middleware.AuthClient, error) {
+	authHost := lookupWithDeprecatedAlias(envAuthHost, envAuthHostDeprecated, logger)
+
+	switch {
+	case authHost == "":
+		return nil, fmt.Errorf("%s (or its alias %s) is required when %s=true: the identity declaration endpoint is M2M-guarded and no token can be minted without it",
+			envAuthHost, envAuthHostDeprecated, envDeclarationEnabled)
+	case os.Getenv(envAuthEnabled) != "true":
+		return nil, fmt.Errorf("%s must be true when %s=true: the identity declaration endpoint is M2M-guarded and the minter yields an empty token while auth is off",
+			envAuthEnabled, envDeclarationEnabled)
+	}
+
+	// NewAuthClient resolves a nil logger to its own default, so the caller's
+	// logger goes straight through.
+	return newAuthClient(authHost, true, logger), nil
 }
 
 // WireFromEnv builds and starts the D7 declaration publisher from the FIXED,
@@ -230,6 +298,12 @@ func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 //     can never succeed, and since the publish fail-opens, omitting them used to
 //     produce a green pod that silently never declared. Deeper URL validation is
 //     delegated to New.
+//   - WireInput.AuthClient set => the service's own client mints the token and
+//     receives the manifest's scope; PLUGIN_AUTH_HOST, PLUGIN_AUTH_ADDRESS and
+//     PLUGIN_AUTH_ENABLED are not read, and no second client is built. Its
+//     Address and Enabled take their place in the checks above (a blank Address
+//     or Enabled=false is a named boot error when the declaration is on), and its
+//     Enabled decides whether the scope alone is published when it is off.
 //
 // Fail-open by design: on the happy path Start never blocks on identity
 // reachability (a failing initial publish is logged in the background, not
@@ -253,11 +327,7 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 	identityHost := lookupWithDeprecatedAlias(envIdentityHost, envIdentityHostDeprecated, in.Logger)
 	clientID := lookupWithDeprecatedAlias(envM2MClientID, envM2MClientIDDeprecated, in.Logger)
 	clientSecret := lookupWithDeprecatedAlias(envM2MClientSecret, envM2MClientSecretDeprecated, in.Logger)
-	authHost := lookupWithDeprecatedAlias(envAuthHost, envAuthHostDeprecated, in.Logger)
-	authEnabled := os.Getenv(envAuthEnabled) == "true"
 
-	// Validate the required fields (absorbs the old validateDeclarationConfig).
-	// The secret's VALUE is never included in any error.
 	switch {
 	case identityHost == "":
 		return noop, fmt.Errorf("%s is required when %s=true", envIdentityHost, envDeclarationEnabled)
@@ -265,19 +335,21 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 		return noop, fmt.Errorf("%s is required when %s=true", envM2MClientID, envDeclarationEnabled)
 	case clientSecret == "":
 		return noop, fmt.Errorf("%s is required when %s=true", envM2MClientSecret, envDeclarationEnabled)
-	case authHost == "":
-		return noop, fmt.Errorf("%s (or its alias %s) is required when %s=true: the identity declaration endpoint is M2M-guarded and no token can be minted without it",
-			envAuthHost, envAuthHostDeprecated, envDeclarationEnabled)
-	case !authEnabled:
-		return noop, fmt.Errorf("%s must be true when %s=true: the identity declaration endpoint is M2M-guarded and the minter yields an empty token while auth is off",
-			envAuthEnabled, envDeclarationEnabled)
 	}
 
-	// Build the token minter. NewAuthClient takes an obs.Logger and resolves a
-	// nil one to its own default, so the caller's logger goes straight through.
-	// Host and enablement were validated above, so this cannot be handed the
-	// empty-host/disabled combination that silently yields an empty token.
-	auth := middleware.NewAuthClient(authHost, authEnabled, in.Logger)
+	// An injected client is the service's own: its Address and Enabled replace
+	// the env auth pair, which is then not read at all.
+	auth := in.AuthClient
+	if auth != nil {
+		if err := injectedAuthError(auth); err != nil {
+			return noop, err
+		}
+	} else {
+		var err error
+		if auth, err = authClientFromEnv(in.Logger); err != nil {
+			return noop, err
+		}
+	}
 
 	// Assemble the Config. Cache/Interval/FailFast are hardcoded to the
 	// pilot-safe values (no extra env knobs now): no dedup cache, startup-only,
