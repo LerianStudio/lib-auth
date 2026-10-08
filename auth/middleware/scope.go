@@ -100,10 +100,10 @@ func (d Dimension) Source() Source { return d.source }
 // spaces around an element trimmed, so "?id=a&id=b", "?id=a,b" and two header
 // lines "a" and "b" all name a and b. An element that is empty after trimming
 // names nothing and is malformed. Body dimensions are read by the body plan.
-func (d Dimension) read(c fiber.Ctx) (values []string, present bool, problem string) {
+func (d Dimension) read(c fiber.Ctx, scope ScopeDeclaration) (values []string, present bool, problem string) {
 	switch d.source {
 	case FromPath:
-		value := c.Params(d.key)
+		value := scope.pathParam(c, d.key)
 
 		return []string{value}, value != "", ""
 	case FromHeader:
@@ -230,6 +230,22 @@ type ScopeDeclaration struct {
 	// body is the compiled plan of the dimensions read from the request body, or
 	// nil when the route reads none.
 	body *bodyPlan
+	// params are the path parameters of the request in flight, read on the
+	// route it was resolved to; nil reads them from Fiber.
+	params map[string]string
+	// mounted is set when the request was seen through a mount prefix: its
+	// scope is read on the route that serves it, resolved only when a scope is
+	// read at all (see readOnServingRoute).
+	mounted *routeScope
+}
+
+// pathParam reads a path parameter of the request in flight.
+func (s ScopeDeclaration) pathParam(c fiber.Ctx, key string) string {
+	if s.params != nil {
+		return s.params[key]
+	}
+
+	return c.Params(key)
 }
 
 // RequireScope declares the dimensions a route's requests carry, for the product
@@ -344,13 +360,13 @@ func divergence(name, first, second string) *errBodyScope {
 // does not carry is left out. A malformed carrier outranks an absent dimension,
 // whatever order the two are declared in: every dimension is read before the
 // absence is reported, and a request that is malformed is answered as such.
-func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
+func resolveAttributes(c fiber.Ctx, scope ScopeDeclaration) (requestValues, string) {
 	var (
 		rv      requestValues
 		missing string
 	)
 
-	for _, dim := range dims {
+	for _, dim := range scope.dims {
 		// A body dimension is not one value of the request but one per question
 		// the body makes; the body plan reads those. A form field is read with
 		// the body, only for the callers whose body is read.
@@ -358,7 +374,7 @@ func resolveAttributes(c fiber.Ctx, dims []Dimension) (requestValues, string) {
 			continue
 		}
 
-		values, present, problem := dim.read(c)
+		values, present, problem := dim.read(c, scope)
 
 		switch {
 		case problem != "":
@@ -574,6 +590,9 @@ type routeScope struct {
 	// nil when the route relies on its product's catalog.
 	explicit *ScopeDeclaration
 	byRoute  sync.Map // method and route path -> cachedRouteScope
+	// tables holds the routes a request seen through a mount prefix is
+	// resolved against (see scopeFor).
+	tables routeTableCache
 }
 
 // cachedRouteScope is a route's scope together with the manifest generation it
