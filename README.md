@@ -1039,7 +1039,11 @@ stop, err := declaration.WireFromEnv(ctx, declaration.WireInput{
 if err != nil {
     return err // configuration error: fail the boot
 }
-defer stop()
+// stop cancels the publisher, including a declaration PUT still in flight:
+// hand it to whoever owns the shutdown and call it only after the server
+// stops serving, never with a defer in a bootstrap function that returns
+// (here, the post-shutdown hook of the service's Fiber app).
+app.Hooks().OnPostShutdown(func(error) error { stop(); return nil })
 ```
 
 With the client injected, `WireFromEnv` mints the publisher's token with it,
