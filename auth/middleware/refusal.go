@@ -82,6 +82,10 @@ func (auth *AuthClient) refusalFor(c fiber.Ctx, resolution authzResolution) erro
 			return auth.authorizeCommonsRefusal(c, status, response)
 		}
 
+		if response, ok := actorDenial(resolution.reason); ok {
+			return auth.authorizeCommonsRefusal(c, status, response)
+		}
+
 		return auth.authorizeRefusal(c, status, http.StatusText(status))
 	}
 
