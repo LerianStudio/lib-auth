@@ -1,3 +1,10 @@
+## [5.7.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.7.0-beta.1...v5.7.0-beta.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **middleware:** ask the relayed actor's question in the product and the requested scope ([64c63b7](https://github.com/LerianStudio/lib-auth/commit/64c63b7ee2754ba4aae33429e218d579c61ba797))
+
 ## [5.7.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.6.0...v5.7.0-beta.1) (2026-10-09)
 
 
