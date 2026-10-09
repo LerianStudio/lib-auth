@@ -57,6 +57,11 @@ func TestValidate_Integrations(t *testing.T) {
 			want:         `integrations[1]: duplicate service "MIDAZ"`,
 		},
 		{
+			name:         "wildcard",
+			integrations: []string{"midaz", "plugin-*"},
+			want:         `integrations[1]: must name one service, not a wildcard "plugin-*"`,
+		},
+		{
 			name:         "own_service",
 			integrations: []string{"Plugin-Fees"},
 			want:         `integrations[0]: must not repeat the manifest's own service "plugin-fees"`,

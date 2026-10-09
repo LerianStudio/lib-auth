@@ -36,6 +36,7 @@ func (m *DeclarationManifest) Validate() error {
 	violations = append(violations, m.validateScope()...)
 	violations = append(violations, m.validateLevels()...)
 	violations = append(violations, validateNameList("integrations", m.Integrations, m.Service, "the manifest's own service", "service")...)
+	violations = append(violations, validateNoWildcards("integrations", m.Integrations, "service")...)
 
 	if len(violations) == 0 {
 		return nil
@@ -400,6 +401,21 @@ func validateNameList(field string, names []string, own, ownWhat, kind string) [
 			} else {
 				seen[key] = struct{}{}
 			}
+		}
+	}
+
+	return violations
+}
+
+// validateNoWildcards refuses a "*" anywhere in an entry: each entry names exactly
+// one service, and the access manager's catalog store refuses wildcards, so a
+// manifest accepted here must not be refused there.
+func validateNoWildcards(field string, names []string, kind string) []string {
+	var violations []string
+
+	for j, name := range names {
+		if trimmed := strings.TrimSpace(name); strings.Contains(trimmed, "*") {
+			violations = append(violations, fmt.Sprintf("%s[%d]: must name one %s, not a wildcard %q", field, j, kind, trimmed))
 		}
 	}
 
