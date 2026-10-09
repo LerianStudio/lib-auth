@@ -3,7 +3,7 @@ module github.com/LerianStudio/lib-auth/v5
 go 1.26.3
 
 require (
-	github.com/LerianStudio/lib-commons/v7 v7.15.0-beta.3
+	github.com/LerianStudio/lib-commons/v7 v7.15.0
 	github.com/MicahParks/jwkset v0.11.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/stretchr/testify v1.12.1
