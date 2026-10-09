@@ -1,3 +1,10 @@
+## [5.8.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.7.0...v5.8.0-beta.1) (2026-10-09)
+
+
+### Features
+
+* **middleware:** admit one calling service by its sourceService claim ([aa31854](https://github.com/LerianStudio/lib-auth/commit/aa318548cfdb635134eb2e16536a1c694c258aba))
+
 ## [5.7.0](https://github.com/LerianStudio/lib-auth/compare/v5.6.0...v5.7.0) (2026-10-09)
 
 
