@@ -11,6 +11,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func (is *identityServer) setStatus(status int) {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+
+	is.status = status
+}
+
+func waitPuts(t *testing.T, is *identityServer, n int) {
+	t.Helper()
+
+	for i := 1; i <= n; i++ {
+		select {
+		case <-is.puts:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("expected PUT #%d", i)
+		}
+	}
+}
+
 func waitState(t *testing.T, st *Status, want State) {
 	t.Helper()
 
@@ -23,6 +42,36 @@ func TestStatus_ZeroValueIsIdle(t *testing.T) {
 
 	assert.Equal(t, StateIdle, st.State())
 	assert.Equal(t, "idle", st.State().String())
+}
+
+// An access manager that comes up after the budget of a single Publish call is
+// spent still receives the declaration: the background publish keeps retrying.
+func TestStart_RetriesTransientPastTheBudgetUntilAccepted(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusServiceUnavailable, `{}`)
+	t.Cleanup(identity.Close)
+
+	var st Status
+
+	cfg := testConfig(t, auth.URL, identity.URL)
+	cfg.Status = &st
+	p := newFastPublisher(t, cfg)
+
+	stop, err := p.Start(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(stop)
+
+	assert.Equal(t, StatePending, st.State(), "pending from Start until the access manager answers")
+
+	waitPuts(t, identity, int(p.maxTries)+1)
+	assert.Equal(t, StatePending, st.State())
+
+	identity.setStatus(http.StatusOK)
+	waitState(t, &st, StatePublished)
+	assert.Equal(t, "published", st.State().String())
+	assert.Greater(t, identity.count(), int(p.maxTries))
 }
 
 // A refusal is permanent: one PUT, reported failed, logged at ERROR, never retried.
@@ -52,6 +101,46 @@ func TestStart_DeterministicRefusalStopsAndReportsFailed(t *testing.T) {
 	_, level, found := logs.find("status=403")
 	require.True(t, found, "the refusal must be logged; got:\n%s", logs.all())
 	assert.Equal(t, obs.LevelError, level)
+}
+
+// stop ends a retry that would otherwise run for as long as the outage lasts.
+func TestStart_StopEndsTheRetry(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusServiceUnavailable, `{}`)
+	t.Cleanup(identity.Close)
+
+	var st Status
+
+	logs := &captureLogger{}
+	cfg := testConfig(t, auth.URL, identity.URL)
+	cfg.Status = &st
+	cfg.Logger = logs
+	p := newFastPublisher(t, cfg)
+
+	stop, err := p.Start(context.Background())
+	require.NoError(t, err)
+
+	waitPuts(t, identity, 2)
+
+	stopped := make(chan struct{})
+
+	go func() {
+		stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop must end the retry")
+	}
+
+	assert.Equal(t, StatePending, st.State(), "never accepted, never refused")
+
+	_, _, found := logs.find("initial declaration publish failed")
+	assert.False(t, found, "a shutdown is not a failed publish")
 }
 
 func TestWireFromEnv_ReportsStatus(t *testing.T) {

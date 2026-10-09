@@ -50,9 +50,9 @@ import (
 )
 
 const (
-	// defaultMaxTries bounds the retry budget of a single Publish pass (one-shot
-	// mode). In periodic mode the next tick retries again, so the effective budget
-	// is unbounded across ticks — matching the spec (§6).
+	// defaultMaxTries bounds the retries of one Publish call and of each periodic
+	// tick. Start's initial background publish has no budget: it retries transient
+	// failures until the declaration is accepted or refused, or stop is called.
 	defaultMaxTries uint = 5
 
 	// defaultRetryInitialInterval / defaultRetryMaxInterval bound the exponential
@@ -423,7 +423,13 @@ func (p *Publisher) cacheKey() string {
 // Publish executes ONE pass of the flow (§4): cache check → mint token → PUT →
 // store hash. It is idempotent (the server no-ops a matching hash) and, on failure,
 // returns a typed *PublishError; the caller decides whether that is fatal.
-func (p *Publisher) Publish(ctx context.Context) (err error) {
+func (p *Publisher) Publish(ctx context.Context) error {
+	return p.publish(ctx, p.maxTries)
+}
+
+// publish is Publish with its own retry budget; tries == 0 retries transient
+// failures until the context ends.
+func (p *Publisher) publish(ctx context.Context, tries uint) (err error) {
 	defer func() { p.status.record(err) }()
 
 	if p.nothing {
@@ -451,7 +457,7 @@ func (p *Publisher) Publish(ctx context.Context) (err error) {
 		}
 	}
 
-	if err := p.mintAndPutWithRetry(ctx); err != nil {
+	if err := p.mintAndPutWithRetry(ctx, tries); err != nil {
 		tracing.HandleSpanError(span, "publish declaration failed", err)
 
 		return err
@@ -472,8 +478,8 @@ func (p *Publisher) Publish(ctx context.Context) (err error) {
 // transient mint error is a plain error (retried); an empty token (auth
 // disabled/misconfigured) is backoff.Permanent (deterministic, not retried); doPut's
 // own deterministic/transient classification is unchanged. Transient failures retry
-// until the budget is exhausted, then surface the last error.
-func (p *Publisher) mintAndPutWithRetry(ctx context.Context) error {
+// until the budget (tries; 0 = none) is exhausted or ctx ends, then surface the last error.
+func (p *Publisher) mintAndPutWithRetry(ctx context.Context, tries uint) error {
 	exp := backoff.NewExponentialBackOff()
 	exp.InitialInterval = p.retryInitialInterval
 	exp.MaxInterval = p.retryMaxInterval
@@ -500,7 +506,8 @@ func (p *Publisher) mintAndPutWithRetry(ctx context.Context) error {
 
 	_, err := backoff.Retry(ctx, op,
 		backoff.WithBackOff(exp),
-		backoff.WithMaxTries(p.maxTries),
+		backoff.WithMaxTries(tries),
+		backoff.WithMaxElapsedTime(0),
 	)
 
 	return err
@@ -597,9 +604,9 @@ func (p *Publisher) doPut(ctx context.Context, token string) error {
 // Interval > 0 — re-publishes on a ticker to heal drift. It returns a stop func for
 // graceful shutdown.
 //
-// Fail-open (default): a failing initial Publish does NOT make Start return a fatal
-// error; it is logged and (if periodic) retried on the next tick. With FailFast the
-// initial Publish runs synchronously and its error surfaces from Start.
+// Fail-open (default): the initial publish runs in the background, retrying transient
+// failures until the declaration is accepted or refused or stop is called. With FailFast
+// it runs synchronously, with the bounded budget, and its error surfaces from Start.
 func (p *Publisher) Start(ctx context.Context) (func(), error) {
 	p.status.set(StatePending)
 
@@ -636,7 +643,7 @@ func (p *Publisher) Start(ctx context.Context) (func(), error) {
 // if configured, re-publishes on the ticker until the context is cancelled.
 func (p *Publisher) runLoop(ctx context.Context) {
 	if !p.failFast {
-		if err := p.Publish(ctx); err != nil {
+		if err := p.publish(ctx, 0); err != nil && ctx.Err() == nil {
 			p.logWarnf(ctx, "initial declaration publish failed for slug=%s (fail-open, serving continues): %v", p.slug, err)
 		}
 	}

@@ -1055,6 +1055,35 @@ before. When the declaration is on, a client with an empty `Address` or with
 the client's `Enabled` decides whether the scope alone is published. Leaving
 `AuthClient` nil keeps the behavior described above.
 
+### Reporting the declaration in readiness
+
+The publish runs in the background and never blocks the boot. Transient failures
+(network, timeouts, 5xx, 409, a token that cannot be minted) are retried with
+backoff capped at 30 s until the access manager accepts the declaration, refuses
+it (401/403/422/501 or an empty token, logged and not retried), or `stop` is
+called. Pass a `Status` to see where it stands:
+
+```go
+var declared declaration.Status
+
+stop, err := declaration.WireFromEnv(ctx, declaration.WireInput{
+    Slug:     "plugin-fees",
+    Manifest: embeddedManifest,
+    Logger:   logger,
+    Status:   &declared,
+})
+
+// In the readiness check:
+switch declared.State() {
+case declaration.StatePending, declaration.StateFailed:
+    // degraded: callers get 403 until the access manager holds the declaration
+}
+```
+
+`StateIdle` means nothing is being published (the declaration is off);
+`StatePublished` means the access manager accepted it. `Config.Status` does the
+same for a publisher built with `New`.
+
 ### Opting in to partners (`partners`)
 
 A product accepts partner-bound credentials only when its manifest says so:
