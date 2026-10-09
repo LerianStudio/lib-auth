@@ -369,13 +369,15 @@ value as an identity must refuse an empty or marker value. Do not copy the marke
 whitespace-only or `undeclared` value (`middleware.UndeclaredSourceService`), and
 that is the refusal to apply.
 
-The field exists only where an application `Principal` is published, which requires
-`AUTH_M2M_INVERSION_ENABLED=true`. When authorization is disabled,
-`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=true` is required in addition to inversion:
-that flag alone does not publish an application `Principal`, because the no-round-trip
-path rejects application tokens while inversion is off. Under
-the legacy model an application token publishes no `Principal`, so a service that
-identifies its callers by `SourceService` must refuse to start with inversion off.
+`PrincipalFromContext` reports the field only under
+`AUTH_M2M_INVERSION_ENABLED=true`: under the legacy model an application's `Subject`
+is a fabricated role, so the accessor reports no `Principal` at all. A route that
+admits one calling service only should mount `RequireSourceService` (see
+[Type guards](#type-guards)), which decides on the claim under both models. When
+authorization is disabled, `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=true` is required
+in addition to inversion: that flag alone does not publish an application
+`Principal`, because the no-round-trip path rejects application tokens while
+inversion is off.
 A machine credential issued before the issuer stamped the claim carries none and
 reads as empty until it is rotated or recreated; the helper refuses it like any
 other undeclared value. The field is read from the HTTP `Authorize` path only: the
@@ -453,6 +455,24 @@ f.Post("/v1/operations/:id/resolution",
     auth.Authorize(applicationName, "operation", "resolve"),
     authMiddleware.RequireApplication(), // 403 for a human caller
     operationHandler.Resolve)
+```
+
+`RequireSourceService(service)` narrows a route to ONE calling service: it admits an
+application principal whose `sourceService` claim equals `service` exactly, answers
+403 to every other caller (a person, another service, an empty or `undeclared`
+claim) and 401 when no principal was published. Unlike `PrincipalFromContext` it
+decides under both authorization models, because the authorization round-trip
+vouched for the whole token even where the legacy `Subject` is a fabricated role; it
+never reads `Subject`. The claim is only as strong as its issuer: whoever may create
+applications for the tenant can create one whose source is `service`. Under
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` with no verification keys the claim is
+self-asserted, so the guard proves nothing there.
+
+```go
+f.Post("/v1/cross-core/pix/cash-ins",
+    auth.Authorize(applicationName, "cross-core", "post"),
+    authMiddleware.RequireSourceService("jd-courier"), // 403 for anyone but the Courier
+    crossCoreHandler.CashIn)
 ```
 
 ### Authorization outside the chain

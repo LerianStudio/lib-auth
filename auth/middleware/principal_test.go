@@ -433,6 +433,7 @@ func TestRequirePrincipalType_ReturnsFiberErrors(t *testing.T) {
 
 		assertEnvelope(t, do(t, RequireHuman(), nil), http.StatusUnauthorized, fiber.ErrUnauthorized.Message)
 		assertEnvelope(t, do(t, RequireApplication(), nil), http.StatusUnauthorized, fiber.ErrUnauthorized.Message)
+		assertEnvelope(t, do(t, RequireSourceService("jd-courier"), nil), http.StatusUnauthorized, fiber.ErrUnauthorized.Message)
 	})
 
 	t.Run("wrong_type_returns_fiber_err_forbidden", func(t *testing.T) {
@@ -444,6 +445,10 @@ func TestRequirePrincipalType_ReturnsFiberErrors(t *testing.T) {
 
 		assertEnvelope(t, do(t, RequireApplication(), &Principal{
 			Type: normalUser, Owner: "acme-org", Sub: "user123", Subject: "acme-org/user123",
+		}), http.StatusForbidden, fiber.ErrForbidden.Message)
+
+		assertEnvelope(t, do(t, RequireSourceService("jd-courier"), &Principal{
+			Type: application, Sub: "admin/robot", Subject: "admin/robot", SourceService: UndeclaredSourceService,
 		}), http.StatusForbidden, fiber.ErrForbidden.Message)
 	})
 }
@@ -486,6 +491,92 @@ func TestRequireHuman_BehindAuthorize(t *testing.T) {
 		"owner": "acme-org",
 		"sub":   "user123",
 	}).StatusCode)
+}
+
+// ---------------------------------------------------------------------------
+// RequireSourceService
+// ---------------------------------------------------------------------------
+
+func TestRequireSourceService(t *testing.T) {
+	t.Parallel()
+
+	courier := func(source string) *Principal {
+		return &Principal{Type: application, Sub: "admin/jd-courier-m2m-pix-org", Subject: "admin/jd-courier-m2m-pix-org", SourceService: source}
+	}
+
+	// The legacy model publishes a fabricated Subject that PrincipalFromContext
+	// refuses; the guard decides on the claims, so the role must not matter.
+	legacy := courier("jd-courier")
+	legacy.Subject = "admin/plugin-br-pix-jd-editor-role"
+
+	cases := []struct {
+		name    string
+		service string
+		seed    *Principal
+		want    int
+	}{
+		{name: "missing_principal_is_401", service: "jd-courier", seed: nil, want: http.StatusUnauthorized},
+		{name: "the_service_reaches_the_handler", service: "jd-courier", seed: courier("jd-courier"), want: http.StatusOK},
+		{name: "legacy_fabricated_subject_reaches_the_handler", service: "jd-courier", seed: legacy, want: http.StatusOK},
+		{name: "another_source_is_403", service: "jd-courier", seed: courier("plugin-br-pix-jd"), want: http.StatusForbidden},
+		{name: "undeclared_is_403", service: "jd-courier", seed: courier(UndeclaredSourceService), want: http.StatusForbidden},
+		{name: "absent_claim_is_403", service: "jd-courier", seed: courier(""), want: http.StatusForbidden},
+		{name: "match_is_exact", service: "jd-courier", seed: courier(" JD-Courier"), want: http.StatusForbidden},
+		{name: "empty_service_admits_nobody", service: "", seed: courier(""), want: http.StatusForbidden},
+		{name: "marker_service_admits_nobody", service: UndeclaredSourceService, seed: courier(UndeclaredSourceService), want: http.StatusForbidden},
+		{
+			name: "normal_user_is_403", service: "jd-courier", want: http.StatusForbidden,
+			seed: &Principal{Type: normalUser, Owner: "acme-org", Sub: "user123", Subject: "acme-org/user123", SourceService: "jd-courier"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			resp := guardResponse(t, RequireSourceService(tc.service), tc.seed)
+			assert.Equal(t, tc.want, resp.StatusCode)
+		})
+	}
+}
+
+// TestRequireSourceService_BehindAuthorize drives the real chain under both
+// authorization models: only an application the authorization service allowed
+// and whose sourceService names the service passes.
+func TestRequireSourceService_BehindAuthorize(t *testing.T) {
+	t.Parallel()
+
+	for _, inversion := range []bool{false, true} {
+		server := mockAuthServer(t, true, http.StatusOK)
+		t.Cleanup(server.Close)
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, M2MInversionEnabled: inversion, Logger: &testLogger{}}
+
+		app := fiber.New()
+		app.Post("/x", auth.Authorize("plugin-br-pix-jd", "cross-core", "post"), RequireSourceService("jd-courier"),
+			func(c fiber.Ctx) error { return c.SendString("reached handler") })
+
+		do := func(claims jwt.MapClaims) int {
+			req := httptest.NewRequest(http.MethodPost, "/x", nil)
+			req.Header.Set("Authorization", "Bearer "+createTestJWT(claims))
+
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+
+			return resp.StatusCode
+		}
+
+		appToken := func(source string) jwt.MapClaims {
+			return jwt.MapClaims{"type": application, "sub": "admin/robot", "azp": "cid", "sourceService": source}
+		}
+
+		assert.Equal(t, http.StatusOK, do(appToken("jd-courier")), "inversion=%v: the Courier passes", inversion)
+		assert.Equal(t, http.StatusForbidden, do(appToken(UndeclaredSourceService)), "inversion=%v: an undeclared app is refused", inversion)
+		assert.Equal(t, http.StatusForbidden, do(appToken("plugin-br-pix-jd")), "inversion=%v: another source is refused", inversion)
+		assert.Equal(t, http.StatusForbidden, do(jwt.MapClaims{
+			"type": normalUser, "owner": "acme-org", "sub": "user123", "sourceService": "jd-courier",
+		}), "inversion=%v: a person is refused", inversion)
+	}
 }
 
 // ---------------------------------------------------------------------------
