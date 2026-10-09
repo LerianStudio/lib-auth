@@ -1080,7 +1080,9 @@ case declaration.StatePending, declaration.StateFailed:
 }
 ```
 
-`StateIdle` means nothing is being published (the declaration is off);
+`StateIdle` means no publication started: auth is off, or the declaration is
+off and the manifest has neither a scope nor the partner opt-in (with auth on,
+the scope alone is published and reads pending, then published).
 `StatePublished` means the access manager accepted it. `Config.Status` does the
 same for a publisher built with `New`.
 

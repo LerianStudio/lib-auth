@@ -349,8 +349,11 @@ func TestStart_ScopeOnly_WithoutScope_NeverPuts(t *testing.T) {
 	identity := newIdentityServer(t, http.StatusOK, `{}`)
 	t.Cleanup(identity.Close)
 
+	var st Status
+
 	cfg := testConfig(t, auth.URL, identity.URL)
 	cfg.ScopeOnly = true
+	cfg.Status = &st
 
 	p := newFastPublisher(t, cfg)
 	require.NoError(t, p.Publish(context.Background()))
@@ -360,6 +363,7 @@ func TestStart_ScopeOnly_WithoutScope_NeverPuts(t *testing.T) {
 	stop()
 
 	assert.Equal(t, 0, identity.count())
+	assert.Equal(t, StateIdle, st.State(), "nothing was published")
 }
 
 // The scope-only and the full publication are different bodies: they must not

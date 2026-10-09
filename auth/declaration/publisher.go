@@ -430,13 +430,14 @@ func (p *Publisher) Publish(ctx context.Context) error {
 // publish is Publish with its own retry budget; tries == 0 retries transient
 // failures until the context ends.
 func (p *Publisher) publish(ctx context.Context, tries uint) (err error) {
-	defer func() { p.status.record(err) }()
-
 	if p.nothing {
+		p.status.set(StateIdle)
 		p.logInfof(ctx, "declaration manifest for slug=%s declares no scope and does not opt in to partners; nothing to publish", p.slug)
 
 		return nil
 	}
+
+	defer func() { p.status.record(err) }()
 
 	_, tracer, reqID, _ := observability.NewTrackingFromContext(ctx)
 
