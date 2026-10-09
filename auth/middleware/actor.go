@@ -13,9 +13,9 @@ import (
 // the receiving product's authorization asks the access manager to decide the
 // partner's rules for that product too, on top of the calling service's own.
 //
-// This file holds the three places lib-auth takes part: publishing a partner's
-// bearer as the actor of its request (inbound), forwarding a relayed actor to
-// the access manager (decision), and naming a denial the actor caused.
+// This file holds the three places lib-auth takes part: publishing the actor of
+// an authorized request (inbound), forwarding a relayed actor to the access
+// manager (decision), and naming a denial the actor caused.
 
 // actorReasonPrefix starts every denial reason the access manager publishes for
 // the actor rather than for the caller.
@@ -29,16 +29,24 @@ const (
 	reasonActorInvalid   = "actor_invalid"
 )
 
-// publishActor stores a partner credential's raw bearer on the request context
-// as the actor of the request, so the service's outbound clients relay it (see
-// actor.NewTransport). Only a partner-bound credential is an actor: a user or a
-// plain application token leaves nothing there.
-func publishActor(c fiber.Ctx, partner, accessToken string) {
-	if partner == "" {
+// publishActor stores the actor of an authorized request on its context, so
+// the service's outbound clients relay it (see actor.NewTransport). A
+// partner-bound credential is its own actor: its raw bearer. An application
+// caller relaying a partner passes on the actor it relayed, which the access
+// manager has just decided along with the caller, so the next hop can relay it
+// again. A user, or an application relaying no one, leaves nothing there.
+func publishActor(c fiber.Ctx, caller authzCaller, accessToken, relayed string) {
+	token := accessToken
+
+	switch {
+	case caller.partner != "":
+	case caller.forwardsActor() && relayed != "":
+		token = relayed
+	default:
 		return
 	}
 
-	c.SetContext(actor.ContextWithToken(c.Context(), accessToken))
+	c.SetContext(actor.ContextWithToken(c.Context(), token))
 }
 
 // relayedActor is the actor the request carries in actor.HeaderName, verbatim,

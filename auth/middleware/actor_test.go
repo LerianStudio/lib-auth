@@ -341,3 +341,114 @@ func TestAuthorize_DoesNotTraceTheActor(t *testing.T) {
 		}
 	}
 }
+
+// Relay: an application caller relaying a partner whose request the access
+// manager authorized leaves that relayed actor on the request context, so the
+// next hop's outbound clients relay it again. A partner caller is published as
+// itself, a user caller relays nothing, and a blank header is no actor.
+func TestAuthorize_RepublishesTheRelayedActorOfAnAuthorizedApplicationCaller(t *testing.T) {
+	t.Parallel()
+
+	partner := partnerToken("acme/p1")
+	application := createTestJWT(jwt.MapClaims{"type": "application", "sub": "acme/app"})
+
+	tests := []struct {
+		name        string
+		bearer      string
+		header      string
+		wantPresent bool
+		wantToken   string
+	}{
+		{name: "application_with_actor", bearer: application, header: actorHeaderValue, wantPresent: true, wantToken: actorHeaderValue},
+		{name: "application_without_actor", bearer: application},
+		{name: "application_with_blank_actor", bearer: application, header: "   "},
+		{name: "partner_is_its_own_actor", bearer: partner, header: actorHeaderValue, wantPresent: true, wantToken: partner},
+		{
+			name:   "normal_user_relays_nothing",
+			bearer: createTestJWT(jwt.MapClaims{"type": "normal-user", "owner": "acme", "sub": "u1"}),
+			header: actorHeaderValue,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := newRecordingAuthServer(t, AuthResponse{Authorized: true})
+			app, observer := newActorApp(actorAuthClient(rec.URL))
+
+			resp := actorRequest(t, app, tt.bearer, tt.header)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+
+			reached, token, present := observer.get()
+			require.True(t, reached)
+			assert.Equal(t, tt.wantPresent, present)
+			assert.Equal(t, tt.wantToken, token)
+		})
+	}
+}
+
+// A refused request publishes no actor: the context the error handler sees
+// carries none, whether the caller or the actor caused the refusal.
+func TestAuthorize_RefusedRequestPublishesNoActor(t *testing.T) {
+	t.Parallel()
+
+	for _, reason := range []string{"", "actor_permission"} {
+		t.Run("reason_"+reason, func(t *testing.T) {
+			t.Parallel()
+
+			rec := newRecordingAuthServer(t, AuthResponse{Authorized: false, Reason: reason})
+			auth := actorAuthClient(rec.URL)
+
+			var (
+				mu      sync.Mutex
+				handled bool
+				present bool
+			)
+
+			app := fiber.New(fiber.Config{
+				ErrorHandler: func(c fiber.Ctx, _ error) error {
+					_, ok := actor.TokenFromContext(c.Context())
+
+					mu.Lock()
+					handled, present = true, ok
+					mu.Unlock()
+
+					return c.SendStatus(http.StatusTeapot)
+				},
+			})
+			app.Get("/x", auth.Authorize("midaz", "accounts", "get"), func(c fiber.Ctx) error {
+				return c.SendString("reached handler")
+			})
+
+			resp := actorRequest(t, app, createTestJWT(jwt.MapClaims{"type": "application", "sub": "acme/app"}), actorHeaderValue)
+			require.Equal(t, http.StatusTeapot, resp.StatusCode)
+
+			calls := rec.received()
+			require.Len(t, calls, 1)
+			assert.Equal(t, actorHeaderValue, calls[0].body.ActorToken, "positive control: the actor was part of the refused question")
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			require.True(t, handled)
+			assert.False(t, present)
+		})
+	}
+}
+
+// With authorization disabled no decision is made, so a relayed header is
+// never vouched for and never republished.
+func TestAuthorize_DisabledAuthPublishesNoRelayedActor(t *testing.T) {
+	t.Parallel()
+
+	app, observer := newActorApp(&AuthClient{Enabled: false, Logger: &testLogger{}})
+
+	resp := actorRequest(t, app, createTestJWT(jwt.MapClaims{"type": "application", "sub": "acme/app"}), actorHeaderValue)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	reached, token, present := observer.get()
+	require.True(t, reached)
+	assert.False(t, present)
+	assert.Empty(t, token)
+}

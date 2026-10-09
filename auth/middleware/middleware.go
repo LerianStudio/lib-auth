@@ -646,6 +646,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		// Forwarding nothing is still deliberate: falling back to the socket peer
 		// would forward the ingress address and could produce a false ALLOW.
 		clientIP := auth.resolveClientIP(c)
+		relayed := relayedActor(c)
 
 		resolution, principal, questions, refusal := auth.authorizeRequest(ctx, c, authzParams{
 			product:     product,
@@ -653,7 +654,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			action:      action,
 			accessToken: accessToken,
 			clientIP:    clientIP,
-			actorToken:  relayedActor(c),
+			actorToken:  relayed,
 		}, scope)
 		if refusal != nil {
 			span.End()
@@ -663,7 +664,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 
 		publishPrincipal(c, span, principal)
 		recordPartnerScope(c, resolution.partner, questions)
-		publishActor(c, resolution.partner, accessToken)
+		publishActor(c, authzCaller{principal: principal, partner: resolution.partner}, accessToken, relayed)
 
 		span.End()
 
