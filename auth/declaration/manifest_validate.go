@@ -35,6 +35,7 @@ func (m *DeclarationManifest) Validate() error {
 	violations = append(violations, m.validateM2MRoles(declaredRoles)...)
 	violations = append(violations, m.validateScope()...)
 	violations = append(violations, m.validateLevels()...)
+	violations = append(violations, validateNameList("integrations", m.Integrations, m.Service, "the manifest's own service", "service")...)
 
 	if len(violations) == 0 {
 		return nil
@@ -370,24 +371,32 @@ func parentCycle(name string, parents map[string]string) []string {
 // authorization service compares them, so two spellings of one collection are
 // one collection.
 func validateCovers(prefix string, d DeclarationDimension) []string {
+	return validateNameList(prefix+".covers", d.Covers, d.Collection, "the dimension's own collection", "collection")
+}
+
+// validateNameList validates a list of names that must each name something,
+// none repeating another nor the owner's own name (ownWhat says what that is,
+// kind what one entry names). Names are compared trimmed and
+// case-insensitively, as the authorization service compares them.
+func validateNameList(field string, names []string, own, ownWhat, kind string) []string {
 	var violations []string
 
-	own := strings.TrimSpace(d.Collection)
-	seen := make(map[string]struct{}, len(d.Covers))
+	own = strings.TrimSpace(own)
+	seen := make(map[string]struct{}, len(names))
 
-	for j, c := range d.Covers {
-		entry := fmt.Sprintf("%s.covers[%d]", prefix, j)
-		trimmed := strings.TrimSpace(c)
+	for j, name := range names {
+		entry := fmt.Sprintf("%s[%d]", field, j)
+		trimmed := strings.TrimSpace(name)
 		key := strings.ToLower(trimmed)
 
 		switch {
 		case trimmed == "":
 			violations = append(violations, entry+": must not be empty")
 		case strings.EqualFold(trimmed, own):
-			violations = append(violations, fmt.Sprintf("%s: must not repeat the dimension's own collection %q", entry, own))
+			violations = append(violations, fmt.Sprintf("%s: must not repeat %s %q", entry, ownWhat, own))
 		default:
 			if _, dup := seen[key]; dup {
-				violations = append(violations, fmt.Sprintf("%s: duplicate collection %q", entry, trimmed))
+				violations = append(violations, fmt.Sprintf("%s: duplicate %s %q", entry, kind, trimmed))
 			} else {
 				seen[key] = struct{}{}
 			}

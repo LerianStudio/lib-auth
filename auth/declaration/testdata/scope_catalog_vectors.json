@@ -1455,5 +1455,50 @@
       "dimensions": [],
       "partners": true
     }
+  },
+  {
+    "name": "integrations are carried trimmed, as the last member",
+    "product": "plugin-br-pix-jd",
+    "manifest": "service: plugin-br-pix-jd\nversion: 1\npartners: true\nintegrations: [' midaz ', plugin-crm]\n",
+    "declares": true,
+    "readsStored": true,
+    "catalog": {
+      "product": "plugin-br-pix-jd",
+      "dimensions": [],
+      "partners": true,
+      "integrations": [
+        "midaz",
+        "plugin-crm"
+      ]
+    }
+  },
+  {
+    "name": "integrations alone are a catalog section",
+    "product": "plugin-br-pix-jd",
+    "manifest": "service: plugin-br-pix-jd\nversion: 1\nintegrations: [midaz]\n",
+    "stored": [
+      {
+        "resource": "entries",
+        "action": "create",
+        "level": "tenant"
+      }
+    ],
+    "declares": true,
+    "readsStored": true,
+    "catalog": {
+      "product": "plugin-br-pix-jd",
+      "dimensions": [],
+      "partners": false,
+      "levels": [
+        {
+          "resource": "entries",
+          "action": "create",
+          "level": "tenant"
+        }
+      ],
+      "integrations": [
+        "midaz"
+      ]
+    }
   }
 ]
