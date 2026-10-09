@@ -41,10 +41,11 @@ func publishActor(c fiber.Ctx, partner, accessToken string) {
 	c.SetContext(actor.ContextWithToken(c.Context(), accessToken))
 }
 
-// relayedActor is the actor the request carries in actor.HeaderName, or "" when
-// it carries none.
+// relayedActor is the actor the request carries in actor.HeaderName, verbatim,
+// or "" when it carries none (the HTTP layer already strips a value's
+// surrounding whitespace, so a blank header reads as none).
 func relayedActor(c fiber.Ctx) string {
-	return strings.TrimSpace(c.Get(actor.HeaderName))
+	return c.Get(actor.HeaderName)
 }
 
 // forwardsActor reports whether a relayed actor is part of the caller's
