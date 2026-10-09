@@ -40,7 +40,7 @@ func publishActor(c fiber.Ctx, caller authzCaller, accessToken, relayed string) 
 
 	switch {
 	case caller.partner != "":
-	case caller.forwardsActor() && relayed != "":
+	case caller.relays(relayed):
 		token = relayed
 	default:
 		return
@@ -62,6 +62,20 @@ func relayedActor(c fiber.Ctx) string {
 // them the header is ignored and the question is the one they always made.
 func (c authzCaller) forwardsActor() bool {
 	return c.principal.Type == application && c.partner == ""
+}
+
+// relays reports whether the request is asked for the relayed actor too.
+func (c authzCaller) relays(relayed string) bool {
+	return relayed != "" && c.forwardsActor()
+}
+
+// asksAsPartner reports whether the question carries what a partner's does —
+// the product and the instances the request names — because a partner is
+// decided on it: the caller itself, or the actor it relays. Without them the
+// access manager cannot tell which of the actor's rules apply, and a partner
+// asked about no product is not checked at all (opt-in).
+func (c authzCaller) asksAsPartner(relayed string) bool {
+	return c.partner != "" || c.relays(relayed)
 }
 
 // actorDenial is the refusal a denial the actor caused is answered with: the

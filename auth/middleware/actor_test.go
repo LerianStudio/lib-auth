@@ -154,7 +154,7 @@ func TestAuthorize_ForwardsTheActorOnlyForAnApplicationCaller(t *testing.T) {
 			name:   "application_with_actor",
 			claims: jwt.MapClaims{"type": "application", "sub": "acme/app"},
 			header: actorHeaderValue,
-			want:   `{"action":"get","actorToken":"partner.bearer.relayed","resource":"accounts","sub":"acme/app"}`,
+			want:   `{"action":"get","actorToken":"partner.bearer.relayed","product":"midaz","resource":"accounts","sub":"acme/app"}`,
 		},
 		{
 			name:   "application_without_actor",
