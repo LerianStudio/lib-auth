@@ -185,6 +185,10 @@ type AuthResponse struct {
 	// surface as 401. "permission" and "scope" stay the 403 a denial has always
 	// been, and are never told apart to the end caller: which axis failed is an
 	// enumeration oracle over another partner's identifiers.
+	//
+	// A reason starting with "actor_" names the partner an application caller
+	// relayed (X-Lerian-Actor) rather than the caller: it stays a 403, carrying a
+	// code that names the partner as the cause (see actorDenial).
 	Reason string `json:"reason,omitempty"`
 }
 
@@ -200,6 +204,10 @@ type authzParams struct {
 	// request that names none — which is still asked: the authorization service
 	// decides it by the partner's own scope for the product.
 	attributes map[string]string
+	// actorToken is the partner bearer the request relays in X-Lerian-Actor,
+	// "" when it relays none. It is asked about only for a plain application
+	// caller (see authzCaller.forwardsActor).
+	actorToken string
 }
 
 type oauth2Token struct {
@@ -638,6 +646,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 		// Forwarding nothing is still deliberate: falling back to the socket peer
 		// would forward the ingress address and could produce a false ALLOW.
 		clientIP := auth.resolveClientIP(c)
+		relayed := relayedActor(c)
 
 		resolution, principal, questions, refusal := auth.authorizeRequest(ctx, c, authzParams{
 			product:     product,
@@ -645,6 +654,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 			action:      action,
 			accessToken: accessToken,
 			clientIP:    clientIP,
+			actorToken:  relayed,
 		}, scope)
 		if refusal != nil {
 			span.End()
@@ -654,6 +664,7 @@ func (auth *AuthClient) Authorize(product, resource, action string, scopes ...Sc
 
 		publishPrincipal(c, span, principal)
 		recordPartnerScope(c, resolution.partner, questions)
+		publishActor(c, authzCaller{principal: principal, partner: resolution.partner}, accessToken, relayed)
 
 		span.End()
 
@@ -1162,6 +1173,17 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 		payload["attributes"] = p.attributes
 	}
 
+	// actorToken is added only for an application caller relaying a partner, and
+	// only to the wire payload: like the bearer it is a credential, so it never
+	// reaches the span payload above, and its digest — not the token — keys the
+	// cache below.
+	var actorDigest [sha256.Size]byte
+
+	if p.actorToken != "" && caller.forwardsActor() {
+		payload["actorToken"] = p.actorToken
+		actorDigest = sha256.Sum256([]byte(p.actorToken))
+	}
+
 	requestBodyJSON, err := json.Marshal(payload)
 	if err != nil {
 		logErrorf(ctx, auth.Logger, "Failed to marshal request body: %v", err)
@@ -1187,6 +1209,7 @@ func (auth *AuthClient) decide(ctx context.Context, span trace.Span, p authzPara
 		product:     requestBody["product"],
 		clientIP:    p.clientIP,
 		attributes:  attributesCacheKey(p.attributes),
+		actorDigest: actorDigest,
 	}
 
 	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so

@@ -48,7 +48,7 @@ func doCarrier(t *testing.T, app *fiber.App, r carrierRequest) bodyResult {
 		req.Header.Add(h[0], h[1])
 	}
 
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, capQuestionsTestConfig)
 	require.NoError(t, err)
 
 	defer resp.Body.Close()

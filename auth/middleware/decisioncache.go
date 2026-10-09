@@ -60,6 +60,12 @@ type cacheKey struct {
 	// reading an instance it was never granted. Empty for a route that declares
 	// no dimension, so those entries key exactly as they did before.
 	attributes string
+	// actorDigest is the SHA-256 of the actor token forwarded with the question
+	// (never the raw token), zero when none was. The decision is the caller's AND
+	// the actor's: without it one partner's grant would answer another partner's
+	// request relayed by the same service, and an actor-less entry would answer a
+	// request whose actor was refused.
+	actorDigest [sha256.Size]byte
 }
 
 // cacheEntry is a cached authorization decision with its expiry.

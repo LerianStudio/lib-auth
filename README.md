@@ -1125,6 +1125,33 @@ permissions:
 * The access manager enforces it; this library declares, validates and
   publishes it.
 
+### Declaring the services a product calls (`integrations`)
+
+A product that calls other Lerian services to serve a request names them, so a
+console can offer to set a partner's rules for each of them when the partner is
+granted this product:
+
+```yaml
+service: plugin-br-pix-jd
+version: 7
+partners: true
+integrations: [midaz, plugin-crm]
+```
+
+* `integrations` is optional; absent means none. Each entry is a non-empty
+  service name, unique, and not the manifest's own `service`, all compared
+  trimmed and case-insensitively. A violation fails validation at boot:
+
+  ```text
+  integrations[1]: duplicate service "midaz"
+  ```
+* It is published with the full manifest and with the scope alone
+  (`ScopeOnly`), as the LAST member of both, and is part of both
+  `CanonicalHash`es. It is omitted when empty, so a manifest without it
+  publishes the same bytes and hash as before. A manifest that declares only
+  `integrations` still has something to publish in scope-only mode.
+* `ScopeCatalogFor` carries it, trimmed, as the catalog's last member.
+
 ## 📡 Expected Authorization Service Response
 
 The authorization service should return a JSON response in the following format:
@@ -1166,6 +1193,42 @@ answered with:
 
 The field is optional and additive. A service that never publishes it produces
 exactly the behavior this middleware had before the field existed.
+
+## 🔁 Requests made on a partner's behalf (`X-Lerian-Actor`)
+
+When a partner calls a product, and that product calls another Lerian product
+to serve the request, the second product also applies the partner's own rules
+for it. `Authorize` takes part on both sides:
+
+1. **The product the partner called.** When the authorized credential is a
+   partner credential (it carries the `partner` claim), `Authorize` stores its
+   raw bearer on the request context with `actor.ContextWithToken`
+   (`lib-commons/v7/commons/net/http/actor`). A user or plain application token
+   stores nothing.
+2. **Its outbound call.** The product wraps the HTTP client of each Lerian
+   service it calls with `actor.NewTransport(base, "<that service's host>")`,
+   which sends the bearer in `X-Lerian-Actor` to that host only.
+3. **The product being called.** When the request carries `X-Lerian-Actor` and
+   the caller's own token is a plain application (M2M) credential, `Authorize`
+   adds `"actorToken"` to the `/v1/authorize` body. The header is ignored for a
+   partner or user caller, and a request without it sends the same bytes as
+   before. The actor never reaches a span, and the decision cache keys on its
+   digest, so one partner's decision never answers another's.
+4. **The decision.** The access manager allows only when the caller is allowed
+   and the partner is too (or holds no grant for this product). A denial the
+   partner caused names a reason starting with `actor_`, answered **403** with
+   a code of its own, recoverable with `errors.As` as a `commons.Response`:
+
+   | Reason | Status | Code | Message |
+   |---|---|---|---|
+   | `actor_tenant` | 403 | `AUT-1016` | the partner this request was made on behalf of belongs to another tenant |
+   | `actor_suspended` | 403 | `AUT-1017` | the partner this request was made on behalf of is suspended |
+   | `actor_expired`, `actor_invalid` | 403 | `AUT-1018` | the partner this request was made on behalf of is outside its validity period or its credential is no longer valid |
+   | `actor_permission`, `actor_scope`, any other `actor_*` | 403 | `AUT-1019` | the partner this request was made on behalf of is not allowed to perform it |
+
+   It stays 403, not 401: the caller's own credential is fine and must not be
+   re-issued. Permission and scope are not told apart, as for a direct partner
+   call.
 
 ## 🔒 gRPC usage
 

@@ -17,6 +17,10 @@ type ScopeCatalog struct {
 	// let the receiver default it.
 	Partners bool                `json:"partners"`
 	Levels   []ScopeCatalogLevel `json:"levels,omitempty"`
+	// Integrations are the services the product calls on a request's behalf,
+	// trimmed. Omitted when the manifest declares none, which the receiver reads
+	// as none.
+	Integrations []string `json:"integrations,omitempty"`
 }
 
 // ScopeCatalogDimension is one catalog dimension, field for field a
@@ -84,6 +88,8 @@ func ScopeCatalogFor(m *DeclarationManifest, product string, stored StoredLevels
 		Product:    product,
 		Dimensions: make([]ScopeCatalogDimension, 0, len(dimensions)),
 		Partners:   m.Partners,
+
+		Integrations: trimmedNames(m.Integrations),
 	}
 
 	for _, d := range dimensions {
@@ -94,7 +100,7 @@ func ScopeCatalogFor(m *DeclarationManifest, product string, stored StoredLevels
 			Required:   d.Required,
 			Multi:      d.Multi,
 			Collection: strings.TrimSpace(d.Collection),
-			Covers:     trimmedCovers(d.Covers),
+			Covers:     trimmedNames(d.Covers),
 			Label:      strings.TrimSpace(d.Label),
 			Parent:     d.Parent,
 		})
@@ -143,16 +149,17 @@ func (m *DeclarationManifest) catalogLevels(stored StoredLevels) ([]ScopeCatalog
 	return stored()
 }
 
-// trimmedCovers returns a dimension's covers trimmed. Absent stays nil, so the
-// member is omitted for a dimension that covers nothing.
-func trimmedCovers(covers []string) []string {
-	if len(covers) == 0 {
+// trimmedNames returns a list of names (a dimension's covers, the
+// integrations) trimmed. Absent stays nil, so the member is omitted for a list
+// that names nothing.
+func trimmedNames(names []string) []string {
+	if len(names) == 0 {
 		return nil
 	}
 
-	out := make([]string, 0, len(covers))
-	for _, covered := range covers {
-		out = append(out, strings.TrimSpace(covered))
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		out = append(out, strings.TrimSpace(name))
 	}
 
 	return out
