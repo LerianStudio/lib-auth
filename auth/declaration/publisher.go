@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/LerianStudio/lib-auth/v5/auth/middleware"
@@ -143,6 +144,63 @@ type Config struct {
 	// A manifest without a scope section and without the partner opt-in makes a
 	// ScopeOnly publisher a no-op: it never calls the identity service.
 	ScopeOnly bool
+	// Status, when set, reports where the publication stands, for a readiness
+	// check. Optional.
+	Status *Status
+}
+
+// State is where a declaration publication stands.
+type State int32
+
+const (
+	// StateIdle: nothing is being published (the zero value of a Status).
+	StateIdle State = iota
+	// StatePending: not accepted yet; transient failures are being retried.
+	StatePending
+	// StatePublished: the access manager accepted the declaration.
+	StatePublished
+	// StateFailed: refused for good (401/403/422/501, no token, or missing
+	// configuration); it needs an operator.
+	StateFailed
+)
+
+func (s State) String() string {
+	switch s {
+	case StatePending:
+		return "pending"
+	case StatePublished:
+		return "published"
+	case StateFailed:
+		return "failed"
+	default:
+		return "idle"
+	}
+}
+
+// Status holds the State of a publication; share one by pointer through
+// Config.Status or WireInput.Status and read it from a readiness check.
+type Status struct{ state atomic.Int32 }
+
+// State reports where the publication stands.
+func (s *Status) State() State { return State(s.state.Load()) }
+
+func (s *Status) set(v State) {
+	if s != nil {
+		s.state.Store(int32(v))
+	}
+}
+
+// record settles a publish result: accepted is published, a deterministic
+// failure is failed, and a transient one leaves the state as it was.
+func (s *Status) record(err error) {
+	var pubErr *PublishError
+
+	switch {
+	case err == nil:
+		s.set(StatePublished)
+	case errors.As(err, &pubErr) && pubErr.Deterministic:
+		s.set(StateFailed)
+	}
 }
 
 // Publisher publishes the plugin's permissions manifest to the access-manager at
@@ -167,6 +225,7 @@ type Publisher struct {
 	// true when that body would carry no scope, and Publish is then a no-op.
 	scopeOnly bool
 	nothing   bool
+	status    *Status
 
 	// retry knobs (exposed unexported for test overrides).
 	maxTries             uint
@@ -301,6 +360,7 @@ func New(cfg Config) (*Publisher, error) {
 		hash:                 hash,
 		scopeOnly:            cfg.ScopeOnly,
 		nothing:              cfg.ScopeOnly && !manifest.hasScopeCatalog(),
+		status:               cfg.Status,
 		maxTries:             defaultMaxTries,
 		retryInitialInterval: defaultRetryInitialInterval,
 		retryMaxInterval:     defaultRetryMaxInterval,
@@ -363,7 +423,9 @@ func (p *Publisher) cacheKey() string {
 // Publish executes ONE pass of the flow (§4): cache check → mint token → PUT →
 // store hash. It is idempotent (the server no-ops a matching hash) and, on failure,
 // returns a typed *PublishError; the caller decides whether that is fatal.
-func (p *Publisher) Publish(ctx context.Context) error {
+func (p *Publisher) Publish(ctx context.Context) (err error) {
+	defer func() { p.status.record(err) }()
+
 	if p.nothing {
 		p.logInfof(ctx, "declaration manifest for slug=%s declares no scope and does not opt in to partners; nothing to publish", p.slug)
 
@@ -539,6 +601,8 @@ func (p *Publisher) doPut(ctx context.Context, token string) error {
 // error; it is logged and (if periodic) retried on the next tick. With FailFast the
 // initial Publish runs synchronously and its error surfaces from Start.
 func (p *Publisher) Start(ctx context.Context) (func(), error) {
+	p.status.set(StatePending)
+
 	runCtx, cancel := context.WithCancel(ctx)
 
 	if p.failFast {
