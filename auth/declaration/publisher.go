@@ -60,6 +60,9 @@ const (
 	defaultRetryInitialInterval = 1 * time.Second
 	defaultRetryMaxInterval     = 30 * time.Second
 
+	// defaultTokenMaxAge bounds how long one minted token is reused across retries.
+	defaultTokenMaxAge = 5 * time.Minute
+
 	// defaultCacheTTL is the advisory TTL for the cached hash. The final source of
 	// truth is the server-side `declaration-hash` Tag, so this is deliberately
 	// generous — it only trims redundant re-PUTs on the periodic path.
@@ -231,6 +234,7 @@ type Publisher struct {
 	maxTries             uint
 	retryInitialInterval time.Duration
 	retryMaxInterval     time.Duration
+	tokenMaxAge          time.Duration
 	cacheTTL             time.Duration
 
 	httpClient *http.Client
@@ -248,7 +252,8 @@ type Publisher struct {
 // exhausted the last transient error is returned (and the caller, if fail-open,
 // reschedules).
 type PublishError struct {
-	// StatusCode is the identity HTTP status (0 for a network/pre-request failure).
+	// StatusCode is the HTTP status of the failing call, the PUT or the token mint
+	// (Op says which); 0 for a network/pre-request failure.
 	StatusCode int
 	// Deterministic classifies the error: true => no retry; false => transient.
 	Deterministic bool
@@ -364,6 +369,7 @@ func New(cfg Config) (*Publisher, error) {
 		maxTries:             defaultMaxTries,
 		retryInitialInterval: defaultRetryInitialInterval,
 		retryMaxInterval:     defaultRetryMaxInterval,
+		tokenMaxAge:          defaultTokenMaxAge,
 		cacheTTL:             defaultCacheTTL,
 		httpClient:           &http.Client{Timeout: 30 * time.Second},
 	}, nil
@@ -473,36 +479,38 @@ func (p *Publisher) publish(ctx context.Context, tries uint) (err error) {
 	return nil
 }
 
-// mintAndPutWithRetry runs mint→PUT as a SINGLE bounded backoff operation, minting a
-// FRESH token per attempt so a transient auth outage at boot is retried alongside the
-// PUT (not fatal for the whole one-shot pass). Classification is preserved: a
-// transient mint error is a plain error (retried); an empty token (auth
-// disabled/misconfigured) is backoff.Permanent (deterministic, not retried); doPut's
-// own deterministic/transient classification is unchanged. Transient failures retry
-// until the budget (tries; 0 = none) is exhausted or ctx ends, then surface the last error.
+// mintAndPutWithRetry runs mint→PUT as ONE backoff operation. The token is reused
+// across transient PUT failures and minted again after a mint failure, a 401 on a
+// reused token, or once it is tokenMaxAge old. tries == 0 retries until ctx ends.
 func (p *Publisher) mintAndPutWithRetry(ctx context.Context, tries uint) error {
 	exp := backoff.NewExponentialBackOff()
 	exp.InitialInterval = p.retryInitialInterval
 	exp.MaxInterval = p.retryMaxInterval
 
+	var (
+		token    string
+		mintedAt time.Time
+	)
+
 	op := func() (struct{}, error) {
-		token, err := p.auth.GetApplicationToken(ctx, p.clientID, p.clientSecret)
-		if err != nil {
-			pubErr := &PublishError{Deterministic: false, Op: "mint m2m token", Err: err}
-			p.logWarnf(ctx, "failed to mint M2M token for slug=%s (transient, will retry): %v", p.slug, err)
+		reused := token != "" && time.Since(mintedAt) < p.tokenMaxAge
+		if !reused {
+			var err error
+			if token, err = p.mint(ctx); err != nil {
+				return struct{}{}, err
+			}
 
-			return struct{}{}, pubErr
+			mintedAt = time.Now()
 		}
 
-		if token == "" {
-			p.logErrorf(ctx, "empty M2M token for slug=%s (auth disabled or misconfigured); not retrying", p.slug)
+		err := p.doPut(ctx, token, reused)
 
-			pubErr := &PublishError{Deterministic: true, Op: "mint m2m token", Detail: "empty token (auth disabled or misconfigured)"}
-
-			return struct{}{}, backoff.Permanent(pubErr)
+		var pubErr *PublishError
+		if errors.As(err, &pubErr) && pubErr.StatusCode == http.StatusUnauthorized {
+			token = ""
 		}
 
-		return struct{}{}, p.doPut(ctx, token)
+		return struct{}{}, err
 	}
 
 	_, err := backoff.Retry(ctx, op,
@@ -514,6 +522,32 @@ func (p *Publisher) mintAndPutWithRetry(ctx context.Context, tries uint) error {
 	return err
 }
 
+// mint mints the publisher's M2M token. The token endpoint refusing the credential
+// (a 4xx other than 429) and an empty token (auth off) are final; the rest retries.
+func (p *Publisher) mint(ctx context.Context) (string, error) {
+	token, err := p.auth.GetApplicationToken(ctx, p.clientID, p.clientSecret)
+
+	var refusal middleware.TokenRefusal
+
+	switch {
+	case errors.As(err, &refusal) && refusal.StatusCode/100 == 4 && refusal.StatusCode != http.StatusTooManyRequests:
+		detail := refusal.Response.Message
+		p.logErrorf(ctx, "M2M token refused for slug=%s: status=%d detail=%q (check the M2M client id and secret; not retrying)", p.slug, refusal.StatusCode, detail)
+
+		return "", backoff.Permanent(&PublishError{Deterministic: true, StatusCode: refusal.StatusCode, Op: "mint m2m token", Detail: detail})
+	case err != nil:
+		p.logWarnf(ctx, "failed to mint M2M token for slug=%s (transient, will retry): %v", p.slug, err)
+
+		return "", &PublishError{Deterministic: false, Op: "mint m2m token", Err: err}
+	case token == "":
+		p.logErrorf(ctx, "empty M2M token for slug=%s (auth disabled or misconfigured); not retrying", p.slug)
+
+		return "", backoff.Permanent(&PublishError{Deterministic: true, Op: "mint m2m token", Detail: "empty token (auth disabled or misconfigured)"})
+	}
+
+	return token, nil
+}
+
 // doPut performs one PUT and classifies the result per §8. A returned error is
 // either wrapped in backoff.Permanent (deterministic → stop) or plain (transient →
 // retry). nil means the declaration was accepted (200).
@@ -523,28 +557,11 @@ func (p *Publisher) mintAndPutWithRetry(ctx context.Context, tries uint) error {
 // that does NOT SERVE the operation (501 — multi-tenant; nothing to correct in the
 // credential or the manifest, but the operator should stop declaring on that
 // deployment).
-func (p *Publisher) doPut(ctx context.Context, token string) error {
-	// Build the URL from a parsed base so a trailing slash on IdentityAddr does not
-	// yield a "//v1" path. JoinPath is used only for the STATIC prefix; the slug is
-	// appended as a single, fully percent-escaped path segment via RawPath so a
-	// reserved char (e.g. '?') or a literal '/' cannot add a segment or alter the
-	// request target. Note: passing url.PathEscape(slug) into JoinPath would
-	// double-escape (JoinPath re-escapes the '%'), hence the explicit Path/RawPath.
-	base, err := url.Parse(p.identityAddr)
+func (p *Publisher) doPut(ctx context.Context, token string, reused bool) error {
+	reqURL, err := p.declarationURL()
 	if err != nil {
 		return backoff.Permanent(&PublishError{Deterministic: true, Op: "build request", Err: err})
 	}
-
-	base = base.JoinPath("v1", "declarations")
-
-	// escapedPrefix is the escaped static prefix (e.g. "/v1/declarations"); compute it
-	// BEFORE mutating Path. Path holds the decoded form; RawPath holds the escaped form
-	// so URL.String() emits "<prefix>/<escaped-slug>" and round-trips unchanged.
-	escapedPrefix := base.EscapedPath()
-	base.Path += "/" + p.slug
-	base.RawPath = escapedPrefix + "/" + url.PathEscape(p.slug)
-
-	reqURL := base.String()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(p.wire))
 	if err != nil {
@@ -571,6 +588,12 @@ func (p *Publisher) doPut(ctx context.Context, token string) error {
 	case http.StatusOK:
 		return nil
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusUnprocessableEntity:
+		if resp.StatusCode == http.StatusUnauthorized && reused {
+			p.logWarnf(ctx, "declaration PUT refused the reused M2M token for slug=%s: status=401 detail=%q (minting a fresh one)", p.slug, detail)
+
+			return &PublishError{Deterministic: false, StatusCode: resp.StatusCode, Op: "put declaration", Detail: detail}
+		}
+
 		pubErr := &PublishError{Deterministic: true, StatusCode: resp.StatusCode, Op: "put declaration", Detail: detail}
 		p.logErrorf(ctx, "declaration PUT rejected for slug=%s: status=%d detail=%q (deterministic, not retrying)", p.slug, resp.StatusCode, detail)
 
@@ -666,6 +689,27 @@ func (p *Publisher) runLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// declarationURL is {IdentityAddr}/v1/declarations/{slug}: a trailing slash on the base
+// cannot yield "//v1", and the slug is one percent-escaped segment set via RawPath, so a
+// '?' or '/' in it cannot alter the target (JoinPath would double-escape an escaped slug).
+func (p *Publisher) declarationURL() (string, error) {
+	base, err := url.Parse(p.identityAddr)
+	if err != nil {
+		return "", err
+	}
+
+	base = base.JoinPath("v1", "declarations")
+
+	// escapedPrefix is the escaped static prefix (e.g. "/v1/declarations"); compute it
+	// BEFORE mutating Path. Path holds the decoded form; RawPath holds the escaped form
+	// so URL.String() emits "<prefix>/<escaped-slug>" and round-trips unchanged.
+	escapedPrefix := base.EscapedPath()
+	base.Path += "/" + p.slug
+	base.RawPath = escapedPrefix + "/" + url.PathEscape(p.slug)
+
+	return base.String(), nil
 }
 
 // serverMessage extracts a safe, human-readable detail from the identity error

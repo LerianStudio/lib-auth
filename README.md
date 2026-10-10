@@ -1078,10 +1078,13 @@ the client's `Enabled` decides whether the scope alone is published. Leaving
 ### Reporting the declaration in readiness
 
 The publish runs in the background and never blocks the boot. Transient failures
-(network, timeouts, 5xx, 409, a token that cannot be minted) are retried with
-backoff capped at 30 s until the access manager accepts the declaration, refuses
-it (401/403/422/501 or an empty token, logged and not retried), or `stop` is
-called. Pass a `Status` to see where it stands:
+(network, timeouts, 5xx, 409, a token endpoint that is down or answers 429) are
+retried with backoff that grows to 30 s between attempts (up to 45 s with jitter)
+until the access manager accepts the declaration, refuses it (401/403/422/501, a
+token endpoint refusing the M2M credential with any other 4xx, or an empty token;
+logged and not retried), or `stop` is called. One minted token is reused across
+attempts for up to 5 minutes, and a 401 on a reused token mints a fresh one. Pass
+a `Status` to see where it stands:
 
 ```go
 var declared declaration.Status
