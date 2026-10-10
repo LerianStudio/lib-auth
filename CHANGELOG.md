@@ -1,3 +1,35 @@
+## [5.8.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.7.0...v5.8.0-beta.1) (2026-10-09)
+
+
+### Features
+
+* **middleware:** admit one calling service by its sourceService claim ([aa31854](https://github.com/LerianStudio/lib-auth/commit/aa318548cfdb635134eb2e16536a1c694c258aba))
+
+## [5.7.0](https://github.com/LerianStudio/lib-auth/compare/v5.6.0...v5.7.0) (2026-10-09)
+
+
+### Features
+
+* **declaration:** let a manifest name the services it calls on a request's behalf ([16de2db](https://github.com/LerianStudio/lib-auth/commit/16de2db3b47c778b979df6c9867949de1e89d57c))
+* **middleware:** relay a partner as the actor of the requests it causes ([ad3c329](https://github.com/LerianStudio/lib-auth/commit/ad3c329ff84a655e6933d6734d715bf293c667ed))
+
+
+### Bug Fixes
+
+* **middleware:** ask the relayed actor's question in the product and the requested scope ([64c63b7](https://github.com/LerianStudio/lib-auth/commit/64c63b7ee2754ba4aae33429e218d579c61ba797))
+* **middleware:** read the relayed actor verbatim and pin a blank header as absent ([300c809](https://github.com/LerianStudio/lib-auth/commit/300c809dfa74ca58d1a5690587420dab02123475))
+* **declaration:** refuse a wildcard in integrations ([9df64d4](https://github.com/LerianStudio/lib-auth/commit/9df64d4bd7d3ea867027eb6fe1cbc464e5e8b894)), closes [caradhras#263](https://github.com/LerianStudio/caradhras/issues/263)
+* **middleware:** republish the relayed actor of an authorized application caller ([bc28f17](https://github.com/LerianStudio/lib-auth/commit/bc28f1750b1983f675beca95301444a780865add))
+
+## [5.7.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.7.0-beta.2...v5.7.0-beta.3) (2026-10-09)
+
+## [5.7.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.7.0-beta.1...v5.7.0-beta.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **middleware:** ask the relayed actor's question in the product and the requested scope ([64c63b7](https://github.com/LerianStudio/lib-auth/commit/64c63b7ee2754ba4aae33429e218d579c61ba797))
+
 ## [5.7.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.6.0...v5.7.0-beta.1) (2026-10-09)
 
 

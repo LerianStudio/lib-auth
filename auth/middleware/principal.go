@@ -59,14 +59,15 @@ type Principal struct {
 	// anyone, and an identity decision should refuse an empty or marker value,
 	// which IsDeclaredSourceService reports.
 	//
-	// It is published only when the authorization model is inversion
-	// (AUTH_M2M_INVERSION_ENABLED=true); when authorization is disabled,
-	// PrincipalRequiredWhenDisabled must be set in addition to inversion, since
-	// that flag alone does not publish an application Principal (the
-	// no-round-trip path rejects it while inversion is off). Under the legacy
-	// model (inversion off) an application token publishes no Principal at all,
-	// so a service that needs this field must run with inversion on. A credential issued before the issuer started stamping the
-	// claim carries none and reads as empty until it is rotated.
+	// PrincipalFromContext reports it only under inversion
+	// (AUTH_M2M_INVERSION_ENABLED=true): under the legacy model an application's
+	// Subject is a fabricated role, so the accessor reports no Principal at all.
+	// RequireSourceService decides on it under BOTH models, since the authorization
+	// round-trip vouched for the whole token either way. When authorization is
+	// disabled, PrincipalRequiredWhenDisabled must be set in addition to inversion:
+	// the no-round-trip path rejects an application token while inversion is off.
+	// A credential issued before the issuer started stamping the claim carries none
+	// and reads as empty until it is rotated.
 	SourceService string
 }
 
@@ -256,6 +257,26 @@ func RequireHuman() fiber.Handler {
 // round-trip behind Authorize is the trust anchor, as it is for every other route.
 func RequireApplication() fiber.Handler {
 	return requirePrincipalType(application)
+}
+
+// RequireSourceService admits only an application principal whose sourceService
+// claim is exactly service: a missing Principal is 401, any other caller 403. Mount
+// AFTER Authorize. It decides under both authorization models, because the
+// authorization round-trip vouched for the whole token even where the Subject is a
+// fabricated role; it never reads Subject. An empty or marker service admits nobody.
+func RequireSourceService(service string) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		p, ok := c.Context().Value(principalContextKey{}).(Principal)
+		if !ok {
+			return fiber.ErrUnauthorized
+		}
+
+		if p.Type != application || !IsDeclaredSourceService(p.SourceService) || p.SourceService != service {
+			return fiber.ErrForbidden
+		}
+
+		return c.Next()
+	}
 }
 
 // requirePrincipalType is the shared body of the two type guards. The split
