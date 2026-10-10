@@ -1319,9 +1319,9 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 	// as "auth is disabled or misconfigured" and stops retrying permanently, so a
 	// transient refusal at boot became a permanent give-up.
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		refusal := accessManagerRefusalFrom(resp.StatusCode, body)
+		refusal := TokenRefusal{StatusCode: resp.StatusCode, Response: accessManagerRefusalFrom(resp.StatusCode, body)}
 
-		logErrorf(ctx, auth.Logger, "Failed to get application token: %s", refusal.Message)
+		logErrorf(ctx, auth.Logger, "Failed to get application token: %s", refusal.Response.Message)
 
 		tracing.HandleSpanError(span, "Failed to get application token", refusal)
 
