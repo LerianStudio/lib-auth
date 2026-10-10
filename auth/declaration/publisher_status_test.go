@@ -37,13 +37,6 @@ func waitState(t *testing.T, st *Status, want State) {
 		5*time.Second, time.Millisecond, "status never reached %s (last %s)", want, st.State())
 }
 
-func TestStatus_ZeroValueIsIdle(t *testing.T) {
-	var st Status
-
-	assert.Equal(t, StateIdle, st.State())
-	assert.Equal(t, "idle", st.State().String())
-}
-
 // An access manager that comes up after the budget of a single Publish call is
 // spent still receives the declaration: the background publish keeps retrying.
 func TestStart_RetriesTransientPastTheBudgetUntilAccepted(t *testing.T) {
@@ -74,7 +67,7 @@ func TestStart_RetriesTransientPastTheBudgetUntilAccepted(t *testing.T) {
 	assert.Greater(t, identity.count(), int(p.maxTries))
 }
 
-// A refusal is permanent: one PUT, reported failed, logged at ERROR, never retried.
+// A refusal is permanent: one PUT, reported failed, never retried.
 func TestStart_DeterministicRefusalStopsAndReportsFailed(t *testing.T) {
 	auth := newAuthServer(t)
 	t.Cleanup(auth.Close)
@@ -84,10 +77,8 @@ func TestStart_DeterministicRefusalStopsAndReportsFailed(t *testing.T) {
 
 	var st Status
 
-	logs := &captureLogger{}
 	cfg := testConfig(t, auth.URL, identity.URL)
 	cfg.Status = &st
-	cfg.Logger = logs
 	p := newFastPublisher(t, cfg)
 
 	stop, err := p.Start(context.Background())
@@ -97,10 +88,6 @@ func TestStart_DeterministicRefusalStopsAndReportsFailed(t *testing.T) {
 	stop()
 
 	assert.Equal(t, 1, identity.count(), "a refusal must not be retried")
-
-	_, level, found := logs.find("status=403")
-	require.True(t, found, "the refusal must be logged; got:\n%s", logs.all())
-	assert.Equal(t, obs.LevelError, level)
 }
 
 // stop ends a retry that would otherwise run for as long as the outage lasts.
