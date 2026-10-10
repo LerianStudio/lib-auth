@@ -1,3 +1,18 @@
+## [5.8.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.8.0-beta.1...v5.8.0-beta.2) (2026-10-10)
+
+
+### Features
+
+* **middleware:** carry the status of a refused token request ([f7f4268](https://github.com/LerianStudio/lib-auth/commit/f7f4268b7b3069eb014c3162622e0eda85c0a97c))
+* **declaration:** report where the declaration publication stands ([30268b9](https://github.com/LerianStudio/lib-auth/commit/30268b9e57b51e842a75ee39f6025d9cacb02f52))
+
+
+### Bug Fixes
+
+* **declaration:** keep a publication with nothing to send idle ([f8ad83a](https://github.com/LerianStudio/lib-auth/commit/f8ad83a528c3d9fb169dde8eae998f714cad8e11))
+* **declaration:** retry the boot publish until accepted or refused ([41014e4](https://github.com/LerianStudio/lib-auth/commit/41014e4af1aafbeea9803c664c8467252250c1a1))
+* **declaration:** reuse the token and stop on a refused credential ([8597fbb](https://github.com/LerianStudio/lib-auth/commit/8597fbb8a1df6abf8b9400628d1ec0e139ac827f))
+
 ## [5.8.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.7.0...v5.8.0-beta.1) (2026-10-09)
 
 
