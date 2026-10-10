@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/LerianStudio/lib-commons/v7/commons"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,6 +61,24 @@ func TestGetApplicationToken_OnlyA2xxCarriesAToken(t *testing.T) {
 		_, err := auth.GetApplicationToken(context.Background(), "client-id", "client-secret")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid client credentials")
+	})
+
+	t.Run("the_refusal_carries_the_status_and_the_response", func(t *testing.T) {
+		t.Parallel()
+
+		server := accessManagerServing(t, http.StatusUnauthorized, `{"code":"AUT-0001","message":"invalid client credentials"}`)
+
+		auth := &AuthClient{Address: server.URL, Enabled: true, Logger: &testLogger{}}
+
+		_, err := auth.GetApplicationToken(context.Background(), "client-id", "client-secret")
+
+		var refusal TokenRefusal
+		require.ErrorAs(t, err, &refusal)
+		assert.Equal(t, http.StatusUnauthorized, refusal.StatusCode)
+
+		var response commons.Response
+		require.ErrorAs(t, err, &response, "callers matching the commons.Response keep matching it")
+		assert.Equal(t, "AUT-0001", response.Code)
 	})
 
 	t.Run("a_2xx_with_no_token_is_a_failure", func(t *testing.T) {
