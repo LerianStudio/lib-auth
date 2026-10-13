@@ -217,3 +217,51 @@ func TestWireFromEnv_RequirementOffKeepsPlaintextHosts(t *testing.T) {
 	require.NotNil(t, stop)
 	stop()
 }
+
+// An injected AuthClient replaces the env auth pair, not the https requirement:
+// one built without WithRequireHTTPS could mint the M2M token over http, so the
+// boot is refused before anything is dialled.
+func TestWireFromEnv_RequireHTTPSRefusesAnInjectedPlaintextClient(t *testing.T) {
+	auth := newConnCounter(t, false)
+	identity := newConnCounter(t, true)
+
+	setWireEnvCanonical(t, identity.URL, "", false)
+
+	in := wireInputRequiringHTTPS()
+	in.AuthClient = middleware.NewAuthClient(auth.URL, true, obs.Nop())
+
+	// Building the injected client is the service's own step and may dial its
+	// health check; only what WireFromEnv dials counts.
+	before := auth.conns.Load()
+
+	stop, err := WireFromEnv(context.Background(), in)
+	require.NotNil(t, stop)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WithRequireHTTPS(true)")
+	assert.Equal(t, before, auth.conns.Load(), "WireFromEnv never dials the plaintext auth host")
+	assert.Zero(t, identity.conns.Load())
+}
+
+// The scope-only publication honours the https requirement too: a plaintext auth
+// host is never dialled, and the publication reads failed instead of minting
+// the M2M token over http.
+func TestWireFromEnv_ScopeOnly_RequireHTTPSRefusesPlaintextAuthHost(t *testing.T) {
+	auth := newConnCounter(t, false)
+	identity := newConnCounter(t, true)
+
+	setScopeOnlyEnv(t, identity.URL, auth.URL)
+
+	var st Status
+
+	in := scopedWireInput(obs.Nop())
+	in.RequireHTTPS = true
+	in.Status = &st
+
+	stop, err := WireFromEnv(context.Background(), in)
+	require.NoError(t, err, "the scope-only publication never fails the boot")
+	stop()
+
+	assert.Equal(t, StateFailed, st.State())
+	assert.Zero(t, auth.conns.Load(), "the plaintext auth host is never dialled")
+	assert.Zero(t, identity.conns.Load())
+}

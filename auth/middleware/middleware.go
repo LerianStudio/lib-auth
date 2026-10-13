@@ -29,6 +29,7 @@ import (
 
 	"github.com/LerianStudio/lib-commons/v7/commons"
 	libHTTP "github.com/LerianStudio/lib-commons/v7/commons/net/http"
+	"github.com/LerianStudio/lib-commons/v7/commons/net/http/actor"
 	"github.com/gofiber/fiber/v3"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/sony/gobreaker"
@@ -195,6 +196,10 @@ type AuthResponse struct {
 	// surface as 401. "permission" and "scope" stay the 403 a denial has always
 	// been, and are never told apart to the end caller: which axis failed is an
 	// enumeration oracle over another partner's identifiers.
+	//
+	// A reason starting with "actor_" names the partner an application caller
+	// relayed (X-Lerian-Actor) rather than the caller: it stays a 403, carrying a
+	// code that names the partner as the cause (see actorDenial).
 	Reason string `json:"reason,omitempty"`
 }
 
@@ -210,6 +215,10 @@ type authzParams struct {
 	// request that names none — which is still asked: the authorization service
 	// decides it by the partner's own scope for the product.
 	attributes map[string]string
+	// actorToken is the partner bearer the request relays in X-Lerian-Actor,
+	// "" when it relays none. It is asked about only for a plain application
+	// caller (see authzCaller.forwardsActor).
+	actorToken string
 }
 
 type oauth2Token struct {
@@ -676,7 +685,11 @@ func (auth *AuthClient) warnMissingTrustedProxies() {
 // instances (an organization, a ledger) whose identifiers the authorization
 // service must see to honour a partner-scoped credential. A route that passes
 // none takes its scope from its product's manifest scope, when one is wired
-// (see SetManifestScope), on its first request. The scope is read only for a
+// (see SetManifestScope), on its first request. A handler mounted with Use —
+// on the app, a group or a mounted sub-app — sees the mount prefix as its
+// route; the request is then resolved to the route that serves it, among the
+// routes the app registers and those the manifest declares, and its scope read
+// there. The scope is read only for a
 // partner-bound credential: any other credential is decided exactly as on a
 // route with no scope, down to the bytes on the wire. A partner-bound
 // credential on a request that names no scope dimension is asked without
@@ -771,10 +784,23 @@ func (r fiberRequest) contentType() string {
 	return r.c.Get(fiber.HeaderContentType)
 }
 
-func (r fiberRequest) route() (string, string) {
-	route := r.c.Route()
+// relayedActor reads the actor header as Fiber hands it over: the first value,
+// its surrounding whitespace already stripped, so a blank header reads as none.
+func (r fiberRequest) relayedActor() string {
+	return r.c.Get(actor.HeaderName)
+}
 
-	return route.Method, route.Path
+// scopeOf reads the route Fiber names for the request. A handler mounted with
+// Use sees the mount prefix as its route; the request is then marked to be read
+// on the route that serves it (see servingScope).
+func (r fiberRequest) scopeOf(route *routeScope) (ScopeDeclaration, string) {
+	return route.scopeFor(r.c)
+}
+
+// servingScope resolves a request seen through a mount prefix to the route that
+// serves it, among the routes the app registers and those the manifest declares.
+func (r fiberRequest) servingScope(s ScopeDeclaration) (ScopeDeclaration, string) {
+	return s.readOnServingRoute(r.c)
 }
 
 // body is the body Fiber already read, within the application's BodyLimit.
@@ -965,7 +991,8 @@ func (auth *AuthClient) deriveSubject(ctx context.Context, span trace.Span, clai
 //
 // A partner-bound credential is an application token, but the auth service resolves
 // a partner's grants by product: without it every partner request is denied. So a
-// partner forwards the product regardless of the M2M forwarding keys.
+// partner forwards the product regardless of the M2M forwarding keys, and so does an
+// application relaying one: the keys decide the caller's question, not the actor's.
 func shouldForwardProduct(userType, product string, forwardM2MProduct, partnerBound bool) bool {
 	if product == "" {
 		return false
@@ -1085,7 +1112,7 @@ func (auth *AuthClient) ask(ctx context.Context, span trace.Span, p authzParams,
 	// shouldForwardProduct(userType, product, false, false) == the legacy normal-user
 	// rule. A partner forwards the product in both paths.
 	forwardM2MProduct := auth.ForwardM2MProduct && auth.M2MInversionEnabled
-	if shouldForwardProduct(userType, p.product, forwardM2MProduct, partner != "") {
+	if shouldForwardProduct(userType, p.product, forwardM2MProduct, caller.asksAsPartner(p.actorToken)) {
 		requestBody["product"] = p.product
 	}
 
@@ -1134,6 +1161,17 @@ func (auth *AuthClient) ask(ctx context.Context, span trace.Span, p authzParams,
 		payload["attributes"] = p.attributes
 	}
 
+	// actorToken is added only for an application caller relaying a partner, and
+	// only to the wire payload: like the bearer it is a credential, so it never
+	// reaches the span payload above, and its digest — not the token — keys the
+	// cache below.
+	var actorDigest [sha256.Size]byte
+
+	if caller.relays(p.actorToken) {
+		payload["actorToken"] = p.actorToken
+		actorDigest = sha256.Sum256([]byte(p.actorToken))
+	}
+
 	requestBodyJSON, err := json.Marshal(payload)
 	if err != nil {
 		logErrorf(ctx, auth.Logger, "Failed to marshal request body: %v", err)
@@ -1159,6 +1197,7 @@ func (auth *AuthClient) ask(ctx context.Context, span trace.Span, p authzParams,
 		product:     requestBody["product"],
 		clientIP:    p.clientIP,
 		attributes:  attributesCacheKey(p.attributes),
+		actorDigest: actorDigest,
 	}
 
 	// A fresh cache hit (positive OR negative) short-circuits before the breaker, so
@@ -1274,9 +1313,9 @@ func (auth *AuthClient) GetApplicationToken(ctx context.Context, clientID, clien
 	// as "auth is disabled or misconfigured" and stops retrying permanently, so a
 	// transient refusal at boot became a permanent give-up.
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		refusal := accessManagerRefusalFrom(resp.StatusCode, body)
+		refusal := TokenRefusal{StatusCode: resp.StatusCode, Response: accessManagerRefusalFrom(resp.StatusCode, body)}
 
-		logErrorf(ctx, auth.Logger, "Failed to get application token: %s", refusal.Message)
+		logErrorf(ctx, auth.Logger, "Failed to get application token: %s", refusal.Response.Message)
 
 		tracing.HandleSpanError(span, "Failed to get application token", refusal)
 

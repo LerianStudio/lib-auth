@@ -32,8 +32,11 @@ func (m *DeclarationManifest) Validate() error {
 	declaredRoles, roleViolations := m.validateRoles()
 	violations = append(violations, roleViolations...)
 	violations = append(violations, m.validatePermissions(declaredRoles)...)
+	violations = append(violations, m.validateM2MRoles(declaredRoles)...)
 	violations = append(violations, m.validateScope()...)
 	violations = append(violations, m.validateLevels()...)
+	violations = append(violations, validateNameList("integrations", m.Integrations, m.Service, "the manifest's own service", "service")...)
+	violations = append(violations, validateNoWildcards("integrations", m.Integrations, "service")...)
 
 	if len(violations) == 0 {
 		return nil
@@ -135,6 +138,41 @@ func (m *DeclarationManifest) validatePermissions(declaredRoles map[string]struc
 				violations = append(violations, fmt.Sprintf("permissions[%d]: permission names %q and %q derive the same Casdoor-safe name %q", i, first, composed, kebab))
 			} else {
 				seenKebab[kebab] = composed
+			}
+		}
+	}
+
+	return violations
+}
+
+// validateM2MRoles validates m2m.roles: every entry names a declared role, none
+// repeats another, and the section is exposed — the roles are the ones an M2M
+// caller of this service assumes, so a service nobody may call has none to name.
+// An absent m2m section or an empty m2m.roles is valid.
+func (m *DeclarationManifest) validateM2MRoles(declaredRoles map[string]struct{}) []string {
+	if m.M2M == nil || len(m.M2M.Roles) == 0 {
+		return nil
+	}
+
+	var violations []string
+
+	if !m.M2M.Exposed {
+		violations = append(violations, "m2m.roles requires m2m.exposed: true (they are the roles an M2M caller of this service assumes)")
+	}
+
+	seen := make(map[string]struct{}, len(m.M2M.Roles))
+
+	for i, name := range m.M2M.Roles {
+		switch _, dup := seen[name]; {
+		case strings.TrimSpace(name) == "":
+			violations = append(violations, fmt.Sprintf("m2m.roles[%d]: role name must not be empty", i))
+		case dup:
+			violations = append(violations, fmt.Sprintf("m2m.roles[%d]: duplicate role %q", i, name))
+		default:
+			seen[name] = struct{}{}
+
+			if _, ok := declaredRoles[name]; !ok {
+				violations = append(violations, fmt.Sprintf("m2m.roles[%d]: references undeclared role %q", i, name))
 			}
 		}
 	}
@@ -334,27 +372,50 @@ func parentCycle(name string, parents map[string]string) []string {
 // authorization service compares them, so two spellings of one collection are
 // one collection.
 func validateCovers(prefix string, d DeclarationDimension) []string {
+	return validateNameList(prefix+".covers", d.Covers, d.Collection, "the dimension's own collection", "collection")
+}
+
+// validateNameList validates a list of names that must each name something,
+// none repeating another nor the owner's own name (ownWhat says what that is,
+// kind what one entry names). Names are compared trimmed and
+// case-insensitively, as the authorization service compares them.
+func validateNameList(field string, names []string, own, ownWhat, kind string) []string {
 	var violations []string
 
-	own := strings.TrimSpace(d.Collection)
-	seen := make(map[string]struct{}, len(d.Covers))
+	own = strings.TrimSpace(own)
+	seen := make(map[string]struct{}, len(names))
 
-	for j, c := range d.Covers {
-		entry := fmt.Sprintf("%s.covers[%d]", prefix, j)
-		trimmed := strings.TrimSpace(c)
+	for j, name := range names {
+		entry := fmt.Sprintf("%s[%d]", field, j)
+		trimmed := strings.TrimSpace(name)
 		key := strings.ToLower(trimmed)
 
 		switch {
 		case trimmed == "":
 			violations = append(violations, entry+": must not be empty")
 		case strings.EqualFold(trimmed, own):
-			violations = append(violations, fmt.Sprintf("%s: must not repeat the dimension's own collection %q", entry, own))
+			violations = append(violations, fmt.Sprintf("%s: must not repeat %s %q", entry, ownWhat, own))
 		default:
 			if _, dup := seen[key]; dup {
-				violations = append(violations, fmt.Sprintf("%s: duplicate collection %q", entry, trimmed))
+				violations = append(violations, fmt.Sprintf("%s: duplicate %s %q", entry, kind, trimmed))
 			} else {
 				seen[key] = struct{}{}
 			}
+		}
+	}
+
+	return violations
+}
+
+// validateNoWildcards refuses a "*" anywhere in an entry: each entry names exactly
+// one service, and the access manager's catalog store refuses wildcards, so a
+// manifest accepted here must not be refused there.
+func validateNoWildcards(field string, names []string, kind string) []string {
+	var violations []string
+
+	for j, name := range names {
+		if trimmed := strings.TrimSpace(name); strings.Contains(trimmed, "*") {
+			violations = append(violations, fmt.Sprintf("%s[%d]: must name one %s, not a wildcard %q", field, j, kind, trimmed))
 		}
 	}
 

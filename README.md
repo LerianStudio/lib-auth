@@ -326,6 +326,8 @@ type Principal struct {
     Subject  string // "<owner>/<sub>" for normal-user, "<sub>" for application
     ClientID string // "azp" claim when present, else empty
     TenantID string // "tenantId" claim verbatim, else empty
+
+    SourceService string // "sourceService" claim verbatim; application tokens only, else empty
 }
 
 func PrincipalFromContext(ctx context.Context) (Principal, bool)
@@ -346,11 +348,46 @@ reports a principal, since single-tenant tokens may carry none. It is a claim, n
 tenant-isolation decision: in multi-tenant deployments the tenant-manager remains
 the authority on which tenant a request belongs to.
 
+`SourceService` is the token's `sourceService` claim — the name of the service a
+machine credential acts on behalf of — copied verbatim and published only for
+`application` tokens; it is empty on `normal-user` tokens and when the claim is
+absent or not a string. Where `Sub` differs per credential, `SourceService` is the
+same on every credential one service holds, so a multi-tenant producer that is
+issued one application per tenant keeps a single `SourceService`. The credential
+issuer stamps it, but the library gives it the same provenance as every other claim
+on the `Principal`. When the authorization service vouches for the token, or local
+signature verification is configured, a caller cannot choose its value. With
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` and no verification keys the claim is
+**self-asserted**: any caller can present any value, so a service must not use it
+as an identity in that mode (see the trust-boundary warning under
+[Bearer required while auth is disabled](#bearer-required-while-auth-is-disabled)).
+It never affects authorization or whether `PrincipalFromContext` reports a
+principal. The library does not validate it: an issuer may write a marker such as
+`undeclared` for a credential created without a source, and a service that uses the
+value as an identity must refuse an empty or marker value. Do not copy the marker:
+`middleware.IsDeclaredSourceService(p.SourceService)` is false for an empty,
+whitespace-only or `undeclared` value (`middleware.UndeclaredSourceService`), and
+that is the refusal to apply.
+
+`PrincipalFromContext` reports the field only under
+`AUTH_M2M_INVERSION_ENABLED=true`: under the legacy model an application's `Subject`
+is a fabricated role, so the accessor reports no `Principal` at all. A route that
+admits one calling service only should mount `RequireSourceService` (see
+[Type guards](#type-guards)), which decides on the claim under both models. When
+authorization is disabled, `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=true` is required
+in addition to inversion: that flag alone does not publish an application
+`Principal`, because the no-round-trip path rejects application tokens while
+inversion is off.
+A machine credential issued before the issuer stamped the claim carries none and
+reads as empty until it is rotated or recreated; the helper refuses it like any
+other undeclared value. The field is read from the HTTP `Authorize` path only: the
+gRPC interceptors do not publish a `Principal`.
+
 Publication covers the authorized decision, a decision-cache hit, and the
 `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` path below. A denied request publishes
 nothing, and neither does the default disabled pass-through. The only identity attribute any of
 these spans carries is `app.auth.principal.type`. The span copy of the authorization
-payload omits `sub`, so `Owner`, `Sub`, `Subject`, `ClientID` and `TenantID` are recorded nowhere,
+payload omits `sub`, so `Owner`, `Sub`, `Subject`, `ClientID`, `TenantID` and `SourceService` are recorded nowhere,
 and neither the access token nor any principal identifier reaches a span attribute
 or a log line written by this library — the request id is what correlates a span
 with the service's own audit trail. The one caller identifier this library hands
@@ -418,6 +455,24 @@ f.Post("/v1/operations/:id/resolution",
     auth.Authorize(applicationName, "operation", "resolve"),
     authMiddleware.RequireApplication(), // 403 for a human caller
     operationHandler.Resolve)
+```
+
+`RequireSourceService(service)` narrows a route to ONE calling service: it admits an
+application principal whose `sourceService` claim equals `service` exactly, answers
+403 to every other caller (a person, another service, an empty or `undeclared`
+claim) and 401 when no principal was published. Unlike `PrincipalFromContext` it
+decides under both authorization models, because the authorization round-trip
+vouched for the whole token even where the legacy `Subject` is a fabricated role; it
+never reads `Subject`. The claim is only as strong as its issuer: whoever may create
+applications for the tenant can create one whose source is `service`. Under
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` with no verification keys the claim is
+self-asserted, so the guard proves nothing there.
+
+```go
+f.Post("/v1/cross-core/pix/cash-ins",
+    auth.Authorize(applicationName, "cross-core", "post"),
+    authMiddleware.RequireSourceService("jd-courier"), // 403 for anyone but the Courier
+    crossCoreHandler.CashIn)
 ```
 
 ### Authorization outside the chain
@@ -750,6 +805,51 @@ Any other client takes it with `declaration.WireScope(auth, embeddedManifest)`.
   moving a dimension from the path to a header is a change the access manager
   receives.
 
+#### Authorizing in middleware (`Use`, groups, mounted apps)
+
+A handler mounted with `Use` — on the app, on a group, or inside a mounted
+sub-app — does not see the route a request is for: Fiber reports the **mount
+prefix** as its route and reads no path parameter past it. `Authorize` then
+resolves the request **itself**, with no product code:
+
+```go
+app.Use("/v1/organizations", auth.Authorize("midaz", "ledgers", "get"))
+app.Get("/v1/organizations/:organization_id/ledgers/:ledger_id", handler)
+// a partner request to /v1/organizations/org-1/ledgers/led-1 sends
+// {"organizationId":"org-1","ledgerId":"led-1"}, as on the route itself
+```
+
+* The request's method and path are matched against every route the app
+  registers (`Use` mounts aside) and every `scope.routes` entry of the manifest.
+  The route that matches takes its scope from the manifest exactly as if the
+  handler were on it, and its path parameters are read from the match.
+* Matching follows the app's own routing: literals compare without regard to
+  letter case unless `fiber.Config.CaseSensitive` is set, and a trailing slash is
+  ignored unless `fiber.Config.StrictRouting` is set — so a request resolves to
+  the route Fiber routes it to.
+* The scope read is that of the **route Fiber serves**: the app's routes are
+  tried in the order Fiber tries them, and the first that matches wins, even
+  when a more specific route is registered after it — the handler that runs is
+  the one whose scope is checked. A route whose path the matcher cannot read
+  (a constrained parameter `:id<int>`, several parameters in one segment) and
+  that could serve the request leaves it **unresolved**.
+* Only a request no registered route serves is resolved among the routes the
+  manifest alone declares, where the **most specific** wins, compared segment
+  by segment from the left: a literal over a parameter, a parameter over an
+  optional one, an optional one over a wildcard. Two declared routes equally
+  specific under different paths leave the request **unresolved**.
+* Two `scope.routes` entries of one method that are the same route under other
+  parameter names are a manifest defect, refused when the manifest is wired.
+  The app's routing is not known then, so only entries that are one route under
+  any routing are refused (literals differing in letter case, or in a trailing
+  slash, are left to the runtime rule above).
+* A partner-bound request that resolves to no single route — none matches, two
+  declared routes tie, or an unreadable route may serve it — is refused **403 before the round-trip**: its scope cannot be read.
+  Every other credential is decided exactly as before, down to the bytes on the
+  wire.
+* Nothing changes for a handler on its own route (`app.Get(path, auth.Authorize(...), h)`),
+  nor for a product with no scope catalog and no `RequireScope`.
+
 #### Confining related collections (`covers`)
 
 A dimension's `collection` is where its instances live. A partner scoped on the
@@ -1020,6 +1120,74 @@ pub, err := declaration.New(declaration.Config{
 a `scope` section nor `partners: true` publishes nothing in that mode. A scope that cannot be published
 (missing configuration, access manager down) is logged and never fails the boot.
 
+### Reusing the service's `AuthClient` in `WireFromEnv`
+
+`WireFromEnv` builds its own `*middleware.AuthClient` from `PLUGIN_AUTH_HOST`
+and `PLUGIN_AUTH_ENABLED` unless it is handed one. A service that already has
+the client its routes authorize with passes it in `WireInput.AuthClient`:
+
+```go
+auth := middleware.NewAuthClient(cfg.AuthHost, cfg.AuthEnabled, logger)
+
+stop, err := declaration.WireFromEnv(ctx, declaration.WireInput{
+    Slug:       "plugin-fees",
+    Manifest:   embeddedManifest,
+    Logger:     logger,
+    AuthClient: auth,
+})
+if err != nil {
+    return err // configuration error: fail the boot
+}
+// stop cancels the publisher, including a declaration PUT still in flight:
+// hand it to whoever owns the shutdown and call it only after the server
+// stops serving, never with a defer in a bootstrap function that returns
+// (here, the post-shutdown hook of the service's Fiber app).
+app.Hooks().OnPostShutdown(func(error) error { stop(); return nil })
+```
+
+With the client injected, `WireFromEnv` mints the publisher's token with it,
+wires the manifest's scope into it, and reads neither the auth host nor
+`PLUGIN_AUTH_ENABLED`, so the process keeps one client and the service keeps
+its own variable names for it. The `IDP_*` variables are read and validated as
+before. When the declaration is on, a client with an empty `Address` or with
+`Enabled` false fails the boot with an error naming the field; when it is off,
+the client's `Enabled` decides whether the scope alone is published. Leaving
+`AuthClient` nil keeps the behavior described above.
+
+### Reporting the declaration in readiness
+
+The publish runs in the background and never blocks the boot. Transient failures
+(network, timeouts, 5xx, 409, a token endpoint that is down or answers 429) are
+retried with backoff that grows to 30 s between attempts (up to 45 s with jitter)
+until the access manager accepts the declaration, refuses it (401/403/422/501, a
+token endpoint refusing the M2M credential with any other 4xx, or an empty token;
+logged and not retried), or `stop` is called. One minted token is reused across
+attempts for up to 5 minutes, and a 401 on a reused token mints a fresh one. Pass
+a `Status` to see where it stands:
+
+```go
+var declared declaration.Status
+
+stop, err := declaration.WireFromEnv(ctx, declaration.WireInput{
+    Slug:     "plugin-fees",
+    Manifest: embeddedManifest,
+    Logger:   logger,
+    Status:   &declared,
+})
+
+// In the readiness check:
+switch declared.State() {
+case declaration.StatePending, declaration.StateFailed:
+    // degraded: callers get 403 until the access manager holds the declaration
+}
+```
+
+`StateIdle` means no publication started: auth is off, or the declaration is
+off and the manifest has neither a scope nor the partner opt-in (with auth on,
+the scope alone is published and reads pending, then published).
+`StatePublished` means the access manager accepted it. `Config.Status` does the
+same for a publisher built with `New`.
+
 ### Opting in to partners (`partners`)
 
 A product accepts partner-bound credentials only when its manifest says so:
@@ -1090,6 +1258,33 @@ permissions:
 * The access manager enforces it; this library declares, validates and
   publishes it.
 
+### Declaring the services a product calls (`integrations`)
+
+A product that calls other Lerian services to serve a request names them, so a
+console can offer to set a partner's rules for each of them when the partner is
+granted this product:
+
+```yaml
+service: plugin-br-pix-jd
+version: 7
+partners: true
+integrations: [midaz, plugin-crm]
+```
+
+* `integrations` is optional; absent means none. Each entry is a non-empty
+  service name, unique, and not the manifest's own `service`, all compared
+  trimmed and case-insensitively. A violation fails validation at boot:
+
+  ```text
+  integrations[1]: duplicate service "midaz"
+  ```
+* It is published with the full manifest and with the scope alone
+  (`ScopeOnly`), as the LAST member of both, and is part of both
+  `CanonicalHash`es. It is omitted when empty, so a manifest without it
+  publishes the same bytes and hash as before. A manifest that declares only
+  `integrations` still has something to publish in scope-only mode.
+* `ScopeCatalogFor` carries it, trimmed, as the catalog's last member.
+
 ## 📡 Expected Authorization Service Response
 
 The authorization service should return a JSON response in the following format:
@@ -1131,6 +1326,42 @@ answered with:
 
 The field is optional and additive. A service that never publishes it produces
 exactly the behavior this middleware had before the field existed.
+
+## 🔁 Requests made on a partner's behalf (`X-Lerian-Actor`)
+
+When a partner calls a product, and that product calls another Lerian product
+to serve the request, the second product also applies the partner's own rules
+for it. `Authorize` takes part on both sides:
+
+1. **The product the partner called.** When the authorized credential is a
+   partner credential (it carries the `partner` claim), `Authorize` stores its
+   raw bearer on the request context with `actor.ContextWithToken`
+   (`lib-commons/v7/commons/net/http/actor`). A user or plain application token
+   stores nothing.
+2. **Its outbound call.** The product wraps the HTTP client of each Lerian
+   service it calls with `actor.NewTransport(base, "<that service's host>")`,
+   which sends the bearer in `X-Lerian-Actor` to that host only.
+3. **The product being called.** When the request carries `X-Lerian-Actor` and
+   the caller's own token is a plain application (M2M) credential, `Authorize`
+   adds `"actorToken"` to the `/v1/authorize` body. The header is ignored for a
+   partner or user caller, and a request without it sends the same bytes as
+   before. The actor never reaches a span, and the decision cache keys on its
+   digest, so one partner's decision never answers another's.
+4. **The decision.** The access manager allows only when the caller is allowed
+   and the partner is too (or holds no grant for this product). A denial the
+   partner caused names a reason starting with `actor_`, answered **403** with
+   a code of its own, recoverable with `errors.As` as a `commons.Response`:
+
+   | Reason | Status | Code | Message |
+   |---|---|---|---|
+   | `actor_tenant` | 403 | `AUT-1016` | the partner this request was made on behalf of belongs to another tenant |
+   | `actor_suspended` | 403 | `AUT-1017` | the partner this request was made on behalf of is suspended |
+   | `actor_expired`, `actor_invalid` | 403 | `AUT-1018` | the partner this request was made on behalf of is outside its validity period or its credential is no longer valid |
+   | `actor_permission`, `actor_scope`, any other `actor_*` | 403 | `AUT-1019` | the partner this request was made on behalf of is not allowed to perform it |
+
+   It stays 403, not 401: the caller's own credential is fine and must not be
+   re-issued. Permission and scope are not told apart, as for a direct partner
+   call.
 
 ## 🔒 gRPC usage
 

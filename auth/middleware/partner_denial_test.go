@@ -75,8 +75,13 @@ func TestAuthorize_CachedPartnerDenialKeepsItsCode(t *testing.T) {
 		cache:   newDecisionCache(time.Minute),
 	})
 
+	// One token for both requests: normalUserClaims stamps the current second,
+	// and a token minted on each side of a second boundary is a different
+	// credential, which the cache rightly does not share.
+	token := createTestJWT(normalUserClaims())
+
 	for range 2 {
-		gatedRequest(t, app, createTestJWT(normalUserClaims()))
+		gatedRequest(t, app, token)
 
 		var commonsErr commons.Response
 

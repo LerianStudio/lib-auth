@@ -36,6 +36,59 @@ type Principal struct {
 	// carry none). In multi-tenant deployments the tenant-manager remains the
 	// authority on which tenant a request belongs to.
 	TenantID string
+
+	// SourceService is the token's "sourceService" claim copied VERBATIM and
+	// published ONLY for application tokens; it is empty for normal-user tokens
+	// and whenever the claim is absent or not a string. It names the service a
+	// machine credential acts on behalf of, and unlike Sub it is identical across
+	// every credential that service holds, so a multi-tenant producer served by
+	// one application per tenant keeps one SourceService where it has many Subs.
+	// The credential issuer stamps it, but this library publishes it with the same
+	// provenance as every other claim on the Principal, and that depends on the
+	// mode: when the authorization service vouches for the token, or when local
+	// signature verification is configured, a caller cannot choose its value. With
+	// PrincipalRequiredWhenDisabled and no verification keys there is no trust
+	// anchor, the claim is SELF-ASSERTED, and any caller can present any value (see
+	// the trust-boundary warning in the README). A consumer that uses it as an
+	// identity must not rely on it in that mode.
+	//
+	// The library never trims, lower-cases or validates it, and never lets it
+	// affect authorization or PrincipalFromContext's validity rules. Marker values
+	// the issuer writes for "no declared source" (for example "undeclared") are
+	// published as-is: the consumer decides whether such a value may identify
+	// anyone, and an identity decision should refuse an empty or marker value,
+	// which IsDeclaredSourceService reports.
+	//
+	// PrincipalFromContext reports it only under inversion
+	// (AUTH_M2M_INVERSION_ENABLED=true): under the legacy model an application's
+	// Subject is a fabricated role, so the accessor reports no Principal at all.
+	// RequireSourceService decides on it under BOTH models, since the authorization
+	// round-trip vouched for the whole token either way. When authorization is
+	// disabled, PrincipalRequiredWhenDisabled must be set in addition to inversion:
+	// the no-round-trip path rejects an application token while inversion is off.
+	// A credential issued before the issuer started stamping the claim carries none
+	// and reads as empty until it is rotated.
+	SourceService string
+}
+
+// UndeclaredSourceService is the marker the credential issuer writes into the
+// sourceService claim of an application created without a source. It names nobody.
+const UndeclaredSourceService = "undeclared"
+
+// IsDeclaredSourceService reports whether v names a service: it is false for the
+// empty string, for a whitespace-only value and for UndeclaredSourceService
+// (compared after trimming and ignoring case, so the helper only ever errs toward
+// refusing). A consumer that uses Principal.SourceService as an identity must
+// refuse the Principal when this returns false, instead of carrying its own copy
+// of the marker.
+//
+// It is a shape check, not authentication: it says nothing about whether the
+// value is trustworthy (see the trust-boundary note on Principal.SourceService)
+// and it does not change what Principal publishes, which stays verbatim.
+func IsDeclaredSourceService(v string) bool {
+	v = strings.TrimSpace(v)
+
+	return v != "" && !strings.EqualFold(v, UndeclaredSourceService)
 }
 
 // principalContextKey is the typed key under which Authorize stores the
@@ -85,9 +138,12 @@ func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 	sub, _ := claims["sub"].(string)
 	clientID, _ := claims["azp"].(string)
 	tenantID, _ := claims["tenantId"].(string)
+	sourceService, _ := claims["sourceService"].(string)
 
 	if userType == application {
 		owner = ""
+	} else {
+		sourceService = ""
 	}
 
 	return Principal{
@@ -97,6 +153,8 @@ func principalFromClaims(claims jwt.MapClaims, subject string) Principal {
 		Subject:  subject,
 		ClientID: clientID,
 		TenantID: tenantID,
+
+		SourceService: sourceService,
 	}
 }
 
@@ -195,6 +253,26 @@ func RequireHuman() fiber.Handler {
 // round-trip behind Authorize is the trust anchor, as it is for every other route.
 func RequireApplication() fiber.Handler {
 	return requirePrincipalType(application)
+}
+
+// RequireSourceService admits only an application principal whose sourceService
+// claim is exactly service: a missing Principal is 401, any other caller 403. Mount
+// AFTER Authorize. It decides under both authorization models, because the
+// authorization round-trip vouched for the whole token even where the Subject is a
+// fabricated role; it never reads Subject. An empty or marker service admits nobody.
+func RequireSourceService(service string) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		p, ok := c.Context().Value(principalContextKey{}).(Principal)
+		if !ok {
+			return fiber.ErrUnauthorized
+		}
+
+		if p.Type != application || !IsDeclaredSourceService(p.SourceService) || p.SourceService != service {
+			return fiber.ErrForbidden
+		}
+
+		return c.Next()
+	}
 }
 
 // requirePrincipalType is the shared body of the two type guards. The split

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/LerianStudio/lib-auth/v5/auth/bearer"
+	"github.com/LerianStudio/lib-commons/v7/commons/net/http/actor"
 )
 
 // HTTPErrorHandler renders a refusal of AuthorizeHTTP. err is always a
@@ -197,6 +198,23 @@ func (v netHTTPRequest) contentType() string {
 // route relying on the manifest scope derives no dimension.
 func (v netHTTPRequest) route() (string, string) {
 	return v.r.Method, serveMuxRoutePath(v.r.Pattern)
+}
+
+// relayedActor reads the first actor header line as net/http parsed it, its
+// surrounding whitespace already trimmed, so a blank header reads as none.
+func (v netHTTPRequest) relayedActor() string {
+	return v.r.Header.Get(actor.HeaderName)
+}
+
+// scopeOf reads the route the ServeMux pattern names (see route).
+func (v netHTTPRequest) scopeOf(r *routeScope) (ScopeDeclaration, string) {
+	return r.forRoute(v.route())
+}
+
+// servingScope returns s unchanged: r.Pattern already names the route serving
+// the request, so there is no mount prefix to resolve.
+func (v netHTTPRequest) servingScope(s ScopeDeclaration) (ScopeDeclaration, string) {
+	return s, ""
 }
 
 // maxAuthorizeHTTPBodyBytes caps the body AuthorizeHTTP reads for a body-scoped

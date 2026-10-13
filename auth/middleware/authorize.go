@@ -7,6 +7,7 @@ import (
 
 	"github.com/LerianStudio/lib-auth/v5/auth/bearer"
 	"github.com/LerianStudio/lib-commons/v7/commons"
+	"github.com/LerianStudio/lib-commons/v7/commons/net/http/actor"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -33,11 +34,17 @@ type requestView interface {
 	queryValues(key string) (values []string, caseVariant bool)
 	// contentType returns the request's Content-Type header.
 	contentType() string
-	// route returns the method and the registered path of the route serving the
-	// request, its parameters written ":name", which is how a route that relies
-	// on its product's manifest scope finds its dimensions. A path the adapter
-	// cannot tell is "", and such a route derives no path dimension.
-	route() (method, path string)
+	// relayedActor returns the partner bearer the request relays in
+	// actor.HeaderName, verbatim, or "" when it relays none.
+	relayedActor() string
+	// scopeOf returns the scope of the route serving the request, worked out by
+	// r against its product's catalog, and a non-empty description of what is
+	// wrong when the route cannot be honoured.
+	scopeOf(r *routeScope) (ScopeDeclaration, string)
+	// servingScope returns s read on the route that actually serves the request
+	// when the adapter saw it through a mount prefix, or s itself; a non-empty
+	// string says why no single route does.
+	servingScope(s ScopeDeclaration) (ScopeDeclaration, string)
 	// body returns the request body, read for a partner-bound credential on a
 	// route that declares dimensions in it; a body the adapter cannot read is
 	// the refusal, carrying the status it is refused with.
@@ -77,7 +84,7 @@ func (route authorizeRoute) scopeFor(req requestView) (ScopeDeclaration, string)
 		return ScopeDeclaration{}, route.declErr
 	}
 
-	return route.scope.forRoute(req.route())
+	return req.scopeOf(route.scope)
 }
 
 // authorizeOutcome is what the shared flow decided for one request. With neither
@@ -88,11 +95,14 @@ type authorizeOutcome struct {
 	// scope is set only for a partner-bound credential, so a handler can never
 	// mistake "this caller is not a partner" for "this partner has no restriction".
 	scope *RequestScope
+	// actor is the partner bearer the service's outbound clients relay, or ""
+	// (see actorToPublish).
+	actor string
 }
 
-// publish returns ctx carrying the principal and, for a partner-bound credential,
-// the request scope. Both are layered on the SAME context, principal first, so
-// neither value can overwrite the other.
+// publish returns ctx carrying the principal, for a partner-bound credential the
+// request scope, and the actor to relay when there is one. All are layered on the
+// SAME context, principal first, so no value can overwrite another.
 func (o authorizeOutcome) publish(ctx context.Context) context.Context {
 	if o.principal != nil {
 		ctx = context.WithValue(ctx, principalContextKey{}, *o.principal)
@@ -100,6 +110,10 @@ func (o authorizeOutcome) publish(ctx context.Context) context.Context {
 
 	if o.scope != nil {
 		ctx = context.WithValue(ctx, requestScopeContextKey{}, *o.scope)
+	}
+
+	if o.actor != "" {
+		ctx = actor.ContextWithToken(ctx, o.actor)
 	}
 
 	return ctx
@@ -187,6 +201,7 @@ func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorize
 	// the framework's notion of it; with no trusted proxies it is empty and no IP
 	// is forwarded (see resolveClientIP for why there is no socket-peer fallback).
 	clientIP := req.clientIP(auth)
+	relayed := req.relayedActor()
 
 	resolution, principal, questions, refusal := auth.authorizeRequest(ctx, req, authzParams{
 		product:     route.product,
@@ -194,6 +209,7 @@ func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorize
 		action:      route.action,
 		accessToken: accessToken,
 		clientIP:    clientIP,
+		actorToken:  relayed,
 	}, scope)
 	if refusal != nil {
 		return authorizeOutcome{refusal: refusal}
@@ -201,7 +217,10 @@ func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorize
 
 	recordPrincipalType(span, principal)
 
-	outcome := authorizeOutcome{principal: &principal}
+	outcome := authorizeOutcome{
+		principal: &principal,
+		actor:     actorToPublish(authzCaller{principal: principal, partner: resolution.partner}, accessToken, relayed),
+	}
 
 	if resolution.partner != "" {
 		outcome.scope = &RequestScope{
@@ -219,9 +238,9 @@ func (auth *AuthClient) decideWithRoundTrip(ctx context.Context, route authorize
 // all of them, stopping at the first that is not allowed. It returns the
 // last resolution and the questions asked, or the refusal.
 //
-// The scope is read only for a partner-bound credential. The authorization
-// service consumes attributes only to decide for a partner; every other
-// credential is asked one question, without attributes, exactly as on a route
+// The scope is read only for a partner-bound credential, or an application
+// relaying one (the actor). The authorization service consumes attributes only
+// to decide for a partner; every other credential is asked one question, without attributes, exactly as on a route
 // that declares no scope, and its request is never read for one.
 //
 // The questions are asked one after another, not concurrently: they are few
@@ -251,7 +270,7 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, req requestView, p
 	// The scope is read before the questions' budget starts: under AuthorizeHTTP
 	// it may read the body from the client, and a slow upload must not spend the
 	// Access Manager's time, be answered 503, or count as its failure.
-	questions, refusal := auth.scopeQuestions(ctx, req, scope, caller)
+	questions, refusal := auth.scopeQuestions(ctx, req, scope, caller, params.actorToken)
 	if refusal != nil {
 		return authzResolution{}, Principal{}, nil, refusal
 	}
@@ -283,19 +302,27 @@ func (auth *AuthClient) authorizeRequest(ctx context.Context, req requestView, p
 	return resolution, principal, questions, nil
 }
 
-// scopeQuestions reads, for a partner-bound caller, the questions the request
-// makes on the route's scope. Any other caller makes none. A declared dimension
+// scopeQuestions reads, for a partner-bound caller or an application relaying
+// a partner, the questions the request makes on the route's scope. Any other
+// caller makes none. A declared dimension
 // the request does not carry is refused 403 here, before the round-trip: an
 // identifier with no value cannot be matched against a partner's scope, and
 // sending it absent would quietly ask a question the route did not promise. A
 // request whose scope cannot be read for the declared dimensions is the caller's
 // to fix: refused before any call, naming the field, and never let through.
-func (auth *AuthClient) scopeQuestions(ctx context.Context, req requestView, scope ScopeDeclaration, caller authzCaller) ([]map[string]string, *RefusalError) {
-	if caller.partner == "" {
+func (auth *AuthClient) scopeQuestions(ctx context.Context, req requestView, scope ScopeDeclaration, caller authzCaller, relayed string) ([]map[string]string, *RefusalError) {
+	if !caller.asksAsPartner(relayed) {
 		return nil, nil
 	}
 
-	readings, missing := resolveAttributes(req, scope.dims)
+	scope, unresolved := req.servingScope(scope)
+	if unresolved != "" {
+		logErrorf(ctx, auth.Logger, "Scope cannot be read for a request seen through a mount prefix: %s; denying (fail closed)", unresolved)
+
+		return nil, statusRefusal(http.StatusForbidden)
+	}
+
+	readings, missing := resolveAttributes(req, scope)
 	if missing != "" {
 		logErrorf(ctx, auth.Logger, "Declared scope dimension %q carries no value in this request; denying (fail closed)", missing)
 
@@ -330,10 +357,15 @@ func refusalFor(resolution authzResolution) *RefusalError {
 		// The denial reason picks the word: a credential the Access Manager called
 		// finished is answered 401 so its holder re-issues it; every other denial
 		// stays 403. A finished partner is named as the cause, with the code the
-		// authorization service answers a token request for it with.
+		// authorization service answers a token request for it with, and a denial
+		// the relayed actor caused names that partner as the cause.
 		status := denialStatus(resolution.reason)
 
 		if response, ok := partnerDenial(resolution.reason); ok {
+			return accessManagerRefusalAt(status, response)
+		}
+
+		if response, ok := actorDenial(resolution.reason); ok {
 			return accessManagerRefusalAt(status, response)
 		}
 

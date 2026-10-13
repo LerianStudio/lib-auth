@@ -63,6 +63,16 @@ type DeclarationManifest struct {
 	// hashed as the LAST member; false is omitted, so a manifest that does not
 	// opt in publishes the same bytes and hash as before the field existed.
 	Partners bool `json:"partners,omitempty" yaml:"partners,omitempty"`
+	// Integrations names the Lerian services this product calls on a request's
+	// behalf (e.g. "midaz", "plugin-crm"). A partner's request relayed to one of
+	// them is decided there by the partner's own rules for that service too, so
+	// a console offers to set those rules when the partner is granted this
+	// product. Entries are non-empty, unique and distinct from Service, all
+	// compared trimmed and case-insensitively. It is published with the full
+	// manifest and with the scope alone, and hashed as the LAST member; omitted
+	// when empty, so a manifest that declares none publishes the same bytes and
+	// hash as before the field existed.
+	Integrations []string `json:"integrations,omitempty" yaml:"integrations,omitempty"`
 }
 
 // The places a request carries a dimension's value. A catalog dimension is read
@@ -214,6 +224,23 @@ type DeclarationGrant struct {
 type DeclarationM2M struct {
 	Exposed bool     `json:"exposed,omitempty" yaml:"exposed,omitempty"`
 	Needs   []string `json:"needs,omitempty" yaml:"needs,omitempty"`
+	// Roles names the declared roles an M2M caller of this service assumes: the
+	// roles the access manager writes into the service's governing permission
+	// ("{service}-m2m-permission"). Each entry is the bare name of a role in
+	// Roles, and the field requires Exposed.
+	//
+	// It is what lets a manifest say two things the rest of the schema cannot:
+	// which tier the machine identity holds, instead of the access manager
+	// guessing one, and a permission held by that identity ALONE — grant the
+	// permission to a role that binds no group and name the role here. Such a
+	// role has no human holder: the reconciler converges every declared role's
+	// groups to its granted_to, so a group bound to it by hand is cleared on the
+	// next apply.
+	//
+	// Optional. Left out, the access manager keeps its previous behaviour. It is
+	// the LAST member and omitted when empty, so a manifest that declares none
+	// publishes the same bytes and hash as before the field existed.
+	Roles []string `json:"roles,omitempty" yaml:"roles,omitempty"`
 }
 
 // canonicalManifest is the deterministic, hashable projection of a manifest. It
@@ -243,6 +270,10 @@ type canonicalManifest struct {
 	// it (see scopeOnlyManifest); the full manifest carries each level inside
 	// its permission, so this member is omitted there and its hash is unchanged.
 	Levels []DeclarationLevel `json:"levels,omitempty"`
+	// Integrations is appended LAST, in the full and in the scope-only hash
+	// alike, and omitted when empty, so a manifest that declares none hashes as
+	// before.
+	Integrations []string `json:"integrations,omitempty"`
 }
 
 // DeclarationLevel is the level a permission declares, without its roles and
@@ -256,17 +287,18 @@ type DeclarationLevel struct {
 }
 
 // scopeOnlyManifest is the body a scope-only publication sends: the service and
-// version that identify it, the scope, the partner opt-in, and the permissions'
-// levels. Every other section is left out, so the receiver replaces nothing but
-// those. Levels is the LAST member and omitted when no permission declares a
-// level, so such a manifest publishes the same bytes and hash as before it
-// existed.
+// version that identify it, the scope, the partner opt-in, the permissions'
+// levels and the integrations. Every other section is left out, so the receiver
+// replaces nothing but those. Levels and then Integrations close it, each
+// omitted when empty, so a manifest without them publishes the same bytes and
+// hash as before they existed.
 type scopeOnlyManifest struct {
-	Service  string             `json:"service,omitempty"`
-	Version  int                `json:"version,omitempty"`
-	Scope    *DeclarationScope  `json:"scope,omitempty"`
-	Partners bool               `json:"partners,omitempty"`
-	Levels   []DeclarationLevel `json:"levels,omitempty"`
+	Service      string             `json:"service,omitempty"`
+	Version      int                `json:"version,omitempty"`
+	Scope        *DeclarationScope  `json:"scope,omitempty"`
+	Partners     bool               `json:"partners,omitempty"`
+	Levels       []DeclarationLevel `json:"levels,omitempty"`
+	Integrations []string           `json:"integrations,omitempty"`
 }
 
 // ManifestError reports an invalid or unparseable manifest. It is the client-side
@@ -334,11 +366,12 @@ func (m *DeclarationManifest) scopeOnly() *scopeOnlyManifest {
 	}
 
 	return &scopeOnlyManifest{
-		Service:  m.Service,
-		Version:  m.Version,
-		Scope:    published.Scope,
-		Partners: m.Partners,
-		Levels:   levels,
+		Service:      m.Service,
+		Version:      m.Version,
+		Scope:        published.Scope,
+		Partners:     m.Partners,
+		Levels:       levels,
+		Integrations: m.Integrations,
 	}
 }
 
@@ -354,20 +387,21 @@ func (s *scopeOnlyManifest) wireJSON() ([]byte, error) {
 
 // CanonicalHash hashes the scope-only body the way DeclarationManifest.
 // CanonicalHash hashes the full one: the same canonical member order, the
-// version left out, and the levels as the LAST member.
+// version left out, then the levels and the integrations as the LAST members.
 func (s *scopeOnlyManifest) CanonicalHash() (string, error) {
 	return hashCanonical(canonicalManifest{
-		Service:  s.Service,
-		Scope:    s.Scope,
-		Partners: s.Partners,
-		Levels:   s.Levels,
+		Service:      s.Service,
+		Scope:        s.Scope,
+		Partners:     s.Partners,
+		Levels:       s.Levels,
+		Integrations: s.Integrations,
 	})
 }
 
 // hasScopeCatalog reports whether a scope-only publication has anything to
-// send: a scope section, or the partner opt-in.
+// send: a scope section, the partner opt-in, or the integrations.
 func (m *DeclarationManifest) hasScopeCatalog() bool {
-	return m.Scope != nil || m.Partners
+	return m.Scope != nil || m.Partners || len(m.Integrations) > 0
 }
 
 // serverProjection is the manifest the identity service knows: everything but
@@ -412,6 +446,8 @@ func (m *DeclarationManifest) CanonicalHash() (string, error) {
 		M2M:         published.M2M,
 		Scope:       published.Scope,
 		Partners:    published.Partners,
+
+		Integrations: published.Integrations,
 	})
 }
 

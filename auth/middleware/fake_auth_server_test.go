@@ -44,6 +44,7 @@ type authorizeRequestBody struct {
 	Sub        string            `json:"sub"`
 	Resource   string            `json:"resource"`
 	Attributes map[string]string `json:"attributes"`
+	ActorToken string            `json:"actorToken"`
 }
 
 func newFakeAuthServer(t *testing.T, answer func(authorizeCall) any) *fakeAuthServer {

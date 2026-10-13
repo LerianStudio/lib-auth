@@ -122,9 +122,11 @@ func slowAuthServer(t *testing.T, delay time.Duration) (*httptest.Server, *atomi
 func TestAuthorize_BodyScope_OneDeadlineForTheWholeRequest(t *testing.T) {
 	t.Parallel()
 
+	// Three calls (3 x delay) overrun the timeout and one leaves it 450ms of
+	// headroom, so the positive control holds on a loaded -race run.
 	const (
-		delay   = 100 * time.Millisecond
-		timeout = 250 * time.Millisecond
+		delay   = 300 * time.Millisecond
+		timeout = 750 * time.Millisecond
 	)
 
 	srv, hits := slowAuthServer(t, delay)

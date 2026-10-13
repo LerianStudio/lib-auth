@@ -65,6 +65,11 @@ func accountCatalog() []Dimension {
 	return append(manifestDims(), Dim("accountId", FromPath).At("account_id"))
 }
 
+// capQuestionsTestConfig is the app.Test budget of a request that may ask up to
+// twice the cap of questions: one round-trip each outlasts the default
+// one-second test timeout under -race.
+var capQuestionsTestConfig = fiber.TestConfig{Timeout: 10 * time.Second}
+
 func doRequest(t *testing.T, app *fiber.App, method, target, token, body string) bodyResult {
 	t.Helper()
 
@@ -72,9 +77,7 @@ func doRequest(t *testing.T, app *fiber.App, method, target, token, body string)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	// A request asking up to twice the cap of questions outlasts the default
-	// one-second test timeout under -race.
-	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
+	resp, err := app.Test(req, capQuestionsTestConfig)
 	require.NoError(t, err)
 
 	defer resp.Body.Close()
@@ -93,19 +96,7 @@ type bodyResult struct {
 func doPost(t *testing.T, app *fiber.App, target, token, body string) bodyResult {
 	t.Helper()
 
-	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := app.Test(req)
-	require.NoError(t, err)
-
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-
-	return bodyResult{status: resp.StatusCode, body: string(raw)}
+	return doRequest(t, app, http.MethodPost, target, token, body)
 }
 
 // handlerProbe counts handler invocations and keeps the body the handler read.

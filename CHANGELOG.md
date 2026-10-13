@@ -1,3 +1,131 @@
+## [5.8.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.8.0-beta.1...v5.8.0-beta.2) (2026-10-10)
+
+
+### Features
+
+* **middleware:** carry the status of a refused token request ([f7f4268](https://github.com/LerianStudio/lib-auth/commit/f7f4268b7b3069eb014c3162622e0eda85c0a97c))
+* **declaration:** report where the declaration publication stands ([30268b9](https://github.com/LerianStudio/lib-auth/commit/30268b9e57b51e842a75ee39f6025d9cacb02f52))
+
+
+### Bug Fixes
+
+* **declaration:** keep a publication with nothing to send idle ([f8ad83a](https://github.com/LerianStudio/lib-auth/commit/f8ad83a528c3d9fb169dde8eae998f714cad8e11))
+* **declaration:** retry the boot publish until accepted or refused ([41014e4](https://github.com/LerianStudio/lib-auth/commit/41014e4af1aafbeea9803c664c8467252250c1a1))
+* **declaration:** reuse the token and stop on a refused credential ([8597fbb](https://github.com/LerianStudio/lib-auth/commit/8597fbb8a1df6abf8b9400628d1ec0e139ac827f))
+
+## [5.8.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.7.0...v5.8.0-beta.1) (2026-10-09)
+
+
+### Features
+
+* **middleware:** admit one calling service by its sourceService claim ([aa31854](https://github.com/LerianStudio/lib-auth/commit/aa318548cfdb635134eb2e16536a1c694c258aba))
+
+## [5.7.0](https://github.com/LerianStudio/lib-auth/compare/v5.6.0...v5.7.0) (2026-10-09)
+
+
+### Features
+
+* **declaration:** let a manifest name the services it calls on a request's behalf ([16de2db](https://github.com/LerianStudio/lib-auth/commit/16de2db3b47c778b979df6c9867949de1e89d57c))
+* **middleware:** relay a partner as the actor of the requests it causes ([ad3c329](https://github.com/LerianStudio/lib-auth/commit/ad3c329ff84a655e6933d6734d715bf293c667ed))
+
+
+### Bug Fixes
+
+* **middleware:** ask the relayed actor's question in the product and the requested scope ([64c63b7](https://github.com/LerianStudio/lib-auth/commit/64c63b7ee2754ba4aae33429e218d579c61ba797))
+* **middleware:** read the relayed actor verbatim and pin a blank header as absent ([300c809](https://github.com/LerianStudio/lib-auth/commit/300c809dfa74ca58d1a5690587420dab02123475))
+* **declaration:** refuse a wildcard in integrations ([9df64d4](https://github.com/LerianStudio/lib-auth/commit/9df64d4bd7d3ea867027eb6fe1cbc464e5e8b894)), closes [caradhras#263](https://github.com/LerianStudio/caradhras/issues/263)
+* **middleware:** republish the relayed actor of an authorized application caller ([bc28f17](https://github.com/LerianStudio/lib-auth/commit/bc28f1750b1983f675beca95301444a780865add))
+
+## [5.7.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.7.0-beta.2...v5.7.0-beta.3) (2026-10-09)
+
+## [5.7.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.7.0-beta.1...v5.7.0-beta.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **middleware:** ask the relayed actor's question in the product and the requested scope ([64c63b7](https://github.com/LerianStudio/lib-auth/commit/64c63b7ee2754ba4aae33429e218d579c61ba797))
+
+## [5.7.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.6.0...v5.7.0-beta.1) (2026-10-09)
+
+
+### Features
+
+* **declaration:** let a manifest name the services it calls on a request's behalf ([16de2db](https://github.com/LerianStudio/lib-auth/commit/16de2db3b47c778b979df6c9867949de1e89d57c))
+* **middleware:** relay a partner as the actor of the requests it causes ([ad3c329](https://github.com/LerianStudio/lib-auth/commit/ad3c329ff84a655e6933d6734d715bf293c667ed))
+
+
+### Bug Fixes
+
+* **middleware:** read the relayed actor verbatim and pin a blank header as absent ([300c809](https://github.com/LerianStudio/lib-auth/commit/300c809dfa74ca58d1a5690587420dab02123475))
+* **declaration:** refuse a wildcard in integrations ([9df64d4](https://github.com/LerianStudio/lib-auth/commit/9df64d4bd7d3ea867027eb6fe1cbc464e5e8b894)), closes [caradhras#263](https://github.com/LerianStudio/caradhras/issues/263)
+* **middleware:** republish the relayed actor of an authorized application caller ([bc28f17](https://github.com/LerianStudio/lib-auth/commit/bc28f1750b1983f675beca95301444a780865add))
+
+## [5.6.0](https://github.com/LerianStudio/lib-auth/compare/v5.5.0...v5.6.0) (2026-10-08)
+
+
+### Features
+
+* **declaration:** accept the service's AuthClient in WireFromEnv ([12d7071](https://github.com/LerianStudio/lib-auth/commit/12d7071c29793be8634996749b53327bc4ebc0b6)), closes [#5160](https://github.com/LerianStudio/lib-auth/issues/5160)
+* **middleware:** add IsDeclaredSourceService and document SourceService preconditions ([80cacc0](https://github.com/LerianStudio/lib-auth/commit/80cacc063ab2ab0bc15c25ef7683e4f4f0871445))
+* **middleware:** expose the verified sourceService claim on Principal ([284f232](https://github.com/LerianStudio/lib-auth/commit/284f2323c325e401c1556c9dcefbf8fb76c37b37))
+* **declaration:** let a manifest name the roles its M2M callers assume ([13c9a0e](https://github.com/LerianStudio/lib-auth/commit/13c9a0eae129dc76341bffd2757137b11ab73cb8))
+* **middleware:** resolve the route a mounted Authorize is for ([8b2f345](https://github.com/LerianStudio/lib-auth/commit/8b2f34533650fb811eda8d7c9dc6c5039e76b562))
+* **middleware:** state the route a prefix-mounted Authorize is for ([7677a1f](https://github.com/LerianStudio/lib-auth/commit/7677a1ff791f3c0b04c18c10a1a35b92e6615665))
+
+
+### Bug Fixes
+
+* **middleware:** never compile a route template with no segment ([b2eec3b](https://github.com/LerianStudio/lib-auth/commit/b2eec3b9a777b1494bee5a368e263b8aabb1de30))
+* **middleware:** read the scope of the route Fiber serves ([30d21bb](https://github.com/LerianStudio/lib-auth/commit/30d21bbcdea210ffded2cce8ee929827606cdb98))
+* **middleware:** resolve a mounted request under the app's own routing ([0364b1a](https://github.com/LerianStudio/lib-auth/commit/0364b1acc805885ac9074d5c20e876c64eeb781a))
+
+
+### Performance Improvements
+
+* **middleware:** resolve a mounted request only when its scope is read ([8f0207f](https://github.com/LerianStudio/lib-auth/commit/8f0207ff2f83f8c68d591cb983c91280ea764617))
+
+## [5.6.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v5.6.0-beta.3...v5.6.0-beta.4) (2026-10-08)
+
+
+### Features
+
+* **declaration:** accept the service's AuthClient in WireFromEnv ([12d7071](https://github.com/LerianStudio/lib-auth/commit/12d7071c29793be8634996749b53327bc4ebc0b6)), closes [#5160](https://github.com/LerianStudio/lib-auth/issues/5160)
+* **declaration:** let a manifest name the roles its M2M callers assume ([13c9a0e](https://github.com/LerianStudio/lib-auth/commit/13c9a0eae129dc76341bffd2757137b11ab73cb8))
+
+## [5.6.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.6.0-beta.2...v5.6.0-beta.3) (2026-10-07)
+
+
+### Features
+
+* **middleware:** add IsDeclaredSourceService and document SourceService preconditions ([80cacc0](https://github.com/LerianStudio/lib-auth/commit/80cacc063ab2ab0bc15c25ef7683e4f4f0871445))
+
+## [5.6.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.6.0-beta.1...v5.6.0-beta.2) (2026-10-07)
+
+
+### Features
+
+* **middleware:** resolve the route a mounted Authorize is for ([8b2f345](https://github.com/LerianStudio/lib-auth/commit/8b2f34533650fb811eda8d7c9dc6c5039e76b562))
+* **middleware:** state the route a prefix-mounted Authorize is for ([7677a1f](https://github.com/LerianStudio/lib-auth/commit/7677a1ff791f3c0b04c18c10a1a35b92e6615665))
+
+
+### Bug Fixes
+
+* **middleware:** never compile a route template with no segment ([b2eec3b](https://github.com/LerianStudio/lib-auth/commit/b2eec3b9a777b1494bee5a368e263b8aabb1de30))
+* **middleware:** read the scope of the route Fiber serves ([30d21bb](https://github.com/LerianStudio/lib-auth/commit/30d21bbcdea210ffded2cce8ee929827606cdb98))
+* **middleware:** resolve a mounted request under the app's own routing ([0364b1a](https://github.com/LerianStudio/lib-auth/commit/0364b1acc805885ac9074d5c20e876c64eeb781a))
+
+
+### Performance Improvements
+
+* **middleware:** resolve a mounted request only when its scope is read ([8f0207f](https://github.com/LerianStudio/lib-auth/commit/8f0207ff2f83f8c68d591cb983c91280ea764617))
+
+## [5.6.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.5.0...v5.6.0-beta.1) (2026-10-07)
+
+
+### Features
+
+* **middleware:** expose the verified sourceService claim on Principal ([284f232](https://github.com/LerianStudio/lib-auth/commit/284f2323c325e401c1556c9dcefbf8fb76c37b37))
+
 ## [5.5.0](https://github.com/LerianStudio/lib-auth/compare/v5.4.2...v5.5.0) (2026-10-06)
 
 
