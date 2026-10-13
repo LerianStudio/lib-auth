@@ -510,22 +510,26 @@ func TestRequireSourceService(t *testing.T) {
 	legacy.Subject = "admin/plugin-br-pix-jd-editor-role"
 
 	cases := []struct {
-		name    string
-		service string
-		seed    *Principal
-		want    int
+		name     string
+		services []string
+		seed     *Principal
+		want     int
 	}{
-		{name: "missing_principal_is_401", service: "jd-courier", seed: nil, want: http.StatusUnauthorized},
-		{name: "the_service_reaches_the_handler", service: "jd-courier", seed: courier("jd-courier"), want: http.StatusOK},
-		{name: "legacy_fabricated_subject_reaches_the_handler", service: "jd-courier", seed: legacy, want: http.StatusOK},
-		{name: "another_source_is_403", service: "jd-courier", seed: courier("plugin-br-pix-jd"), want: http.StatusForbidden},
-		{name: "undeclared_is_403", service: "jd-courier", seed: courier(UndeclaredSourceService), want: http.StatusForbidden},
-		{name: "absent_claim_is_403", service: "jd-courier", seed: courier(""), want: http.StatusForbidden},
-		{name: "match_is_exact", service: "jd-courier", seed: courier(" JD-Courier"), want: http.StatusForbidden},
-		{name: "empty_service_admits_nobody", service: "", seed: courier(""), want: http.StatusForbidden},
-		{name: "marker_service_admits_nobody", service: UndeclaredSourceService, seed: courier(UndeclaredSourceService), want: http.StatusForbidden},
+		{name: "missing_principal_is_401", services: []string{"jd-courier"}, seed: nil, want: http.StatusUnauthorized},
+		{name: "the_service_reaches_the_handler", services: []string{"jd-courier"}, seed: courier("jd-courier"), want: http.StatusOK},
+		{name: "legacy_fabricated_subject_reaches_the_handler", services: []string{"jd-courier"}, seed: legacy, want: http.StatusOK},
+		{name: "another_source_is_403", services: []string{"jd-courier"}, seed: courier("plugin-br-pix-jd"), want: http.StatusForbidden},
+		{name: "undeclared_is_403", services: []string{"jd-courier"}, seed: courier(UndeclaredSourceService), want: http.StatusForbidden},
+		{name: "absent_claim_is_403", services: []string{"jd-courier"}, seed: courier(""), want: http.StatusForbidden},
+		{name: "match_is_exact", services: []string{"jd-courier"}, seed: courier(" JD-Courier"), want: http.StatusForbidden},
+		{name: "empty_service_admits_nobody", services: []string{""}, seed: courier(""), want: http.StatusForbidden},
+		{name: "marker_service_admits_nobody", services: []string{UndeclaredSourceService}, seed: courier(UndeclaredSourceService), want: http.StatusForbidden},
+		{name: "no_service_admits_nobody", services: nil, seed: courier("jd-courier"), want: http.StatusForbidden},
+		{name: "each_service_of_a_set_reaches_the_handler", services: []string{"jd-courier", "jd-consultores"}, seed: courier("jd-consultores"), want: http.StatusOK},
+		{name: "a_source_outside_the_set_is_403", services: []string{"jd-courier", "jd-consultores"}, seed: courier("plugin-br-pix-jd"), want: http.StatusForbidden},
+		{name: "a_marker_in_the_set_admits_nobody", services: []string{"jd-courier", UndeclaredSourceService}, seed: courier(UndeclaredSourceService), want: http.StatusForbidden},
 		{
-			name: "normal_user_is_403", service: "jd-courier", want: http.StatusForbidden,
+			name: "normal_user_is_403", services: []string{"jd-courier"}, want: http.StatusForbidden,
 			seed: &Principal{Type: normalUser, Owner: "acme-org", Sub: "user123", Subject: "acme-org/user123", SourceService: "jd-courier"},
 		},
 	}
@@ -534,7 +538,7 @@ func TestRequireSourceService(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			resp := guardResponse(t, RequireSourceService(tc.service), tc.seed)
+			resp := guardResponse(t, RequireSourceService(tc.services...), tc.seed)
 			assert.Equal(t, tc.want, resp.StatusCode)
 		})
 	}

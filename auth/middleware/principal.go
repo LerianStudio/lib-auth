@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/LerianStudio/lib-observability/v4/tracing"
@@ -260,18 +261,19 @@ func RequireApplication() fiber.Handler {
 }
 
 // RequireSourceService admits only an application principal whose sourceService
-// claim is exactly service: a missing Principal is 401, any other caller 403. Mount
-// AFTER Authorize. It decides under both authorization models, because the
-// authorization round-trip vouched for the whole token even where the Subject is a
-// fabricated role; it never reads Subject. An empty or marker service admits nobody.
-func RequireSourceService(service string) fiber.Handler {
+// claim is exactly one of services: a missing Principal is 401, any other caller
+// 403. Mount AFTER Authorize. It decides under both authorization models, because
+// the authorization round-trip vouched for the whole token even where the Subject is
+// a fabricated role; it never reads Subject. No services, an empty one or a marker
+// admits nobody.
+func RequireSourceService(services ...string) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		p, ok := c.Context().Value(principalContextKey{}).(Principal)
 		if !ok {
 			return fiber.ErrUnauthorized
 		}
 
-		if p.Type != application || !IsDeclaredSourceService(p.SourceService) || p.SourceService != service {
+		if p.Type != application || !IsDeclaredSourceService(p.SourceService) || !slices.Contains(services, p.SourceService) {
 			return fiber.ErrForbidden
 		}
 
