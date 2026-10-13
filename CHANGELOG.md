@@ -1,3 +1,10 @@
+## [5.8.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.8.0-beta.2...v5.8.0-beta.3) (2026-10-13)
+
+
+### Features
+
+* **middleware:** admit a set of calling services in RequireSourceService ([4260ff3](https://github.com/LerianStudio/lib-auth/commit/4260ff31a2f9f39fdc9ad696947a2f9cc86edf46))
+
 ## [5.8.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.8.0-beta.1...v5.8.0-beta.2) (2026-10-10)
 
 
