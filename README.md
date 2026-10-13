@@ -372,7 +372,7 @@ that is the refusal to apply.
 `PrincipalFromContext` reports the field only under
 `AUTH_M2M_INVERSION_ENABLED=true`: under the legacy model an application's `Subject`
 is a fabricated role, so the accessor reports no `Principal` at all. A route that
-admits one calling service only should mount `RequireSourceService` (see
+admits named calling services only should mount `RequireSourceService` (see
 [Type guards](#type-guards)), which decides on the claim under both models. When
 authorization is disabled, `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=true` is required
 in addition to inversion: that flag alone does not publish an application
@@ -457,14 +457,15 @@ f.Post("/v1/operations/:id/resolution",
     operationHandler.Resolve)
 ```
 
-`RequireSourceService(service)` narrows a route to ONE calling service: it admits an
-application principal whose `sourceService` claim equals `service` exactly, answers
-403 to every other caller (a person, another service, an empty or `undeclared`
-claim) and 401 when no principal was published. Unlike `PrincipalFromContext` it
+`RequireSourceService(services...)` narrows a route to a fixed set of calling
+services: it admits an application principal whose `sourceService` claim equals one
+of `services` exactly, answers 403 to every other caller (a person, another service,
+an empty or `undeclared` claim) and 401 when no principal was published. No
+services, an empty one or `undeclared` in the set admits nobody. Unlike `PrincipalFromContext` it
 decides under both authorization models, because the authorization round-trip
 vouched for the whole token even where the legacy `Subject` is a fabricated role; it
 never reads `Subject`. The claim is only as strong as its issuer: whoever may create
-applications for the tenant can create one whose source is `service`. Under
+applications for the tenant can create one whose source is in the set. Under
 `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` with no verification keys the claim is
 self-asserted, so the guard proves nothing there.
 
