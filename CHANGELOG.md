@@ -1,3 +1,15 @@
+## [5.8.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v5.8.0-beta.3...v5.8.0-beta.4) (2026-10-14)
+
+
+### Features
+
+* **middleware:** check a request's own token and caller address ([bba92cf](https://github.com/LerianStudio/lib-auth/commit/bba92cf3fd0a9d8a77826635e957f62ed56e4734))
+
+
+### Bug Fixes
+
+* **middleware:** warn once when checkrequest runs without trusted proxies ([686788d](https://github.com/LerianStudio/lib-auth/commit/686788dce4fe5588138d1fd60df1c76dc14967d1))
+
 ## [5.8.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.8.0-beta.2...v5.8.0-beta.3) (2026-10-13)
 
 
