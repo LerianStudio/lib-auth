@@ -491,7 +491,7 @@ func minPrefixBits(addr netip.Addr) int {
 // a copy with a date on it precisely because the rule lives elsewhere and has
 // already moved twice.
 func (auth *AuthClient) resolveClientIP(c fiber.Ctx) string {
-	if len(auth.trustedProxies) == 0 {
+	if auth == nil || len(auth.trustedProxies) == 0 {
 		return ""
 	}
 

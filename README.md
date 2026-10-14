@@ -516,6 +516,9 @@ resolved yourself through your own trusted-proxy configuration. Never pass Fiber
 `X-Forwarded-For` header, which lets a caller pick the address the allowlist matches
 it against.
 
+Inside a Fiber handler, `CheckRequest(c, product, resource, action)` is the same call
+with the token and the caller IP taken from the request exactly as `Authorize` takes them.
+
 `Authorize` answers the same `503 Service Unavailable` on the wire for the same
 outage (see the refusal paragraph under **How It Works** above), so a rail's alarms
 can key on 503 across both surfaces.
