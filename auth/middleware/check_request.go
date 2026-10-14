@@ -9,5 +9,7 @@ import (
 // come from c exactly as Authorize derives them (TRUSTED_PROXIES walk included),
 // so the caller cannot choose the address the IP allowlist matches.
 func (auth *AuthClient) CheckRequest(c fiber.Ctx, product, resource, action string) (bool, int, error) {
+	auth.warnMissingTrustedProxies()
+
 	return auth.Check(c.Context(), product, resource, action, libHTTP.ExtractTokenFromHeader(c), auth.resolveClientIP(c))
 }
