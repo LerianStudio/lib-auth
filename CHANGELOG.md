@@ -1,3 +1,44 @@
+## [5.8.0-beta.4](https://github.com/LerianStudio/lib-auth/compare/v5.8.0-beta.3...v5.8.0-beta.4) (2026-10-14)
+
+
+### Features
+
+* **middleware:** check a request's own token and caller address ([bba92cf](https://github.com/LerianStudio/lib-auth/commit/bba92cf3fd0a9d8a77826635e957f62ed56e4734))
+
+
+### Bug Fixes
+
+* **middleware:** warn once when checkrequest runs without trusted proxies ([686788d](https://github.com/LerianStudio/lib-auth/commit/686788dce4fe5588138d1fd60df1c76dc14967d1))
+
+## [5.8.0-beta.3](https://github.com/LerianStudio/lib-auth/compare/v5.8.0-beta.2...v5.8.0-beta.3) (2026-10-13)
+
+
+### Features
+
+* **middleware:** admit a set of calling services in RequireSourceService ([4260ff3](https://github.com/LerianStudio/lib-auth/commit/4260ff31a2f9f39fdc9ad696947a2f9cc86edf46))
+
+## [5.8.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.8.0-beta.1...v5.8.0-beta.2) (2026-10-10)
+
+
+### Features
+
+* **middleware:** carry the status of a refused token request ([f7f4268](https://github.com/LerianStudio/lib-auth/commit/f7f4268b7b3069eb014c3162622e0eda85c0a97c))
+* **declaration:** report where the declaration publication stands ([30268b9](https://github.com/LerianStudio/lib-auth/commit/30268b9e57b51e842a75ee39f6025d9cacb02f52))
+
+
+### Bug Fixes
+
+* **declaration:** keep a publication with nothing to send idle ([f8ad83a](https://github.com/LerianStudio/lib-auth/commit/f8ad83a528c3d9fb169dde8eae998f714cad8e11))
+* **declaration:** retry the boot publish until accepted or refused ([41014e4](https://github.com/LerianStudio/lib-auth/commit/41014e4af1aafbeea9803c664c8467252250c1a1))
+* **declaration:** reuse the token and stop on a refused credential ([8597fbb](https://github.com/LerianStudio/lib-auth/commit/8597fbb8a1df6abf8b9400628d1ec0e139ac827f))
+
+## [5.8.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.7.0...v5.8.0-beta.1) (2026-10-09)
+
+
+### Features
+
+* **middleware:** admit one calling service by its sourceService claim ([aa31854](https://github.com/LerianStudio/lib-auth/commit/aa318548cfdb635134eb2e16536a1c694c258aba))
+
 ## [5.7.0](https://github.com/LerianStudio/lib-auth/compare/v5.6.0...v5.7.0) (2026-10-09)
 
 

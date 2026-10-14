@@ -112,6 +112,17 @@ func (e accessManagerRefusal) Error() string { return e.fiberErr.Error() }
 
 func (e accessManagerRefusal) Unwrap() []error { return []error{e.fiberErr, e.response} }
 
+// TokenRefusal is the error GetApplicationToken returns when the token request
+// is answered with a non-2xx status. It unwraps to the Response the service sent.
+type TokenRefusal struct {
+	StatusCode int
+	Response   commons.Response
+}
+
+func (e TokenRefusal) Error() string { return e.Response.Error() }
+
+func (e TokenRefusal) Unwrap() error { return e.Response }
+
 // refusalMessage is the text a decoded Access Manager error renders as: its
 // business message, else its title, else the status text. A body carrying only a
 // code has an empty Message, and falling through to the status text keeps such a

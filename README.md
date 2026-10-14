@@ -369,13 +369,15 @@ value as an identity must refuse an empty or marker value. Do not copy the marke
 whitespace-only or `undeclared` value (`middleware.UndeclaredSourceService`), and
 that is the refusal to apply.
 
-The field exists only where an application `Principal` is published, which requires
-`AUTH_M2M_INVERSION_ENABLED=true`. When authorization is disabled,
-`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=true` is required in addition to inversion:
-that flag alone does not publish an application `Principal`, because the no-round-trip
-path rejects application tokens while inversion is off. Under
-the legacy model an application token publishes no `Principal`, so a service that
-identifies its callers by `SourceService` must refuse to start with inversion off.
+`PrincipalFromContext` reports the field only under
+`AUTH_M2M_INVERSION_ENABLED=true`: under the legacy model an application's `Subject`
+is a fabricated role, so the accessor reports no `Principal` at all. A route that
+admits named calling services only should mount `RequireSourceService` (see
+[Type guards](#type-guards)), which decides on the claim under both models. When
+authorization is disabled, `AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED=true` is required
+in addition to inversion: that flag alone does not publish an application
+`Principal`, because the no-round-trip path rejects application tokens while
+inversion is off.
 A machine credential issued before the issuer stamped the claim carries none and
 reads as empty until it is rotated or recreated; the helper refuses it like any
 other undeclared value. The field is read from the HTTP `Authorize` path only: the
@@ -455,6 +457,25 @@ f.Post("/v1/operations/:id/resolution",
     operationHandler.Resolve)
 ```
 
+`RequireSourceService(services...)` narrows a route to a fixed set of calling
+services: it admits an application principal whose `sourceService` claim equals one
+of `services` exactly, answers 403 to every other caller (a person, another service,
+an empty or `undeclared` claim) and 401 when no principal was published. No
+services, an empty one or `undeclared` in the set admits nobody. Unlike `PrincipalFromContext` it
+decides under both authorization models, because the authorization round-trip
+vouched for the whole token even where the legacy `Subject` is a fabricated role; it
+never reads `Subject`. The claim is only as strong as its issuer: whoever may create
+applications for the tenant can create one whose source is in the set. Under
+`AUTH_PRINCIPAL_REQUIRED_WHEN_DISABLED` with no verification keys the claim is
+self-asserted, so the guard proves nothing there.
+
+```go
+f.Post("/v1/cross-core/pix/cash-ins",
+    auth.Authorize(applicationName, "cross-core", "post"),
+    authMiddleware.RequireSourceService("jd-courier"), // 403 for anyone but the Courier
+    crossCoreHandler.CashIn)
+```
+
 ### Authorization outside the chain
 
 When the resource or action is only known inside the handler, `Check` runs the same
@@ -494,6 +515,9 @@ resolved yourself through your own trusted-proxy configuration. Never pass Fiber
 `c.IP()` raw: under a misconfigured proxy chain that value is the attacker-chosen
 `X-Forwarded-For` header, which lets a caller pick the address the allowlist matches
 it against.
+
+Inside a Fiber handler, `CheckRequest(c, product, resource, action)` is the same call
+with the token and the caller IP taken from the request exactly as `Authorize` takes them.
 
 `Authorize` answers the same `503 Service Unavailable` on the wire for the same
 outage (see the refusal paragraph under **How It Works** above), so a rail's alarms
@@ -1054,6 +1078,40 @@ before. When the declaration is on, a client with an empty `Address` or with
 `Enabled` false fails the boot with an error naming the field; when it is off,
 the client's `Enabled` decides whether the scope alone is published. Leaving
 `AuthClient` nil keeps the behavior described above.
+
+### Reporting the declaration in readiness
+
+The publish runs in the background and never blocks the boot. Transient failures
+(network, timeouts, 5xx, 409, a token endpoint that is down or answers 429) are
+retried with backoff that grows to 30 s between attempts (up to 45 s with jitter)
+until the access manager accepts the declaration, refuses it (401/403/422/501, a
+token endpoint refusing the M2M credential with any other 4xx, or an empty token;
+logged and not retried), or `stop` is called. One minted token is reused across
+attempts for up to 5 minutes, and a 401 on a reused token mints a fresh one. Pass
+a `Status` to see where it stands:
+
+```go
+var declared declaration.Status
+
+stop, err := declaration.WireFromEnv(ctx, declaration.WireInput{
+    Slug:     "plugin-fees",
+    Manifest: embeddedManifest,
+    Logger:   logger,
+    Status:   &declared,
+})
+
+// In the readiness check:
+switch declared.State() {
+case declaration.StatePending, declaration.StateFailed:
+    // degraded: callers get 403 until the access manager holds the declaration
+}
+```
+
+`StateIdle` means no publication started: auth is off, or the declaration is
+off and the manifest has neither a scope nor the partner opt-in (with auth on,
+the scope alone is published and reads pending, then published).
+`StatePublished` means the access manager accepted it. `Config.Status` does the
+same for a publisher built with `New`.
 
 ### Opting in to partners (`partners`)
 

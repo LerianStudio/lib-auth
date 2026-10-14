@@ -132,6 +132,9 @@ type WireInput struct {
 	// that is disabled or has no Address fails the boot by name, as the env pair
 	// does. When nil, WireFromEnv builds its own client from the env, as before.
 	AuthClient *middleware.AuthClient
+	// Status, when set, reports where the publication stands, for a readiness
+	// check: idle when nothing is published. Optional.
+	Status *Status
 }
 
 // injectedAuthError reports why an injected client cannot mint the publisher's
@@ -171,6 +174,8 @@ func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 	}
 
 	logError := func(format string, args ...any) {
+		in.Status.set(StateFailed)
+
 		if !obs.IsNil(in.Logger) {
 			in.Logger.Log(ctx, obs.LevelError, fmt.Sprintf(format, args...))
 		}
@@ -236,6 +241,7 @@ func wireScopeOnly(ctx context.Context, in WireInput) (func(), error) {
 		ClientSecret: clientSecret,
 		Logger:       in.Logger,
 		ScopeOnly:    true,
+		Status:       in.Status,
 	})
 	if err != nil {
 		logError("scope catalog for slug=%s not published: %v", in.Slug, err)
@@ -305,10 +311,9 @@ func authClientFromEnv(logger obs.Logger) (*middleware.AuthClient, error) {
 //     or Enabled=false is a named boot error when the declaration is on), and its
 //     Enabled decides whether the scope alone is published when it is off.
 //
-// Fail-open by design: on the happy path Start never blocks on identity
-// reachability (a failing initial publish is logged in the background, not
-// fatal). On EVERY error path a NON-NIL no-op stop is returned so a caller's
-// `defer stop()` can never nil-panic.
+// Fail-open by design: Start never blocks on identity reachability; the publish retries
+// transient failures in the background until accepted or refused, or stop is called, and
+// WireInput.Status reports where it stands. Every error path returns a NON-NIL no-op stop.
 func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 	// noop is the always-safe stop returned on the disabled path and on every
 	// error path, so a deferred stop() is never nil.
@@ -365,6 +370,7 @@ func WireFromEnv(ctx context.Context, in WireInput) (func(), error) {
 		Interval:     0,
 		FailFast:     false,
 		Logger:       in.Logger,
+		Status:       in.Status,
 	}
 
 	pub, err := New(cfg)
