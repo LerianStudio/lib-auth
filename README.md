@@ -830,6 +830,31 @@ scope:
   change to `parent` alone is republished. A manifest without `parent`
   publishes the same body and hash as before.
 
+#### Granting a collection only by its own values (`explicit`)
+
+A partner whose scope names no value for a dimension is not confined on it: it
+is confined only by the dimensions its scope does name. That is right when the
+product finds the dimension's items through those other dimensions, and wrong
+when it finds them by their own id alone — a partner scoped to one ledger would
+then read the routes of every ledger. Mark such a dimension `explicit`, and a
+partner whose scope names no value for it is refused on its `collection`:
+
+```yaml
+scope:
+  dimensions:
+    - { name: ledgerId,           from: path, param: ledger_id,            multi: true, collection: ledgers }
+    - { name: transactionRouteId, from: path, param: transaction_route_id, multi: true, collection: transaction-routes, parent: ledgerId, explicit: true }
+```
+
+* `explicit` is optional and false by default. The authorization service
+  enforces it; this library validates it and publishes it.
+* It needs a non-empty `collection`, and it cannot be combined with
+  `required: true`, which already makes every scope line name a value.
+* It is published (also on a scope-only publication and in the scope catalog)
+  as the dimension's last member, after `parent`, and included in the manifest
+  hash, so a change to `explicit` alone is republished. A manifest without it
+  publishes the same body and hash as before.
+
 ### Where a dimension is read
 
 Every dimension is read from one of five places, the same for an explicit
