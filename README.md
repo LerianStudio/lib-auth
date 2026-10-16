@@ -835,15 +835,15 @@ scope:
 A partner whose scope names no value for a dimension is not confined on it: it
 is confined only by the dimensions its scope does name. That is right when the
 product finds the dimension's items through those other dimensions, and wrong
-when it finds them by their own id alone — a partner scoped to one ledger would
-then read the routes of every ledger. Mark such a dimension `explicit`, and a
+when it finds them by their own id alone — a partner scoped to one container
+would then read the items of every container. Mark such a dimension `explicit`, and a
 partner whose scope names no value for it is refused on its `collection`:
 
 ```yaml
 scope:
   dimensions:
-    - { name: ledgerId,           from: path, param: ledger_id,            multi: true, collection: ledgers }
-    - { name: transactionRouteId, from: path, param: transaction_route_id, multi: true, collection: transaction-routes, parent: ledgerId, explicit: true }
+    - { name: containerId, from: path, param: container_id, multi: true, collection: containers }
+    - { name: itemId,      from: path, param: item_id,      multi: true, collection: items, parent: containerId, explicit: true }
 ```
 
 * `explicit` is optional and false by default. The authorization service

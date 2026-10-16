@@ -20,11 +20,11 @@ import (
 // canonicalExplicitBytes, which fixes where explicit sits in a dimension: the
 // last member, after parent. The literal is the contract the authorization
 // service mirrors: it is not recomputed here.
-const canonicalHashExplicitGolden = "f6ce6625cb4d03351caf8e442a31139988dd202ac07a7d16b7a765da769254b3"
+const canonicalHashExplicitGolden = "cb6735c8b8c7e34d3ef9e1291bb1790c008724ea1a272082cbd483c4e4a820b4"
 
 // canonicalExplicitBytes is the canonical serialization of the same fixture: the
 // manifest without its version.
-const canonicalExplicitBytes = `{"service":"midaz","permissions":[{"resource":"transaction-routes","action":"get","effect":"allow","roles":["viewer"]}],"roles":[{"name":"viewer","granted_to":[{"group":"midaz-viewer-group"}]}],"scope":{"dimensions":[{"name":"organizationId","from":"path","param":"organization_id","required":true,"collection":"organizations","label":"organization"},{"name":"ledgerId","from":"path","param":"ledger_id","collection":"ledgers","label":"ledger","parent":"organizationId"},{"name":"transactionRouteId","from":"path","param":"transaction_route_id","multi":true,"collection":"transaction-routes","label":"transaction route","parent":"ledgerId","explicit":true},{"name":"operationRouteId","from":"path","param":"operation_route_id","multi":true,"collection":"operation-routes","explicit":true}]}}`
+const canonicalExplicitBytes = `{"service":"example","permissions":[{"resource":"items","action":"get","effect":"allow","roles":["viewer"]}],"roles":[{"name":"viewer","granted_to":[{"group":"example-viewer-group"}]}],"scope":{"dimensions":[{"name":"tenantGroupId","from":"path","param":"tenant_group_id","required":true,"collection":"tenant-groups","label":"tenant group"},{"name":"containerId","from":"path","param":"container_id","collection":"containers","label":"container","parent":"tenantGroupId"},{"name":"itemId","from":"path","param":"item_id","multi":true,"collection":"items","label":"item","parent":"containerId","explicit":true},{"name":"widgetId","from":"path","param":"widget_id","multi":true,"collection":"widgets","explicit":true}]}}`
 
 func explicitFixture(t *testing.T) *DeclarationManifest {
 	t.Helper()
@@ -93,19 +93,19 @@ func TestParseManifest_Explicit_YAMLAndJSONAgree(t *testing.T) {
 	fromJSON := explicitFixture(t)
 
 	fromYAML, err := parseManifest([]byte(`
-service: midaz
+service: example
 version: 1
 permissions:
-  - { resource: transaction-routes, action: get, effect: allow, roles: [viewer] }
+  - { resource: items, action: get, effect: allow, roles: [viewer] }
 roles:
   - name: viewer
-    granted_to: [{ group: midaz-viewer-group }]
+    granted_to: [{ group: example-viewer-group }]
 scope:
   dimensions:
-    - { name: organizationId, from: path, param: organization_id, required: true, collection: organizations, label: organization }
-    - { name: ledgerId, from: path, param: ledger_id, collection: ledgers, label: ledger, parent: organizationId }
-    - { name: transactionRouteId, from: path, param: transaction_route_id, multi: true, collection: transaction-routes, label: transaction route, parent: ledgerId, explicit: true }
-    - { name: operationRouteId, from: path, param: operation_route_id, multi: true, collection: operation-routes, explicit: true }
+    - { name: tenantGroupId, from: path, param: tenant_group_id, required: true, collection: tenant-groups, label: tenant group }
+    - { name: containerId, from: path, param: container_id, collection: containers, label: container, parent: tenantGroupId }
+    - { name: itemId, from: path, param: item_id, multi: true, collection: items, label: item, parent: containerId, explicit: true }
+    - { name: widgetId, from: path, param: widget_id, multi: true, collection: widgets, explicit: true }
 `))
 	require.NoError(t, err)
 
@@ -120,9 +120,9 @@ func TestWireJSON_Explicit(t *testing.T) {
 	wire, err := explicitFixture(t).wireJSON()
 	require.NoError(t, err)
 
-	assert.Contains(t, string(wire), `"parent":"ledgerId","explicit":true}`)
-	assert.Contains(t, string(wire), `"collection":"operation-routes","explicit":true}`)
-	assert.Contains(t, string(wire), `"label":"ledger","parent":"organizationId"}`, "a dimension that is not explicit sends no explicit key")
+	assert.Contains(t, string(wire), `"parent":"containerId","explicit":true}`)
+	assert.Contains(t, string(wire), `"collection":"widgets","explicit":true}`)
+	assert.Contains(t, string(wire), `"label":"container","parent":"tenantGroupId"}`, "a dimension that is not explicit sends no explicit key")
 	assert.Equal(t, 2, strings.Count(string(wire), `"explicit"`))
 }
 
@@ -140,7 +140,7 @@ func TestPublish_ScopeOnly_CarriesExplicit(t *testing.T) {
 	require.NoError(t, err)
 
 	cfg := testConfig(t, auth.URL, identity.URL)
-	cfg.Slug = "midaz"
+	cfg.Slug = "example"
 	cfg.Manifest = raw
 	cfg.ScopeOnly = true
 
@@ -152,13 +152,13 @@ func TestPublish_ScopeOnly_CarriesExplicit(t *testing.T) {
 	identity.mu.Unlock()
 
 	assert.JSONEq(t, `{
-	  "service": "midaz",
+	  "service": "example",
 	  "version": 1,
 	  "scope": {"dimensions": [
-	    {"name": "organizationId", "from": "path", "param": "organization_id", "required": true, "collection": "organizations", "label": "organization"},
-	    {"name": "ledgerId", "from": "path", "param": "ledger_id", "collection": "ledgers", "label": "ledger", "parent": "organizationId"},
-	    {"name": "transactionRouteId", "from": "path", "param": "transaction_route_id", "multi": true, "collection": "transaction-routes", "label": "transaction route", "parent": "ledgerId", "explicit": true},
-	    {"name": "operationRouteId", "from": "path", "param": "operation_route_id", "multi": true, "collection": "operation-routes", "explicit": true}
+	    {"name": "tenantGroupId", "from": "path", "param": "tenant_group_id", "required": true, "collection": "tenant-groups", "label": "tenant group"},
+	    {"name": "containerId", "from": "path", "param": "container_id", "collection": "containers", "label": "container", "parent": "tenantGroupId"},
+	    {"name": "itemId", "from": "path", "param": "item_id", "multi": true, "collection": "items", "label": "item", "parent": "containerId", "explicit": true},
+	    {"name": "widgetId", "from": "path", "param": "widget_id", "multi": true, "collection": "widgets", "explicit": true}
 	  ]}
 	}`, body)
 }
@@ -173,33 +173,33 @@ func TestValidate_ScopeExplicit(t *testing.T) {
 	}{
 		{
 			name: "valid",
-			dim:  DeclarationDimension{Name: "operationRouteId", From: "path", Param: "operation_route_id", Collection: "operation-routes", Explicit: true},
+			dim:  DeclarationDimension{Name: "widgetId", From: "path", Param: "widget_id", Collection: "widgets", Explicit: true},
 		},
 		{
 			name: "valid_required_without_explicit",
-			dim:  DeclarationDimension{Name: "operationRouteId", From: "path", Param: "operation_route_id", Collection: "operation-routes", Required: true},
+			dim:  DeclarationDimension{Name: "widgetId", From: "path", Param: "widget_id", Collection: "widgets", Required: true},
 		},
 		{
 			name:     "explicit_without_collection",
-			dim:      DeclarationDimension{Name: "operationRouteId", From: "path", Param: "operation_route_id", Explicit: true},
-			wantErrs: []string{`scope.dimensions[1]: explicit dimension "operationRouteId" must name its collection`},
+			dim:      DeclarationDimension{Name: "widgetId", From: "path", Param: "widget_id", Explicit: true},
+			wantErrs: []string{`scope.dimensions[1]: explicit dimension "widgetId" must name its collection`},
 		},
 		{
 			name:     "explicit_with_blank_collection",
-			dim:      DeclarationDimension{Name: "operationRouteId", From: "path", Param: "operation_route_id", Collection: "  ", Explicit: true},
-			wantErrs: []string{`scope.dimensions[1]: explicit dimension "operationRouteId" must name its collection`},
+			dim:      DeclarationDimension{Name: "widgetId", From: "path", Param: "widget_id", Collection: "  ", Explicit: true},
+			wantErrs: []string{`scope.dimensions[1]: explicit dimension "widgetId" must name its collection`},
 		},
 		{
 			name:     "explicit_and_required",
-			dim:      DeclarationDimension{Name: "operationRouteId", From: "path", Param: "operation_route_id", Collection: "operation-routes", Required: true, Explicit: true},
-			wantErrs: []string{`scope.dimensions[1]: dimension "operationRouteId" must not be both explicit and required`},
+			dim:      DeclarationDimension{Name: "widgetId", From: "path", Param: "widget_id", Collection: "widgets", Required: true, Explicit: true},
+			wantErrs: []string{`scope.dimensions[1]: dimension "widgetId" must not be both explicit and required`},
 		},
 		{
 			name: "explicit_required_and_no_collection",
-			dim:  DeclarationDimension{Name: "operationRouteId", From: "path", Param: "operation_route_id", Required: true, Explicit: true},
+			dim:  DeclarationDimension{Name: "widgetId", From: "path", Param: "widget_id", Required: true, Explicit: true},
 			wantErrs: []string{
-				`scope.dimensions[1]: explicit dimension "operationRouteId" must name its collection`,
-				`scope.dimensions[1]: dimension "operationRouteId" must not be both explicit and required`,
+				`scope.dimensions[1]: explicit dimension "widgetId" must name its collection`,
+				`scope.dimensions[1]: dimension "widgetId" must not be both explicit and required`,
 			},
 		},
 	}
@@ -208,15 +208,13 @@ func TestValidate_ScopeExplicit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			m, err := parseManifest([]byte(feesJSON))
-			require.NoError(t, err)
-
+			m := explicitFixture(t)
 			m.Scope = &DeclarationScope{Dimensions: []DeclarationDimension{
-				{Name: "ledgerId", From: "path", Param: "ledger_id", Collection: "ledgers"},
+				{Name: "containerId", From: "path", Param: "container_id", Collection: "containers"},
 				tt.dim,
 			}}
 
-			err = m.Validate()
+			err := m.Validate()
 			if len(tt.wantErrs) == 0 {
 				require.NoError(t, err)
 
