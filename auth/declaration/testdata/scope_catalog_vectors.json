@@ -1503,40 +1503,40 @@
   },
   {
     "name": "explicit is carried, as the last member",
-    "product": "midaz",
-    "manifest": "service: midaz\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: ledgerId, from: path, param: ledger_id, multi: true, collection: ledgers, label: ledger }\n    - { name: transactionRouteId, from: path, param: transaction_route_id, multi: true, collection: transaction-routes, label: transaction route, parent: ledgerId, explicit: true }\n    - { name: operationRouteId, from: path, param: operation_route_id, multi: true, collection: \" operation-routes \", explicit: true }\n",
+    "product": "example",
+    "manifest": "service: example\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: containerId, from: path, param: container_id, multi: true, collection: containers, label: container }\n    - { name: itemId, from: path, param: item_id, multi: true, collection: items, label: item, parent: containerId, explicit: true }\n    - { name: widgetId, from: path, param: widget_id, multi: true, collection: \" widgets \", explicit: true }\n",
     "declares": true,
     "readsStored": true,
     "catalog": {
-      "product": "midaz",
+      "product": "example",
       "dimensions": [
         {
-          "name": "ledgerId",
+          "name": "containerId",
           "from": "path",
-          "param": "ledger_id",
+          "param": "container_id",
           "required": false,
           "multi": true,
-          "collection": "ledgers",
-          "label": "ledger"
+          "collection": "containers",
+          "label": "container"
         },
         {
-          "name": "transactionRouteId",
+          "name": "itemId",
           "from": "path",
-          "param": "transaction_route_id",
+          "param": "item_id",
           "required": false,
           "multi": true,
-          "collection": "transaction-routes",
-          "label": "transaction route",
-          "parent": "ledgerId",
+          "collection": "items",
+          "label": "item",
+          "parent": "containerId",
           "explicit": true
         },
         {
-          "name": "operationRouteId",
+          "name": "widgetId",
           "from": "path",
-          "param": "operation_route_id",
+          "param": "widget_id",
           "required": false,
           "multi": true,
-          "collection": "operation-routes",
+          "collection": "widgets",
           "label": "",
           "explicit": true
         }
@@ -1546,20 +1546,20 @@
   },
   {
     "name": "explicit false is omitted",
-    "product": "midaz",
-    "manifest": "service: midaz\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: operationRouteId, from: path, param: operation_route_id, collection: operation-routes, explicit: false }\n",
+    "product": "example",
+    "manifest": "service: example\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: widgetId, from: path, param: widget_id, collection: widgets, explicit: false }\n",
     "declares": true,
     "readsStored": true,
     "catalog": {
-      "product": "midaz",
+      "product": "example",
       "dimensions": [
         {
-          "name": "operationRouteId",
+          "name": "widgetId",
           "from": "path",
-          "param": "operation_route_id",
+          "param": "widget_id",
           "required": false,
           "multi": false,
-          "collection": "operation-routes",
+          "collection": "widgets",
           "label": ""
         }
       ],
