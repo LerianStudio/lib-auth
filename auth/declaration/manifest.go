@@ -183,8 +183,9 @@ type DeclarationDimension struct {
 	// (e.g. a ledgerId dimension's parent is "organizationId"), declaring the
 	// hierarchy of the catalog. It names another declared dimension, and
 	// following parents never comes back to a dimension. A dimension without
-	// one is a root. It is the LAST member and omitted when absent, so a manifest
-	// that declares none publishes and hashes byte-for-byte as before.
+	// one is a root. It comes right before Explicit, which is the last member,
+	// and is omitted when absent, so a manifest that declares none publishes and
+	// hashes byte-for-byte as before.
 	Parent string `json:"parent,omitempty" yaml:"parent,omitempty"`
 	// Explicit means a partner reaches the dimension's collection only through
 	// values its scope names: a partner whose scope names no value for the
