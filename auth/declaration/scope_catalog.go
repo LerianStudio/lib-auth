@@ -25,8 +25,9 @@ type ScopeCatalog struct {
 
 // ScopeCatalogDimension is one catalog dimension, field for field a
 // scope.dimensions entry of the manifest. The booleans carry no omitempty:
-// false is a statement. Covers and Parent are omitted when absent, so a
-// dimension without them is byte-identical to the shape before they existed.
+// false is a statement, except Explicit's, which came later. Covers, Parent and
+// Explicit are omitted when absent, so a dimension without them is
+// byte-identical to the shape before they existed.
 type ScopeCatalogDimension struct {
 	Name       string   `json:"name"`
 	From       string   `json:"from"`
@@ -37,6 +38,7 @@ type ScopeCatalogDimension struct {
 	Covers     []string `json:"covers,omitempty"`
 	Label      string   `json:"label"`
 	Parent     string   `json:"parent,omitempty"`
+	Explicit   bool     `json:"explicit,omitempty"`
 }
 
 // ScopeCatalogLevel is how wide one instance of a resource is for one action:
@@ -103,6 +105,7 @@ func ScopeCatalogFor(m *DeclarationManifest, product string, stored StoredLevels
 			Covers:     trimmedNames(d.Covers),
 			Label:      strings.TrimSpace(d.Label),
 			Parent:     d.Parent,
+			Explicit:   d.Explicit,
 		})
 	}
 

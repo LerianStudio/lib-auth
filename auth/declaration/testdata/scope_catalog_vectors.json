@@ -1500,5 +1500,70 @@
         "midaz"
       ]
     }
+  },
+  {
+    "name": "explicit is carried, as the last member",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: ledgerId, from: path, param: ledger_id, multi: true, collection: ledgers, label: ledger }\n    - { name: transactionRouteId, from: path, param: transaction_route_id, multi: true, collection: transaction-routes, label: transaction route, parent: ledgerId, explicit: true }\n    - { name: operationRouteId, from: path, param: operation_route_id, multi: true, collection: \" operation-routes \", explicit: true }\n",
+    "declares": true,
+    "readsStored": true,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "ledgerId",
+          "from": "path",
+          "param": "ledger_id",
+          "required": false,
+          "multi": true,
+          "collection": "ledgers",
+          "label": "ledger"
+        },
+        {
+          "name": "transactionRouteId",
+          "from": "path",
+          "param": "transaction_route_id",
+          "required": false,
+          "multi": true,
+          "collection": "transaction-routes",
+          "label": "transaction route",
+          "parent": "ledgerId",
+          "explicit": true
+        },
+        {
+          "name": "operationRouteId",
+          "from": "path",
+          "param": "operation_route_id",
+          "required": false,
+          "multi": true,
+          "collection": "operation-routes",
+          "label": "",
+          "explicit": true
+        }
+      ],
+      "partners": true
+    }
+  },
+  {
+    "name": "explicit false is omitted",
+    "product": "midaz",
+    "manifest": "service: midaz\nversion: 1\npartners: true\nscope:\n  dimensions:\n    - { name: operationRouteId, from: path, param: operation_route_id, collection: operation-routes, explicit: false }\n",
+    "declares": true,
+    "readsStored": true,
+    "catalog": {
+      "product": "midaz",
+      "dimensions": [
+        {
+          "name": "operationRouteId",
+          "from": "path",
+          "param": "operation_route_id",
+          "required": false,
+          "multi": false,
+          "collection": "operation-routes",
+          "label": ""
+        }
+      ],
+      "partners": true
+    }
   }
 ]

@@ -183,9 +183,21 @@ type DeclarationDimension struct {
 	// (e.g. a ledgerId dimension's parent is "organizationId"), declaring the
 	// hierarchy of the catalog. It names another declared dimension, and
 	// following parents never comes back to a dimension. A dimension without
-	// one is a root. It is the LAST member and omitted when absent, so a manifest
-	// that declares none publishes and hashes byte-for-byte as before.
+	// one is a root. It comes right before Explicit, which is the last member,
+	// and is omitted when absent, so a manifest that declares none publishes and
+	// hashes byte-for-byte as before.
 	Parent string `json:"parent,omitempty" yaml:"parent,omitempty"`
+	// Explicit means a partner reaches the dimension's collection only through
+	// values its scope names: a partner whose scope names no value for the
+	// dimension is refused on the collection, instead of being let through as
+	// unconfined. It is for a collection the product looks up by the item's own
+	// id alone, so no ancestor dimension of the request confines it. The
+	// authorization service enforces it; this library declares, validates and
+	// publishes it. It needs a Collection and excludes Required, which already
+	// makes every scope line name a value. It is the LAST member and omitted
+	// when false, so a manifest that declares none publishes and hashes
+	// byte-for-byte as before.
+	Explicit bool `json:"explicit,omitempty" yaml:"explicit,omitempty"`
 }
 
 // DeclarationPermission is a single declared permission. The action is a free-form
@@ -435,7 +447,8 @@ func (m *DeclarationManifest) serverProjection() *DeclarationManifest {
 // make a covers-only change never reach the service; and because Covers is
 // omitempty, a manifest that declares none serializes to the same bytes, and
 // hashes to the same value, as before the field existed. A dimension's Parent
-// is hashed the same way, as the dimension's last member.
+// is hashed the same way, and so is its Explicit, after Parent as the
+// dimension's last member.
 func (m *DeclarationManifest) CanonicalHash() (string, error) {
 	published := m.serverProjection()
 
