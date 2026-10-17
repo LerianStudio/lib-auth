@@ -1,3 +1,10 @@
+## [5.9.0](https://github.com/LerianStudio/lib-auth/compare/v5.8.0...v5.9.0) (2026-10-17)
+
+
+### Features
+
+* **declaration:** mark a scope dimension as explicit grant only ([7fca39f](https://github.com/LerianStudio/lib-auth/commit/7fca39ff903d9182bba4d9cebf7964371314f1f1))
+
 ## [5.9.0-beta.2](https://github.com/LerianStudio/lib-auth/compare/v5.9.0-beta.1...v5.9.0-beta.2) (2026-10-16)
 
 ## [5.9.0-beta.1](https://github.com/LerianStudio/lib-auth/compare/v5.8.0...v5.9.0-beta.1) (2026-10-16)
