@@ -825,8 +825,8 @@ scope:
 * A dimension's depth is 1 for a root and its parent's depth plus 1 otherwise:
   above, `organizationId` is 1, `ledgerId` 2, and `portfolioId` and `accountId`
   are both 3 — siblings, neither narrower than the other.
-* It is published (also on a scope-only publication) as the dimension's last
-  member, after `covers` and `label`, and included in the manifest hash, so a
+* It is published (also on a scope-only publication) after `covers` and
+  `label`, right before `explicit`, and included in the manifest hash, so a
   change to `parent` alone is republished. A manifest without `parent`
   publishes the same body and hash as before.
 
