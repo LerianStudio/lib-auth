@@ -285,6 +285,7 @@ func (m *DeclarationManifest) validateScope() []string {
 		}
 
 		violations = append(violations, validateCovers(prefix, d)...)
+		violations = append(violations, validateExplicit(prefix, d)...)
 	}
 
 	violations = append(violations, m.validateParents(seenNames)...)
@@ -373,6 +374,27 @@ func parentCycle(name string, parents map[string]string) []string {
 // one collection.
 func validateCovers(prefix string, d DeclarationDimension) []string {
 	return validateNameList(prefix+".covers", d.Covers, d.Collection, "the dimension's own collection", "collection")
+}
+
+// validateExplicit validates one dimension's explicit flag: an explicit
+// dimension names the collection a partner is refused on, and is not also
+// required, which already makes every scope line name a value.
+func validateExplicit(prefix string, d DeclarationDimension) []string {
+	if !d.Explicit {
+		return nil
+	}
+
+	var violations []string
+
+	if strings.TrimSpace(d.Collection) == "" {
+		violations = append(violations, fmt.Sprintf("%s: explicit dimension %q must name its collection", prefix, d.Name))
+	}
+
+	if d.Required {
+		violations = append(violations, fmt.Sprintf("%s: dimension %q must not be both explicit and required", prefix, d.Name))
+	}
+
+	return violations
 }
 
 // validateNameList validates a list of names that must each name something,

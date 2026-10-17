@@ -825,9 +825,34 @@ scope:
 * A dimension's depth is 1 for a root and its parent's depth plus 1 otherwise:
   above, `organizationId` is 1, `ledgerId` 2, and `portfolioId` and `accountId`
   are both 3 — siblings, neither narrower than the other.
-* It is published (also on a scope-only publication) as the dimension's last
-  member, after `covers` and `label`, and included in the manifest hash, so a
+* It is published (also on a scope-only publication) after `covers` and
+  `label`, right before `explicit`, and included in the manifest hash, so a
   change to `parent` alone is republished. A manifest without `parent`
+  publishes the same body and hash as before.
+
+#### Granting a collection only by its own values (`explicit`)
+
+A partner whose scope names no value for a dimension is not confined on it: it
+is confined only by the dimensions its scope does name. That is right when the
+product finds the dimension's items through those other dimensions, and wrong
+when it finds them by their own id alone — a partner scoped to one container
+would then read the items of every container. Mark such a dimension `explicit`, and a
+partner whose scope names no value for it is refused on its `collection`:
+
+```yaml
+scope:
+  dimensions:
+    - { name: containerId, from: path, param: container_id, multi: true, collection: containers }
+    - { name: itemId,      from: path, param: item_id,      multi: true, collection: items, parent: containerId, explicit: true }
+```
+
+* `explicit` is optional and false by default. The authorization service
+  enforces it; this library validates it and publishes it.
+* It needs a non-empty `collection`, and it cannot be combined with
+  `required: true`, which already makes every scope line name a value.
+* It is published (also on a scope-only publication and in the scope catalog)
+  as the dimension's last member, after `parent`, and included in the manifest
+  hash, so a change to `explicit` alone is republished. A manifest without it
   publishes the same body and hash as before.
 
 ### Where a dimension is read
