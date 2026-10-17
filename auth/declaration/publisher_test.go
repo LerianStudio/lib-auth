@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -654,14 +655,269 @@ func TestPublish_NeverLogsSecretOrToken(t *testing.T) {
 	identity := newIdentityServer(t, http.StatusUnauthorized, `{"message":"bad"}`)
 	t.Cleanup(identity.Close)
 
-	cap := &captureLogger{}
+	// A 307 to exercise the redirect-refusal path: the one status that would
+	// otherwise replay the bearer.
+	target := newRedirectTarget(t)
+	t.Cleanup(target.Close)
+
+	redirecting := newRedirectingIdentity(t, http.StatusTemporaryRedirect, target.URL)
+	t.Cleanup(redirecting.Close)
+
+	for name, identityURL := range map[string]string{"rejected": identity.URL, "redirected": redirecting.URL} {
+		t.Run(name, func(t *testing.T) {
+			cap := &captureLogger{}
+			cfg := testConfig(t, auth.URL, identityURL)
+			cfg.Logger = cap
+			p := newFastPublisher(t, cfg)
+
+			_ = p.Publish(context.Background())
+
+			logs := cap.all()
+			assert.NotContains(t, logs, testClientSecret, "client secret must never be logged")
+			assert.NotContains(t, logs, testToken, "minted token must never be logged")
+			assert.NotContains(t, logs, redirectLocationMarker, "a redirect Location must never be logged")
+		})
+	}
+}
+
+// redirectTarget stands in for whatever host a redirect's Location names. It
+// records the Authorization header of every hit, so a test can prove it was never
+// contacted and the M2M credential never reached it.
+type redirectTarget struct {
+	*httptest.Server
+	mu      sync.Mutex
+	gotAuth []string
+}
+
+func newRedirectTarget(t *testing.T) *redirectTarget {
+	t.Helper()
+
+	rt := &redirectTarget{}
+	rt.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rt.mu.Lock()
+		rt.gotAuth = append(rt.gotAuth, r.Header.Get("Authorization"))
+		rt.mu.Unlock()
+
+		// Answer 200 whatever the method: on 301/302/303 a followed redirect turns
+		// the PUT into a GET, and this 200 would read as "declaration published".
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	return rt
+}
+
+// redirectingIdentity answers every request with status and a Location on target,
+// counting the hits it receives. The Location carries a marker so a test can
+// assert it is never logged.
+type redirectingIdentity struct {
+	*httptest.Server
+	mu   sync.Mutex
+	hits int
+}
+
+const redirectLocationMarker = "location-marker-do-not-log"
+
+func newRedirectingIdentity(t *testing.T, status int, targetURL string) *redirectingIdentity {
+	t.Helper()
+
+	ri := &redirectingIdentity{}
+	ri.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ri.mu.Lock()
+		ri.hits++
+		ri.mu.Unlock()
+
+		w.Header().Set("Location", targetURL+r.URL.Path+"?"+redirectLocationMarker)
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"moved to ` + targetURL + "?" + redirectLocationMarker + `"}`))
+	}))
+
+	return ri
+}
+
+func (ri *redirectingIdentity) count() int {
+	ri.mu.Lock()
+	defer ri.mu.Unlock()
+
+	return ri.hits
+}
+
+var redirectStatuses = []int{
+	http.StatusMovedPermanently,
+	http.StatusFound,
+	http.StatusSeeOther,
+	http.StatusTemporaryRedirect,
+	http.StatusPermanentRedirect,
+}
+
+// TestPublish_RedirectIsNeverFollowed pins BRSFN-44. The PUT carries the M2M
+// bearer and the manifest. On 307/308 Go replays both to the Location, and on a
+// same-host or subdomain target it keeps the Authorization header; on 301/302/303
+// it turns the PUT into a GET whose 200 would read as "published" when nothing was
+// stored. So a 3xx from the identity is a deterministic misconfiguration: exactly
+// one request to the identity, none to the target, no retry, no cache write.
+func TestPublish_RedirectIsNeverFollowed(t *testing.T) {
+	for _, status := range redirectStatuses {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			auth := newAuthServer(t)
+			t.Cleanup(auth.Close)
+
+			target := newRedirectTarget(t)
+			t.Cleanup(target.Close)
+
+			identity := newRedirectingIdentity(t, status, target.URL)
+			t.Cleanup(identity.Close)
+
+			logs := &captureLogger{}
+			cache := newFakeCache()
+			cfg := testConfig(t, auth.URL, identity.URL)
+			cfg.Cache = cache
+			cfg.Logger = logs
+			p := newFastPublisher(t, cfg)
+
+			err := p.Publish(context.Background())
+
+			assert.Equal(t, 1, identity.count(), "the identity must be asked exactly once (no retry)")
+
+			target.mu.Lock()
+			assert.Empty(t, target.gotAuth, "the redirect target must never be contacted, least of all with the M2M bearer")
+			target.mu.Unlock()
+
+			require.Error(t, err, "a redirect must never read as a published declaration")
+
+			var pe *PublishError
+			require.ErrorAs(t, err, &pe)
+			assert.True(t, pe.Deterministic, "a redirect is a misconfiguration, not a transient failure")
+			assert.Equal(t, status, pe.StatusCode)
+			assert.Equal(t, "put declaration", pe.Op)
+
+			_, ok := cache.get("declaration:plugin-fees:hash")
+			assert.False(t, ok, "a refused redirect must not write the cache")
+
+			msg, level, found := logs.find("redirect")
+			require.True(t, found, "the refusal must be logged")
+			assert.Equal(t, obs.LevelError, level, "a redirecting IDP_HOST needs an operator: log at ERROR")
+			assert.Contains(t, msg, "IDP_HOST", "the log must tell the operator what to fix")
+
+			all := logs.all()
+			assert.NotContains(t, all, redirectLocationMarker, "the Location must never be logged")
+			assert.NotContains(t, all, testToken, "the minted token must never be logged")
+			assert.NotContains(t, all, testClientSecret, "the client secret must never be logged")
+		})
+	}
+}
+
+// countingTransport counts round trips and delegates to the default transport,
+// so a test can prove the publisher sent its PUT through an injected client.
+type countingTransport struct {
+	calls atomic.Int64
+}
+
+func (c *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.calls.Add(1)
+
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+func TestPublish_InjectedClientIsUsed(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	identity := newIdentityServer(t, http.StatusOK, `{"status":"accepted"}`)
+	t.Cleanup(identity.Close)
+
+	transport := &countingTransport{}
 	cfg := testConfig(t, auth.URL, identity.URL)
-	cfg.Logger = cap
+	cfg.HTTPClient = &http.Client{Transport: transport}
 	p := newFastPublisher(t, cfg)
 
-	_ = p.Publish(context.Background())
+	require.NoError(t, p.Publish(context.Background()))
+	assert.Equal(t, int64(1), transport.calls.Load(), "the PUT must go through the injected client")
+	assert.Equal(t, 1, identity.count())
+}
 
-	logs := cap.all()
-	assert.NotContains(t, logs, testClientSecret, "client secret must never be logged")
-	assert.NotContains(t, logs, testToken, "minted token must never be logged")
+// TestPublish_InjectedClientCannotFollowRedirects pins that injection is not a
+// way back to redirect-following: the publisher uses a copy of the caller's
+// client whose redirect policy it overrides, and the caller's own client is left
+// exactly as it was handed in.
+func TestPublish_InjectedClientCannotFollowRedirects(t *testing.T) {
+	for _, status := range redirectStatuses {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			auth := newAuthServer(t)
+			t.Cleanup(auth.Close)
+
+			target := newRedirectTarget(t)
+			t.Cleanup(target.Close)
+
+			identity := newRedirectingIdentity(t, status, target.URL)
+			t.Cleanup(identity.Close)
+
+			var callerPolicyCalls atomic.Int64
+
+			following := func(_ *http.Request, _ []*http.Request) error {
+				callerPolicyCalls.Add(1)
+
+				return nil
+			}
+
+			injected := &http.Client{Timeout: 5 * time.Second, CheckRedirect: following}
+
+			cfg := testConfig(t, auth.URL, identity.URL)
+			cfg.HTTPClient = injected
+			p := newFastPublisher(t, cfg)
+
+			err := p.Publish(context.Background())
+
+			var pe *PublishError
+			require.ErrorAs(t, err, &pe)
+			assert.Equal(t, status, pe.StatusCode)
+			assert.Equal(t, 1, identity.count())
+
+			target.mu.Lock()
+			assert.Empty(t, target.gotAuth, "an injected following policy must not bring back redirect-following")
+			target.mu.Unlock()
+
+			assert.Zero(t, callerPolicyCalls.Load(), "the caller's redirect policy must never be consulted")
+			assert.Equal(t, 5*time.Second, injected.Timeout, "the caller's client must not be mutated")
+			require.NotNil(t, injected.CheckRedirect, "the caller's redirect policy must not be replaced")
+			require.NoError(t, injected.CheckRedirect(nil, nil))
+			assert.Equal(t, int64(1), callerPolicyCalls.Load(), "the caller's client must keep its own redirect policy")
+		})
+	}
+}
+
+func TestNew_NilHTTPClientUsesDefault(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	p, err := New(testConfig(t, auth.URL, "http://identity.local"))
+	require.NoError(t, err)
+
+	require.NotNil(t, p.httpClient)
+	assert.Equal(t, 30*time.Second, p.httpClient.Timeout)
+	require.NotNil(t, p.httpClient.CheckRedirect, "the default client must refuse redirects")
+	assert.ErrorIs(t, p.httpClient.CheckRedirect(nil, nil), http.ErrUseLastResponse)
+}
+
+// TestNew_InjectedClientWithoutTimeoutGetsTheDefault pins that a zero Timeout on
+// an injected client (http.Client's "no timeout") becomes the 30s default on the
+// publisher's copy, so a FailFast boot cannot hang on an identity that never
+// answers. The caller's client keeps its own zero.
+func TestNew_InjectedClientWithoutTimeoutGetsTheDefault(t *testing.T) {
+	auth := newAuthServer(t)
+	t.Cleanup(auth.Close)
+
+	transport := &countingTransport{}
+	injected := &http.Client{Transport: transport}
+
+	cfg := testConfig(t, auth.URL, "http://identity.local")
+	cfg.HTTPClient = injected
+
+	p, err := New(cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, 30*time.Second, p.httpClient.Timeout)
+	assert.Same(t, transport, p.httpClient.Transport, "the copy must keep the caller's transport")
+	assert.NotSame(t, injected, p.httpClient, "the publisher must use a copy, never the caller's client")
+	assert.Zero(t, injected.Timeout, "the caller's client must not be mutated")
+	assert.Nil(t, injected.CheckRedirect, "the caller's client must not be mutated")
 }

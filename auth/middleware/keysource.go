@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/LerianStudio/lib-auth/v5/auth/endpoint"
 	"github.com/LerianStudio/lib-auth/v5/auth/obs"
 	observability "github.com/LerianStudio/lib-observability/v4"
 	"github.com/LerianStudio/lib-observability/v4/metrics"
@@ -106,6 +107,9 @@ func (s *staticKeySource) Refresh(_ context.Context) error { return nil }
 
 func (s *staticKeySource) Close() error { return nil }
 
+// componentJWKSKeySource names the JWKS source in an *endpoint.InsecureError.
+const componentJWKSKeySource = "jwks key source"
+
 // JWKSConfig configures a dynamic JWKS-backed KeySource.
 type JWKSConfig struct {
 	// URL is the JWKS-JSON endpoint (e.g. Casdoor's /.well-known/jwks for PAM's
@@ -116,9 +120,16 @@ type JWKSConfig struct {
 	// AllowInsecureURL permits a non-HTTPS, non-loopback JWKS URL. The JWKS is the
 	// trust root for token verification, so plaintext is rejected by default. Set true
 	// ONLY for a deliberate case — e.g. a ClusterIP where a service mesh terminates
-	// mTLS out-of-band. Loopback hosts (localhost, 127.0.0.0/8, ::1) are always allowed
-	// without this flag.
+	// mTLS out-of-band. Loopback hosts (localhost, 127.0.0.0/8, ::1) are allowed
+	// without this flag unless RequireHTTPS is set.
 	AllowInsecureURL bool
+
+	// RequireHTTPS accepts an https URL only, in any topology: loopback http is
+	// refused too, and so is every redirect hop that is not https. A refused URL is
+	// an *endpoint.InsecureError (matching endpoint.ErrInsecure) at construction.
+	// It is the consumer's posture decision, never read from the environment, and
+	// contradicts AllowInsecureURL: setting both is a construction error.
+	RequireHTTPS bool
 
 	// RefreshInterval is the short background TTL for proactive re-fetch. Defaults
 	// to defaultJWKSRefreshInterval when zero.
@@ -164,6 +175,10 @@ type jwksKeySource struct {
 	// redirect hop in fetch — an https JWKS URL must not be bounced to a plaintext
 	// non-loopback target whose response would then be cached as a trust root (CWE-319).
 	allowInsecure bool
+
+	// requireHTTPS mirrors JWKSConfig.RequireHTTPS and, like allowInsecure, is
+	// re-applied to every redirect hop.
+	requireHTTPS bool
 
 	// warnInsecure is set when the URL is plaintext http against a non-loopback host
 	// with AllowInsecureURL opted in. It drives a loud WARN at construction AND on
@@ -271,7 +286,11 @@ func newJWKSKeySource(cfg JWKSConfig) (*jwksKeySource, error) {
 	// default (fail-closed). Loopback http is carved out (local/dev reaches Casdoor over
 	// http); a non-loopback plaintext URL requires an explicit AllowInsecureURL opt-in
 	// and then WARNs loudly.
-	warnInsecure, err := validateJWKSURL(cfg.URL, cfg.AllowInsecureURL)
+	if cfg.RequireHTTPS && cfg.AllowInsecureURL {
+		return nil, errors.New("jwks config: RequireHTTPS and AllowInsecureURL contradict each other; set at most one")
+	}
+
+	warnInsecure, err := validateJWKSURL(cfg.URL, cfg.AllowInsecureURL, cfg.RequireHTTPS)
 	if err != nil {
 		return nil, err
 	}
@@ -289,6 +308,7 @@ func newJWKSKeySource(cfg JWKSConfig) (*jwksKeySource, error) {
 		logger:          logger,
 		warnInsecure:    warnInsecure,
 		allowInsecure:   cfg.AllowInsecureURL,
+		requireHTTPS:    cfg.RequireHTTPS,
 		now:             time.Now,
 	}
 
@@ -309,8 +329,14 @@ func newJWKSKeySource(cfg JWKSConfig) (*jwksKeySource, error) {
 // It rejects a parse error, an empty scheme, or any scheme other than http/https. An
 // https URL is fine; an http URL is fine only for a loopback host, or for a non-loopback
 // host when allowInsecure is true (then warn == true). It performs a PURE literal host
-// check — never a DNS lookup — so it stays non-blocking.
-func validateJWKSURL(raw string, allowInsecure bool) (warn bool, err error) {
+// check — never a DNS lookup — so it stays non-blocking. With requireHTTPS, only an
+// https URL with a host passes, loopback included, and the refusal is an
+// *endpoint.InsecureError.
+func validateJWKSURL(raw string, allowInsecure, requireHTTPS bool) (warn bool, err error) {
+	if requireHTTPS {
+		return false, endpoint.RequireHTTPS(componentJWKSKeySource, raw)
+	}
+
 	u, err := url.Parse(raw)
 	if err != nil {
 		return false, fmt.Errorf("invalid jwks url %q: %w", raw, err)
@@ -356,6 +382,11 @@ func isLoopbackHost(host string) bool {
 
 	return false
 }
+
+// RequiresHTTPS reports whether the source was built with JWKSConfig.RequireHTTPS,
+// so a client that requires https can refuse a source that would fetch its trust
+// root over plaintext. It is fixed at construction.
+func (s *jwksKeySource) RequiresHTTPS() bool { return s.requireHTTPS }
 
 // Keys returns the currently cached verification keys without ever touching the
 // network (serve-from-cache, serve-stale). May be empty before the first
@@ -578,7 +609,7 @@ func (s *jwksKeySource) fetch(ctx context.Context) ([]*rsa.PublicKey, map[string
 
 		// Re-run the construction-time policy on the redirect target. A non-nil error
 		// aborts the redirect (the hop is NOT followed); the warn bool is irrelevant here.
-		if _, verr := validateJWKSURL(hopReq.URL.String(), s.allowInsecure); verr != nil {
+		if _, verr := validateJWKSURL(hopReq.URL.String(), s.allowInsecure, s.requireHTTPS); verr != nil {
 			return fmt.Errorf("jwks redirect to a policy-violating target blocked: %w", verr)
 		}
 

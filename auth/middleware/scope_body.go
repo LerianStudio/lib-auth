@@ -3,8 +3,6 @@ package middleware
 import (
 	"bytes"
 	"encoding/json"
-
-	"github.com/gofiber/fiber/v3"
 )
 
 // FromBody reads a field of the JSON request body. Declare it like any other
@@ -110,8 +108,8 @@ func (p *bodyPlan) questions(body []byte, readings requestValues) ([]map[string]
 // from the JSON body — one question per combination of values when a carrier
 // names several; and otherwise one set per question the body makes, each
 // carrying those other values.
-func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues) ([]map[string]string, *errBodyScope) {
-	readings = readForm(c, s.dims, readings)
+func (s ScopeDeclaration) questions(req requestView, readings requestValues) ([]map[string]string, *errBodyScope) {
+	readings = readForm(req, s.dims, readings)
 	if readings.problem != nil {
 		return nil, readings.problem
 	}
@@ -129,5 +127,10 @@ func (s ScopeDeclaration) questions(c fiber.Ctx, readings requestValues) ([]map[
 		return set.questions, nil
 	}
 
-	return s.body.questions(c.Body(), readings)
+	body, unreadable := req.body()
+	if unreadable != nil {
+		return nil, unreadable
+	}
+
+	return s.body.questions(body, readings)
 }

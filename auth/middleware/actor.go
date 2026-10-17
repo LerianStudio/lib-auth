@@ -4,8 +4,6 @@ import (
 	"strings"
 
 	"github.com/LerianStudio/lib-commons/v7/commons"
-	"github.com/LerianStudio/lib-commons/v7/commons/net/http/actor"
-	"github.com/gofiber/fiber/v3"
 )
 
 // A partner's request to one product may make that product call another Lerian
@@ -29,31 +27,21 @@ const (
 	reasonActorInvalid   = "actor_invalid"
 )
 
-// publishActor stores the actor of an authorized request on its context, so
-// the service's outbound clients relay it (see actor.NewTransport). A
-// partner-bound credential is its own actor: its raw bearer. An application
+// actorToPublish is the actor an authorized request's context carries, so the
+// service's outbound clients relay it (see actor.NewTransport), or "" for none.
+// A partner-bound credential is its own actor: its raw bearer. An application
 // caller relaying a partner passes on the actor it relayed, which the access
 // manager has just decided along with the caller, so the next hop can relay it
 // again. A user, or an application relaying no one, leaves nothing there.
-func publishActor(c fiber.Ctx, caller authzCaller, accessToken, relayed string) {
-	token := accessToken
-
+func actorToPublish(caller authzCaller, accessToken, relayed string) string {
 	switch {
 	case caller.partner != "":
+		return accessToken
 	case caller.relays(relayed):
-		token = relayed
+		return relayed
 	default:
-		return
+		return ""
 	}
-
-	c.SetContext(actor.ContextWithToken(c.Context(), token))
-}
-
-// relayedActor is the actor the request carries in actor.HeaderName, verbatim,
-// or "" when it carries none (the HTTP layer already strips a value's
-// surrounding whitespace, so a blank header reads as none).
-func relayedActor(c fiber.Ctx) string {
-	return c.Get(actor.HeaderName)
 }
 
 // forwardsActor reports whether a relayed actor is part of the caller's

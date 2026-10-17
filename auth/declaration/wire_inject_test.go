@@ -22,10 +22,10 @@ func countAuthClientBuilds(t *testing.T) *int {
 	orig := newAuthClient
 	builds := 0
 
-	newAuthClient = func(address string, enabled bool, logger obs.Logger) *middleware.AuthClient {
+	newAuthClient = func(address string, enabled bool, logger obs.Logger, opts ...middleware.ClientOption) (*middleware.AuthClient, error) {
 		builds++
 
-		return orig(address, enabled, logger)
+		return orig(address, enabled, logger, opts...)
 	}
 
 	t.Cleanup(func() { newAuthClient = orig })
